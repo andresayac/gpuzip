@@ -16,6 +16,10 @@ build/
 /research/**/*.exp
 /research/**/*.lib
 /research/**/*.pdb
+/research/**/build.log
+/research/**/target/
+/research/gpu-zstd/zstd.lib
+/research/gpu-zstd/zstd_dir.txt
 
 # gpuinflate builds (build.cmd)
 /gpuinflate/*.dll

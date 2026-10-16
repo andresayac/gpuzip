@@ -1,0 +1,12 @@
+[package]
+name = "zseq"
+version = "0.1.0"
+edition = "2024"
+description = "Turns the GPU match finder's candidates into a standard zstd file through libzstd's ZSTD_compressSequences, and compares the size with zstd's own levels"
+
+[dependencies]
+zstd-sys = { version = "2", features = ["experimental"] }
+
+[profile.release]
+opt-level = 3
+debug = 1
