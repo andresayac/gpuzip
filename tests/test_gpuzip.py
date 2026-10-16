@@ -245,6 +245,85 @@ def main():
                   f"{intact} called intact, {unverified} unverifiable, {len(t.get('partial', []))} partial, "
                   f"{rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}")
 
+    # rescue of ZIPs (Rust only): without its central directory (cut, or zeroed), and with a zeroed
+    # stretch inside; every entry called intact must be identical, the damage reported
+    if os.environ.get("GPUZIP_BIN"):
+        src_zip = archives["Python zipfile level 9"]
+        data = open(src_zip, "rb").read()
+        files = {k: v for k, v in expected.items() if v[0] != "dir"}
+        cut = int(len(data) * 0.7)
+        with zipfile.ZipFile(src_zip) as z:  # entries whole before the cut: what a cut file can give back
+            before_cut = sum(1 for i in z.infolist() if not i.is_dir()
+                             and i.header_offset + 30 + len(i.filename.encode()) + len(i.extra) + i.compress_size <= cut)
+        cases = {
+            "cut at 70%": (data[:cut], before_cut),
+            "directory zeroed": (data[: int(len(data) * 0.97)] + bytes(len(data) - int(len(data) * 0.97)), int(0.6 * len(files))),
+            "4 KB zeroed inside": (data[: len(data) // 2] + bytes(4096) + data[len(data) // 2 + 4096:], int(0.6 * len(files))),
+        }
+        for label, (damaged, expect_intact) in cases.items():
+            bad = os.path.join(work, "damaged.zip")
+            open(bad, "wb").write(damaged)
+            out = os.path.join(work, "rescued_zip")
+            shutil.rmtree(out, ignore_errors=True)
+            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                rep = {}
+            got = tree(out)
+            status = {e["name"]: e["status"] for e in rep.get("entries", [])}
+            identical = sum(1 for k, v in files.items() if k in got and got[k][0] == v[0])
+            intact_wrong = [k for k, v in files.items() if status.get(k) == "intact" and not (k in got and got[k][0] == v[0])]
+            counts = rep.get("counts", {})
+            ok = r.returncode == 2 and not intact_wrong and identical >= expect_intact and counts.get("intact", 0) >= expect_intact
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} rescue of a zip, {label}: {identical} of {len(files)} identical, "
+                  f"{counts.get('intact', '?')} intact, {counts.get('partial', '?')} partial, {counts.get('unverified', '?')} unverified, "
+                  f"directory {'read' if rep.get('directory_ok') else 'lost'}, exit {r.returncode}"
+                  + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
+
+        # a docx (a ZIP of XML parts) with zeros inside its document: the text comes back, the
+        # repaired part is well-formed XML, and the rebuilt document opens
+        import xml.etree.ElementTree as ET
+        paragraphs = [f"Paragraph {i} of the test document, with some words to find again." for i in range(200)]
+        body = "".join(f'<w:p><w:r><w:t xml:space="preserve">{p}</w:t></w:r></w:p>' for p in paragraphs)
+        docx = os.path.join(work, "doc.docx")
+        with zipfile.ZipFile(docx, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                       '<Default Extension="xml" ContentType="application/xml"/></Types>')
+            z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
+            z.writestr("word/document.xml", '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                       f'<w:body>{body}</w:body></w:document>')
+        d = bytearray(open(docx, "rb").read())
+        with zipfile.ZipFile(docx) as z:
+            info = z.getinfo("word/document.xml")
+            start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+            d[start + info.compress_size // 2:start + info.compress_size // 2 + 256] = bytes(256)
+        bad = os.path.join(work, "damaged.docx")
+        open(bad, "wb").write(bytes(d))
+        out = os.path.join(work, "rescued_docx")
+        r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        office = rep.get("office") or {}
+        text = open(office["text_file"], encoding="utf-8").read() if office.get("text_file") else ""
+        found = sum(1 for p in paragraphs if p in text)
+        well_formed = rebuilt_ok = False
+        try:
+            ET.parse(os.path.join(out, "word", "document.xml"))
+            well_formed = True
+            with zipfile.ZipFile(office["rebuilt"]) as z:
+                ET.fromstring(z.read("word/document.xml"))
+                rebuilt_ok = True
+        except Exception:  # noqa: BLE001
+            pass
+        ok = r.returncode == 2 and found >= 0.3 * len(paragraphs) and well_formed and rebuilt_ok
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of a docx with zeros in its document: {found} of {len(paragraphs)} paragraphs in the text, "
+              f"document.xml well-formed {well_formed}, rebuilt document opens {rebuilt_ok}, exit {r.returncode}")
+
     # zip slip: an entry that tries to write outside the output folder must be refused
     evil = os.path.join(work, "zipslip.zip")
     with zipfile.ZipFile(evil, "w") as z:

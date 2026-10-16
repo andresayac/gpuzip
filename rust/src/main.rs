@@ -9,6 +9,7 @@ mod inflate;
 mod rescue;
 mod sevenzip;
 mod zip;
+mod ziprescue;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use extract::{Count, Outcome};
@@ -438,10 +439,6 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
     };
     let map = unsafe { memmap2::Mmap::map(&file) };
     let data: &[u8] = map.as_deref().unwrap_or(&[]);
-    if zip::find_eocd(data).is_some() {
-        eprintln!("{path}: a ZIP file; rescue reads gzip files (.gz, .tar.gz, .tgz) for now");
-        return 1;
-    }
     let lib = match rescue::get() {
         Ok(l) => l,
         Err(e) => {
@@ -449,6 +446,9 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
             return 1;
         }
     };
+    if ziprescue::is_office_name(&archive) || (!gz::is_gzip(data) && ziprescue::looks_like_zip(data)) {
+        return rescue_zip_file(&archive, data, lib, out_root, fill, opts);
+    }
     let tar = gz::is_tar_name(&archive);
     let t0 = std::time::Instant::now();
     let mut failed: Vec<(String, String)> = Vec::new();
@@ -612,11 +612,99 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
     if failed.is_empty() && clean { 0 } else { 2 }
 }
 
+/// `gpuzip rescue` on a ZIP or an Office document
+fn rescue_zip_file(archive: &str, data: &[u8], lib: &rescue::Rescue, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
+    let t0 = std::time::Instant::now();
+    if let Err(e) = std::fs::create_dir_all(&out_root) {
+        eprintln!("{}: {e}", out_root.display());
+        return 1;
+    }
+    // Office parts are kept in memory to rebuild the document; a docx starts with its content types
+    let keep_parts = ziprescue::is_office_name(archive) || data.len() > 50 && &data[30..30 + 19.min(data.len() - 30)] == b"[Content_Types].xml";
+    let o = ziprescue::rescue_zip(data, lib, Some(&out_root), fill, keep_parts);
+    let secs = t0.elapsed().as_secs_f64();
+    use ziprescue::Status;
+    let count = |s: Status| o.entries.iter().filter(|e| e.status == s).count() as u64;
+    let (intact, partial, unverified, lost, unsupported) =
+        (count(Status::Intact), count(Status::Partial), count(Status::Unverified), count(Status::Lost), count(Status::Unsupported));
+    let from_scan = o.entries.iter().filter(|e| e.from_scan).count();
+    let clean = o.cd_ok && o.entries.iter().all(|e| e.status == Status::Intact) && o.failed.is_empty();
+    let fmt = o.office.as_ref().map(|f| f.kind.clone()).unwrap_or_else(|| "zip".into());
+    let name = Path::new(archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if opts.json {
+        let status_name = |s: Status| match s {
+            Status::Intact => "intact",
+            Status::Partial => "partial",
+            Status::Unverified => "unverified",
+            Status::Lost => "lost",
+            Status::Unsupported => "unsupported",
+        };
+        let v = json!({
+            "archive": archive, "command": "rescue", "format": fmt, "clean": clean,
+            "directory_ok": o.cd_ok, "directory_error": o.cd_error, "scanned_headers": o.scanned_headers, "from_scan": from_scan,
+            "counts": {"intact": intact, "partial": partial, "unverified": unverified, "lost": lost, "unsupported": unsupported},
+            "entries": o.entries.iter().map(|e| json!({"name": e.name, "status": status_name(e.status), "detail": e.detail, "size": e.size, "from_scan": e.from_scan})).collect::<Vec<_>>(),
+            "office": o.office.as_ref().map(|f| json!({
+                "kind": f.kind, "repaired_parts": f.repaired_parts, "text_file": f.text_file.as_ref().map(|p| p.display().to_string()),
+                "text_chars": f.text_chars, "rebuilt": f.rebuilt.as_ref().map(|p| p.display().to_string()),
+            })),
+            "notes": o.notes, "failed": o.failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
+            "seconds": (secs * 1e4).round() / 1e4, "implementation": "rust",
+        });
+        println!("{}", ascii_json(&v));
+        return if clean { 0 } else { 2 };
+    }
+    if opts.quiet && clean {
+        return 0;
+    }
+    println!(
+        "Rescued {name} in {secs:.2} s: {} files intact, {} partial, {} unverified, {} lost, {} not readable here · directory {}",
+        commas(intact),
+        commas(partial),
+        commas(unverified),
+        commas(lost),
+        commas(unsupported),
+        if o.cd_ok {
+            format!("read{}", if from_scan > 0 { format!(", plus {from_scan} entries it did not list") } else { String::new() })
+        } else {
+            format!("lost: {} entries found by scanning", o.scanned_headers)
+        }
+    );
+    for (label, status) in [("Partial", Status::Partial), ("Unverified", Status::Unverified), ("Lost", Status::Lost), ("Not readable here", Status::Unsupported)] {
+        let list: Vec<&ziprescue::Recovered> = o.entries.iter().filter(|e| e.status == status).collect();
+        for e in list.iter().take(10) {
+            println!("  {label}: {}{}", e.name, if e.detail.is_empty() { String::new() } else { format!(" ({})", e.detail) });
+        }
+        if list.len() > 10 {
+            println!("  ... and {} more {}", list.len() - 10, label.to_lowercase());
+        }
+    }
+    if let Some(f) = &o.office {
+        if !f.repaired_parts.is_empty() {
+            println!("  Office: {} damaged XML part{} made well-formed again: {}", f.repaired_parts.len(), if f.repaired_parts.len() == 1 { "" } else { "s" }, f.repaired_parts.join(", "));
+        }
+        if let Some(t) = &f.text_file {
+            println!("  Office: text recovered to {} ({} characters)", t.display(), commas(f.text_chars as u64));
+        }
+        if let Some(r) = &f.rebuilt {
+            println!("  Office: document rebuilt from the recovered parts: {}", r.display());
+        }
+    }
+    for n in &o.notes {
+        println!("  Note: {n}");
+    }
+    for (n, reason) in o.failed.iter().take(20) {
+        println!("  Failed: {n}: {reason}");
+    }
+    if clean { 0 } else { 2 }
+}
+
 fn run_rescue(patterns: &[String], output: Option<PathBuf>, fill: u8, opts: &Opts) -> i32 {
     let archives = expand(patterns);
     let mut rc = 0;
     for path in &archives {
-        let plain_gz = !gz::is_tar_name(path);
+        let lower = path.to_lowercase();
+        let plain_gz = lower.ends_with(".gz") && !gz::is_tar_name(path);
         let dir = match &output {
             Some(o) if plain_gz => o.clone(),
             None if plain_gz => PathBuf::from("."),

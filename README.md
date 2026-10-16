@@ -117,8 +117,10 @@ are refused.
 
 ### Rescue
 
-`gpuzip rescue` reads a damaged `.gz` or `.tar.gz`: an interrupted download, a bad sector, a
-flipped bit. gzip stops at the first damaged byte and loses everything after it; worse, Deflate
+`gpuzip rescue` reads a damaged `.gz`, `.tar.gz`, `.zip`, or an Office document (`.docx`,
+`.xlsx`, `.pptx` are ZIPs): an interrupted download, a bad sector, a flipped bit.
+
+**gzip.** gzip stops at the first damaged byte and loses everything after it; worse, Deflate
 often decodes damage as plausible garbage that only the trailer's CRC reveals, with no
 location. gzrescue (`gpuinflate/rescue.cpp`, the method and measurements in
 [research/recovery](research/recovery)) finds every block header in the file with the finder
@@ -135,10 +137,28 @@ Every file is classified: intact (every byte exact), possibly damaged (inside a 
 behind a repaired header), partial (unknown bytes or cut short). When the checksum fails and no
 block can be blamed (damage inside raw stored data, such as an already compressed file, or a
 flipped bit that kept the decoder in step), no file is called intact: they are all "unverified",
-because any of them may be the one. On a 128 MB tar of source code
-with a 4 KB stretch zeroed, 7,149 of 7,411 files come back intact (and identical to the
-originals, checked), 23 possibly damaged, 45 partial, 194 lost, where gzip gives the first 42% of
-the archive and nothing else. Exit code 2 says something was damaged or lost.
+because any of them may be the one. On a 128 MB tar of source code with a 4 KB stretch zeroed,
+7,398 of 7,411 files come back intact (and identical to the originals, checked), 3 possibly
+damaged, 2 partial, 8 lost, where gzip gives the first 42% of the archive and nothing else.
+
+**ZIP.** A ZIP names every entry twice, in a local header before its data and in the central
+directory at the end, and gives each its own CRC. gpuzip reads the directory if it can and scans
+the whole file for local headers (skipping those of ZIPs stored inside entries, such as wheels),
+so entries the directory does not vouch for, or that an interrupted download cut off from it,
+are found too; every entry is recovered, stored ones by copying, Deflate ones through gzrescue,
+and its own CRC says whether it is intact. A destroyed local header is worked around with the
+directory's metadata and the CRC. On a 17 MB ZIP of 3,447 Python source files: with the
+directory zeroed, 3,390 entries intact and 1 cut short; with a 4 KB stretch zeroed inside,
+3,436 intact and the 4 entries under the zeros partial; with a header destroyed, every entry
+intact.
+
+**Office documents.** After the ZIP is recovered, each damaged XML part is made well-formed
+again (garbage, broken tags and undeclared names dropped, open elements closed), the text is
+extracted to `recovered-text.txt`, and a document is rebuilt from the recovered parts
+(`recovered.docx`, `.xlsx` or `.pptx`) that an Office application can open. What was inside the
+damaged stretch of the XML is gone; what came before and after it is kept.
+
+Exit code 2 says something was damaged or lost.
 
 Implementation notes learned the hard way:
 
@@ -236,6 +256,7 @@ rust/           the Rust version
   src/gz.rs         gzip members, trailers, tar extraction from a pipe
   src/inflate.rs    gpuinflate.dll, loaded at run time
   src/rescue.rs     gzrescue.dll, loaded at run time; tar extraction that skips destroyed headers
+  src/ziprescue.rs  damaged ZIPs: local-header scan, per-entry recovery; Office XML repair and rebuild
   src/main.rs       the command line, reports and doctor
 python/         the Python version (gpuzip.py, pyproject.toml)
 tests/          correctness tests for both versions (ZIP, gzip, tar.gz, damaged files, zip slip)

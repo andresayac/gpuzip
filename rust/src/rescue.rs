@@ -57,6 +57,8 @@ pub struct Stats {
     pub length_off: i64,
     pub truncated: i32,
     pub header_damaged: i32,
+    /// byte after the last decoded block (a ZIP's data descriptor follows it)
+    pub input_end: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +96,7 @@ pub struct Rescue {
     _lib: Library,
     pub path: String,
     rescue: unsafe extern "C" fn(*const u8, u64, *const Options, Option<Sink>, *mut c_void, *mut *mut c_void) -> i32,
+    rescue_raw: unsafe extern "C" fn(*const u8, u64, u64, i32, u32, *const Options, Option<Sink>, *mut c_void, *mut *mut c_void) -> i32,
     stats: unsafe extern "C" fn(*const c_void) -> *const Stats,
     pieces: unsafe extern "C" fn(*const c_void, *mut *const PieceRaw) -> u32,
     notes: unsafe extern "C" fn(*const c_void, *mut *const *const c_char) -> u32,
@@ -154,6 +157,7 @@ impl Rescue {
             }
             Ok(Rescue {
                 rescue: sym(&lib, b"gr_rescue\0")?,
+                rescue_raw: sym(&lib, b"gr_rescue_raw\0")?,
                 stats: sym(&lib, b"gr_result_stats\0")?,
                 pieces: sym(&lib, b"gr_result_pieces\0")?,
                 notes: sym(&lib, b"gr_result_notes\0")?,
@@ -166,12 +170,37 @@ impl Rescue {
 
     /// Recover the gzip data in `input`, passing the output in order to `sink` with its mask
     /// (EXACT, SUSPECT or UNKNOWN per byte); `sink` returns false to stop.
-    pub fn rescue(&self, input: &[u8], fill: u8, mut sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
+    pub fn rescue(&self, input: &[u8], fill: u8, sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
+        self.run(input, None, fill, sink)
+    }
+
+    /// The same for a raw Deflate stream (a ZIP entry) that starts at `input[0]`; `expected`:
+    /// the original's size and, if known, its CRC-32, standing in for the gzip trailer.
+    pub fn rescue_raw(&self, input: &[u8], expected: (Option<u64>, Option<u32>), fill: u8, sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
+        self.run(input, Some(expected), fill, sink)
+    }
+
+    fn run(&self, input: &[u8], raw: Option<(Option<u64>, Option<u32>)>, fill: u8, mut sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
         let opt = Options { size: std::mem::size_of::<Options>() as u32, fill };
         let mut f: SinkFn = &mut sink;
         let user = &mut f as *mut SinkFn as *mut c_void;
         let mut res: *mut c_void = std::ptr::null_mut();
-        let rc = unsafe { (self.rescue)(input.as_ptr(), input.len() as u64, &opt, Some(trampoline), user, &mut res) };
+        let rc = unsafe {
+            match raw {
+                None => (self.rescue)(input.as_ptr(), input.len() as u64, &opt, Some(trampoline), user, &mut res),
+                Some((size, crc)) => (self.rescue_raw)(
+                    input.as_ptr(),
+                    input.len() as u64,
+                    size.unwrap_or(u64::MAX),
+                    crc.is_some() as i32,
+                    crc.unwrap_or(0),
+                    &opt,
+                    Some(trampoline),
+                    user,
+                    &mut res,
+                ),
+            }
+        };
         if res.is_null() {
             return Err(match rc {
                 1 => "no Deflate data could be recognised".to_string(),

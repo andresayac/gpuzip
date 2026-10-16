@@ -59,6 +59,7 @@ typedef struct {
     int64_t length_off; /* output length minus the trailer's, when every block stayed in step; else 0 */
     int32_t truncated;  /* the file ends inside the stream */
     int32_t header_damaged;
+    uint64_t input_end; /* byte after the last decoded block of the first member (a ZIP's data descriptor follows it) */
 } gr_stats;
 
 /* Receives the output in order. Return nonzero to stop. */
@@ -71,6 +72,13 @@ GR_API uint32_t gr_abi_version(void);
 /* Recovers the gzip data in in[0..size) into the sink. On success (or GR_ERR_ABORTED) *result
  * holds the statistics, every piece and the notes; free it with gr_free. */
 GR_API int gr_rescue(const uint8_t* in, uint64_t size, const gr_options* opt, gr_sink sink, void* user, gr_result** result);
+
+/* The same for a raw Deflate stream (a ZIP entry): the stream starts at in[0]; in may run on
+ * past it (a data descriptor, when the compressed size is unknown). expected_size is the
+ * uncompressed size, or UINT64_MAX when unknown; has_crc says whether expected_crc holds the
+ * CRC-32 of the original. They stand in for the gzip trailer. */
+GR_API int gr_rescue_raw(const uint8_t* in, uint64_t size, uint64_t expected_size, int has_crc, uint32_t expected_crc,
+                         const gr_options* opt, gr_sink sink, void* user, gr_result** result);
 GR_API const gr_stats* gr_result_stats(const gr_result* r);
 GR_API uint32_t gr_result_pieces(const gr_result* r, const gr_piece** pieces);
 GR_API uint32_t gr_result_notes(const gr_result* r, const char* const** notes);

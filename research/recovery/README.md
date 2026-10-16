@@ -110,11 +110,42 @@ damaged archive:
   amount), and the chain of members ending there is walked back, so only the destroyed stretch
   is skipped.
 
-On the zeroed-sector case above, `gpuzip rescue` gives back 7,149 of 7,411 files intact (every
-one checked identical to the original by `check_extract.py`), 23 possibly damaged, 45 partial
-and 194 lost, in 6.7 s; on the two-damage case 6,937 intact, 25 possibly damaged, 163 partial,
-286 lost. `tests/test_gpuzip.py` damages a tar.gz and checks the same properties on the Rust
-build.
+On the zeroed-sector case above, `gpuzip rescue` gives back 7,398 of 7,411 files intact (every
+one checked identical to the original by `check_extract.py`), 3 possibly damaged, 2 partial and
+8 lost, in about 7 s. (An earlier version gave 7,149: the window of trusted output was one block
+deep, so with small blocks references that reached further back were marked unknown.)
+`tests/test_gpuzip.py` damages a tar.gz and checks the same properties on the Rust build.
+
+## ZIP and Office documents
+
+A ZIP gives us more to work with than gzip: every entry has its own CRC, and its name and sizes
+are stored twice (local header, central directory). `rust/src/ziprescue.rs` reads the
+directory when it can, scans the file for local headers (`PK\3\4`; headers of a ZIP stored inside
+an entry, such as a wheel, are skipped by tracking the data extents), and recovers each entry:
+stored ones by copying, Deflate ones through `gr_rescue_raw`, the library's entry point for a
+raw stream with a known size and CRC (they stand in for the gzip trailer). A destroyed local
+header is worked around by trying the data at the offsets the directory implies and keeping the
+one whose CRC matches. Entries are classified intact (CRC verified), partial (flagged blocks,
+unknown bytes, cut short), unverified (in step but CRC mismatch, or no CRC), lost, unsupported.
+
+`make_zip_cases.py` builds a 17 MB ZIP of 3,447 Python source files and a 300-paragraph docx
+with six kinds of damage; `check_zip.py` compares the result with the original:
+
+| Damage | intact | partial | lost | note |
+|---|---|---|---|---|
+| cut at 70% (no directory) | 2,041 | 7 | 1,398 beyond the cut | every entry before the cut, from the local headers |
+| directory zeroed (last 3%) | 3,390 | 1 | 49 under the zeros | |
+| 4 KB zeroed inside | 3,436 | 4 (the entries under the zeros) | 0 | directory read |
+| a local header zeroed | 3,440 | 0 | 0 | the entry found by its CRC |
+| docx: 512 zero bytes in `document.xml`'s data | 3 | 1 unverified | | 141 of 300 paragraphs in the text; repaired XML well-formed; rebuilt document opens |
+| docx: cut before the directory | 4 | 0 | | all 300 paragraphs; rebuilt document opens |
+
+Every entry called intact was identical to the original in every case. For an Office document
+the damaged XML parts are made well-formed again (`repair_xml`: garbage and broken tags dropped,
+tags with undeclared namespace prefixes dropped, entities completed, open elements closed), the
+text is extracted (`w:t`, `a:t`, `t`), and a document is rebuilt from the recovered parts, stored,
+so an Office application can open it. A docx's `document.xml` is usually one Deflate block, so
+damage inside it costs the rest of that block's text; the text before it survives.
 
 ## What is not done
 
@@ -139,6 +170,9 @@ python measure.py <dir>                                         (needs numpy)
 gpuzip rescue <damaged.tar.gz> -o <dir> --json > r.json         (the Rust build, with gzrescue.dll next to it)
 python check_extract.py <original.tar> <dir> r.json             (every file called intact must be identical)
 python repro_test.py <work-dir> [0.4]                           (the test suite's damaged tar.gz, with the report and every differing file)
+python make_zip_cases.py <dir> [48]                             (a ZIP of Python's library and a docx, six damaged copies)
+gpuzip rescue <dir>\lib.nocd.zip -o <out> --json > r.json
+python check_zip.py <dir>\lib.zip <out> r.json                  (every entry called intact must be identical; the docx checks)
 ```
 
 One more lesson from the test suite: damage inside a stored block (zlib keeps incompressible

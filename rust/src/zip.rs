@@ -122,6 +122,14 @@ pub fn dos_time(date: u16, time: u16) -> Option<SystemTime> {
 
 /// Every entry of the archive, each with its route.
 pub fn read_entries(data: &[u8]) -> Result<Vec<Entry>, String> {
+    let mut entries = read_central_directory(data)?;
+    plan(data, &mut entries)?;
+    Ok(entries)
+}
+
+/// The central directory alone: names, sizes, CRCs and where each local header is
+/// (`data_offset`), without looking at the local headers. For the rescue of damaged files.
+pub fn read_central_directory(data: &[u8]) -> Result<Vec<Entry>, String> {
     let eocd = find_eocd(data).ok_or("not a ZIP file")?;
     let mut size_cd = u32le(data, eocd + 12) as u64;
     let mut offset_cd = u32le(data, eocd + 16) as u64;
@@ -191,7 +199,6 @@ pub fn read_entries(data: &[u8]) -> Result<Vec<Entry>, String> {
         });
         p += 46 + nlen + xlen + clen;
     }
-    plan(data, &mut entries)?;
     Ok(entries)
 }
 

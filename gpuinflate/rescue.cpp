@@ -50,7 +50,8 @@ struct Piece {
 
 struct Member {
     size_t first_piece = 0, last_piece = 0;
-    bool trailer = false;
+    bool trailer = false;  // the size (and perhaps the CRC) of the original is known
+    bool has_crc = false, size_known = false;
     uint32_t crc = 0, isize = 0;
     int crc_check = -1;  // 1 ok, 0 mismatch, -1 not checkable
 };
@@ -60,7 +61,14 @@ struct Outcome {
     std::vector<Member> members;
     std::vector<std::string> notes;
     bool truncated = false;
+    uint64_t input_end = 0;  // byte after the first member's last block
 };
+
+uint64_t produced_so_far(const Outcome& o) {
+    uint64_t n = 0;
+    for (const Piece& p : o.pieces) n += p.bytes.size();
+    return n;
+}
 
 uint64_t bits64(const uint8_t* in, uint64_t bit) {
     uint64_t lo, hi;
@@ -216,21 +224,46 @@ struct Rescuer {
         return 1;
     }
 
+    // the trusted output grows by a piece; the window keeps its last 32 KB (several pieces, when
+    // blocks are small)
     void set_window(const Piece& p) {
-        size_t n = std::min<size_t>(p.bytes.size(), gi::WINDOW);
-        win_bytes.assign(p.bytes.end() - n, p.bytes.end());
-        win_known.assign(p.known.end() - n, p.known.end());
+        win_bytes.insert(win_bytes.end(), p.bytes.begin(), p.bytes.end());
+        win_known.insert(win_known.end(), p.known.begin(), p.known.end());
+        if (win_bytes.size() > gi::WINDOW) {
+            win_bytes.erase(win_bytes.begin(), win_bytes.end() - gi::WINDOW);
+            win_known.erase(win_known.begin(), win_known.end() - gi::WINDOW);
+        }
         win_valid = true;
     }
 
-    // One pass over the file. `forced`: start bits of pieces known to be damaged from an earlier pass.
-    Outcome rescue(const std::vector<gi::Start>& headers, uint64_t hlen, const std::set<uint64_t>& forced) {
-        Outcome o;
+    void drop_window() {
+        win_bytes.clear();
+        win_known.clear();
         win_valid = false;
-        bool stream_start = hlen != 0;
-        if (!hlen) o.notes.push_back("the gzip header is damaged: decoding starts at the first block header found");
-        gi::Start cur = hlen ? gi::Start{hlen * 8, hlen * 8, gi::AT_BLOCK, -1} : headers[0];
+    }
+
+    // One pass over the file. `forced`: start bits of pieces known to be damaged from an earlier
+    // pass. gzip: the stream starts after a member header of hlen bytes (0: damaged, start at
+    // the first block header found) and ends with a trailer, more members may follow. Raw: the
+    // stream starts at bit 0; the caller knows its size and CRC, if anyone does.
+    Outcome rescue(const std::vector<gi::Start>& headers, bool gzip, uint64_t hlen, const std::set<uint64_t>& forced,
+                   uint64_t expected_size = UINT64_MAX, bool has_crc = false, uint32_t expected_crc = 0) {
+        Outcome o;
+        drop_window();
+        bool stream_start = !gzip || hlen != 0;
+        if (gzip && !hlen) o.notes.push_back("the gzip header is damaged: decoding starts at the first block header found");
+        gi::Start cur = !gzip ? gi::Start{0, 0, gi::AT_BLOCK, -1}
+                        : hlen  ? gi::Start{hlen * 8, hlen * 8, gi::AT_BLOCK, -1}
+                                : headers[0];
         o.members.push_back({});
+        if (!gzip) {
+            Member& m = o.members.back();
+            m.trailer = expected_size != UINT64_MAX;
+            m.isize = (uint32_t)expected_size;
+            m.crc = expected_crc;
+            m.has_crc = has_crc;
+            m.size_known = expected_size != UINT64_MAX;
+        }
         size_t t0 = 0;  // headers[t0] is the first header after cur
         while (cur.bit < nbits) {
             while (t0 < headers.size() && headers[t0].bit <= cur.bit) t0++;
@@ -244,11 +277,13 @@ struct Rescuer {
                 p.suspect = true;
                 p.why = "its symbol count differs from the stream's regular one";
             }
-            uint64_t t = (r.end_bit + 7) / 8, next = t + 8;
-            uint64_t nh = next < size ? gzip_header(in, size, next) : 0;
+            uint64_t t = (r.end_bit + 7) / 8, next = gzip ? t + 8 : t;
+            uint64_t nh = gzip && next < size ? gzip_header(in, size, next) : 0;
             // a final block is believed when the file ends after its trailer, another member
-            // follows, or no block header is left: garbage decodes end in fake final blocks
-            bool real_end = next >= size || nh || t0 >= headers.size();
+            // follows, or no block header is left: garbage decodes end in fake final blocks.
+            // A raw stream is also believed when its output has the size the caller expects.
+            bool real_end = next >= size || nh || t0 >= headers.size() ||
+                            (!gzip && expected_size != UINT64_MAX && produced_so_far(o) + p.bytes.size() == expected_size);
             if (r.status == gi::OK && r.landed == 0 && !forced_bad) {  // landed on the next header: in step
                 o.pieces.push_back(std::move(p));
                 set_window(o.pieces.back());
@@ -271,16 +306,20 @@ struct Rescuer {
             if (r.status == gi::OK && r.landed < 0 && real_end && !forced_bad) {  // the member's last block
                 o.pieces.push_back(std::move(p));
                 set_window(o.pieces.back());
-                if (t + 8 <= size) {
+                if (gzip && t + 8 <= size) {
                     m.trailer = true;
+                    m.has_crc = true;
+                    m.size_known = true;
                     memcpy(&m.crc, in + t, 4);
                     memcpy(&m.isize, in + t + 4, 4);
                 }
+                if (o.input_end == 0) o.input_end = t;
+                if (!gzip) break;
                 if (nh) {
                     o.members.push_back({o.pieces.size(), o.pieces.size()});
                     cur = {(next + nh) * 8, (next + nh) * 8, gi::AT_BLOCK, -1};
                     stream_start = true;
-                    win_valid = false;
+                    drop_window();
                     continue;
                 }
                 if (next < size) o.notes.push_back(std::to_string(size - next) + " bytes after the last member were not gzip data");
@@ -300,7 +339,7 @@ struct Rescuer {
             // damaged: keep what was decoded, restart at the next header, trust no window
             p.suspect = true;
             o.pieces.push_back(std::move(p));
-            win_valid = false;
+            drop_window();
             if (t0 < headers.size()) {
                 cur = headers[t0];
                 continue;
@@ -360,7 +399,8 @@ extern "C" {
 
 GR_API uint32_t gr_abi_version(void) { return GR_ABI_VERSION; }
 
-GR_API int gr_rescue(const uint8_t* in_, uint64_t size, const gr_options* opt, gr_sink sink, void* user, gr_result** result) {
+static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t expected_size, bool has_crc, uint32_t expected_crc,
+                         const gr_options* opt, gr_sink sink, void* user, gr_result** result) {
     if (result) *result = nullptr;
     if (!in_ && size) return GR_ERR_ARG;
     uint8_t fill = opt && opt->size >= sizeof(gr_options) ? opt->fill : 0;
@@ -368,15 +408,16 @@ GR_API int gr_rescue(const uint8_t* in_, uint64_t size, const gr_options* opt, g
         std::vector<uint8_t> in(size + 64, 0);  // zero padding: the readers look ahead
         if (size) memcpy(in.data(), in_, size);
         Rescuer rs(in.data(), size);
-        uint64_t hlen = gzip_header(in.data(), size, 0);
-        std::vector<gi::Start> headers = rs.find_headers(hlen ? hlen * 8 : 80);
-        if (headers.empty() && !hlen) return GR_ERR_NO_DEFLATE;
+        uint64_t hlen = gzip ? gzip_header(in.data(), size, 0) : 0;
+        std::vector<gi::Start> headers = rs.find_headers(gzip ? (hlen ? hlen * 8 : 80) : 1);
+        if (gzip && headers.empty() && !hlen) return GR_ERR_NO_DEFLATE;
+        if (!gzip && size == 0) return GR_ERR_NO_DEFLATE;
         // first pass; a second one when blocks that stayed in step have the wrong symbol count
-        Outcome o = rs.rescue(headers, hlen, {});
+        Outcome o = rs.rescue(headers, gzip, hlen, {}, expected_size, has_crc, expected_crc);
         std::string anomaly_note;
         std::set<uint64_t> anomalies = symbol_count_anomalies(o, anomaly_note);
         if (!anomalies.empty()) {
-            o = rs.rescue(headers, hlen, anomalies);
+            o = rs.rescue(headers, gzip, hlen, anomalies, expected_size, has_crc, expected_crc);
             o.notes.push_back(anomaly_note);
         }
         std::vector<Piece>& pieces = o.pieces;
@@ -385,8 +426,9 @@ GR_API int gr_rescue(const uint8_t* in_, uint64_t size, const gr_options* opt, g
         res->stats.headers = (uint32_t)headers.size();
         res->stats.members = (uint32_t)o.members.size();
         res->stats.truncated = o.truncated;
-        res->stats.header_damaged = hlen == 0;
+        res->stats.header_damaged = gzip && hlen == 0;
         res->stats.crc_check = -1;
+        res->stats.input_end = o.input_end;
 
         // The true length of each suspect piece: the trailer's size minus what is certain, spread
         // over the suspect pieces by their compressed size when there are several. ISIZE counts
@@ -423,9 +465,11 @@ GR_API int gr_rescue(const uint8_t* in_, uint64_t size, const gr_options* opt, g
                 if (all_known) {
                     uint32_t c = 0;
                     for (size_t k = m.first_piece; k <= m.last_piece; k++) c = crc32(pieces[k].bytes.data(), pieces[k].bytes.size(), c);
-                    m.crc_check = c == m.crc && (uint32_t)good == m.isize;
+                    bool size_ok = !m.size_known || (uint32_t)good == m.isize;
+                    if (m.has_crc) m.crc_check = c == m.crc && size_ok;
+                    else if (m.size_known) m.crc_check = size_ok ? -1 : 0;
                     if (&m == &o.members.front()) res->stats.crc_check = m.crc_check;
-                    if ((uint32_t)good != m.isize) {
+                    if (m.size_known && (uint32_t)good != m.isize) {
                         res->stats.length_off = (int64_t)(int32_t)((uint32_t)good - m.isize);
                         o.notes.push_back("the output is " + std::to_string(-res->stats.length_off) +
                                           " bytes off the length the trailer gives: a block was damaged in a way that went "
@@ -475,6 +519,15 @@ GR_API int gr_rescue(const uint8_t* in_, uint64_t size, const gr_options* opt, g
     } catch (const std::bad_alloc&) {
         return GR_ERR_MEMORY;
     }
+}
+
+GR_API int gr_rescue(const uint8_t* in, uint64_t size, const gr_options* opt, gr_sink sink, void* user, gr_result** result) {
+    return rescue_common(in, size, true, UINT64_MAX, false, 0, opt, sink, user, result);
+}
+
+GR_API int gr_rescue_raw(const uint8_t* in, uint64_t size, uint64_t expected_size, int has_crc, uint32_t expected_crc,
+                         const gr_options* opt, gr_sink sink, void* user, gr_result** result) {
+    return rescue_common(in, size, false, expected_size, has_crc != 0, expected_crc, opt, sink, user, result);
 }
 
 GR_API const gr_stats* gr_result_stats(const gr_result* r) { return r ? &r->stats : nullptr; }
