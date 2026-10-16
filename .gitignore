@@ -1,0 +1,12 @@
+# Rust build output; it also holds the local copy of nvcomp64_6.dll, NVIDIA's proprietary
+# library, which must not be committed
+/rust/target/
+
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+build/
+
+# Claude Code's per-machine settings
+.claude/settings.local.json
