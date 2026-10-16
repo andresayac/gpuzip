@@ -1,21 +1,26 @@
-//! gpuzip: extract ZIP archives on an NVIDIA GPU with nvCOMP, with CPU fallback.
-//! RAR, 7z and tar.* archives go to 7-Zip. Same commands and reports as the Python version.
+//! gpuzip: extract ZIP and gzip archives on an NVIDIA GPU, with CPU fallback. Small ZIP
+//! entries go to nvCOMP in batches; gzip streams to gpuinflate, which decodes one stream in
+//! parallel. RAR, 7z and other tar.* archives go to 7-Zip.
 
 mod extract;
 mod gpu;
+mod gz;
+mod inflate;
 mod sevenzip;
 mod zip;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use extract::{Count, Outcome};
 use serde_json::json;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use zip::{Entry, Route};
 
 const EPILOG: &str = r"examples:
   gpuzip x photos.zip               extract into .\photos
   gpuzip x *.zip -o D:\out          extract each archive into D:\out\<name>
-  gpuzip x backup.rar               RAR, 7z and tar.* go to 7-Zip
+  gpuzip x logs.tar.gz              .gz and .tar.gz/.tgz are decoded on the GPU too
+  gpuzip x backup.rar               RAR, 7z and other tar.* go to 7-Zip
   gpuzip t backup.zip               check every file's CRC, write nothing
   gpuzip l backup.zip               list entries and where each is decoded
   gpuzip doctor                     check the GPU, nvCOMP and 7-Zip
@@ -26,7 +31,7 @@ exit codes: 0 ok · 1 missing file or setup problem · 2 some entries failed";
 #[command(
     name = "gpuzip",
     version,
-    about = "Extract ZIP archives on an NVIDIA GPU with nvCOMP, with CPU fallback. RAR, 7z and tar.* archives go to 7-Zip.",
+    about = "Extract ZIP and gzip archives on an NVIDIA GPU, with CPU fallback. RAR, 7z and other tar.* archives go to 7-Zip.",
     after_help = EPILOG
 )]
 struct Cli {
@@ -191,7 +196,25 @@ fn report(cmd: char, archive: &str, fmt: &str, o: &Outcome, opts: &Opts) {
         return;
     }
     let verb = if cmd == 'x' { "Extracted" } else { "Tested" };
-    if fmt != "zip" {
+    if let Some((_, unpacked)) = o.stream {
+        let rate = if o.seconds > 0.0 { unpacked as f64 / o.seconds / 1e9 } else { 0.0 };
+        let on = match (o.counts[0].bytes > 0, o.counts[1].bytes > 0) {
+            (true, false) => "on the GPU",
+            (true, true) => "on the GPU and CPU",
+            _ => "on the CPU",
+        };
+        let what = if fmt == "tar.gz" {
+            format!("{} files ({})", commas(files), human(bytes.min(u64::MAX)))
+        } else {
+            Path::new(archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        };
+        println!(
+            "{verb} {what} in {:.2} s · {} decompressed at {rate:.2} GB/s {on} · {} failed",
+            o.seconds,
+            human(unpacked),
+            o.failed.len()
+        );
+    } else if fmt != "zip" {
         let name = Path::new(archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         println!("{verb} {name} with 7-Zip on the CPU in {:.2} s · {} failed", o.seconds, o.failed.len());
     } else {
@@ -287,6 +310,7 @@ fn run_7z_archive(cmd: char, archive: &str, out_root: Option<PathBuf>, opts: &Op
         info: vec!["not a ZIP file: handed to 7-Zip on the CPU".into()],
         gpu: None,
         retried: 0,
+        stream: None,
     };
     report(cmd, archive, &ext, &outcome, opts);
     if rc != 0 { 2 } else { 0 }
@@ -307,6 +331,24 @@ fn process(cmd: char, path: &str, out_root: Option<PathBuf>, opts: &Opts) -> i32
     };
     let map = unsafe { memmap2::Mmap::map(&file) };
     let data: &[u8] = map.as_deref().unwrap_or(&[]);
+    if gz::is_gzip(data) {
+        let fmt = if gz::is_tar_name(&archive) { "tar.gz" } else { "gz" };
+        if cmd == 'l' && fmt == "gz" {
+            println!("{:>14} {:>14}  name", "packed", "size (trailer)");
+            let isize = u32::from_le_bytes(data[data.len().max(4) - 4..].try_into().unwrap_or([0; 4]));
+            println!("{:>14} {:>14}  {}", commas(data.len() as u64), commas(isize as u64), gz::output_name(&archive));
+            return 0;
+        }
+        let outcome = gz::run(cmd, &archive, data, out_root, opts);
+        if cmd != 'l' {
+            report(cmd, &archive, fmt, &outcome, opts);
+        } else {
+            for (name, reason) in &outcome.failed {
+                eprintln!("Failed: {name}: {reason}");
+            }
+        }
+        return if outcome.failed.is_empty() { 0 } else { 2 };
+    }
     if zip::find_eocd(data).is_none() {
         return run_7z_archive(cmd, &archive, out_root, opts, None);
     }
@@ -345,8 +387,12 @@ fn run_all(cmd: char, patterns: &[String], output: Option<PathBuf>, opts: &Opts)
     let archives = expand(patterns);
     let mut rc = 0;
     for path in &archives {
+        // a plain .gz holds one file: it goes straight into the output folder, like gunzip
+        let plain_gz = path.to_lowercase().ends_with(".gz") && !gz::is_tar_name(path);
         let out_root = (cmd == 'x').then(|| {
             let dir = match &output {
+                Some(o) if plain_gz => o.clone(),
+                None if plain_gz => PathBuf::from("."),
                 Some(o) if archives.len() > 1 => o.join(archive_stem(path)),
                 Some(o) => o.clone(),
                 None => PathBuf::from(archive_stem(path)),
@@ -366,6 +412,29 @@ fn doctor(opts: &Opts) -> i32 {
     match sevenzip::find(opts.sevenzip.as_deref()) {
         Some(exe) => println!("7-Zip:  {} at {}", sevenzip::version(&exe), exe.display()),
         None => println!("7-Zip:  not found; needed for RAR, 7z, tar.* and encrypted entries (https://www.7-zip.org)"),
+    }
+    match inflate::get() {
+        Ok(g) => {
+            let data: Vec<u8> = b"gpuzip doctor checks one stream decoded in parallel on the GPU. ".repeat(200_000);
+            let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+            let _ = enc.write_all(&data);
+            let comp = enc.finish().unwrap_or_default();
+            let mut out = Vec::with_capacity(data.len());
+            let good = g
+                .inflate(&comp, data.len() as u64, |c| {
+                    out.extend_from_slice(c);
+                    true
+                })
+                .is_ok()
+                && out == data;
+            println!("gzip:   {} · gpuinflate test decode {}", g.device, if good { "ok" } else { "WRONG OUTPUT" });
+            println!("        gpuinflate loaded from {}", g.path);
+        }
+        Err(e) => {
+            println!("gzip:   decoded on the CPU ({e})");
+            let places: Vec<String> = inflate::candidates().iter().map(|p| p.display().to_string()).collect();
+            println!("        gpuinflate was looked for in: {}", places.join(", "));
+        }
     }
     let api = match extract::gpu_api() {
         Ok(a) => a,

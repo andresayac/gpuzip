@@ -7,8 +7,11 @@ the files they were made from, in every mode.
 Builds a source folder (text, binary, empty files, empty folders, non-ASCII names), packs it
 with 7-Zip, Python's zipfile and Windows PowerShell, then extracts each archive with gpuzip in
 cpu, gpu and auto mode and compares every file's bytes and modification time with the source.
+gzip files (one member, several, from 7-Zip, a tar.gz) are checked the same way, and a damaged
+one must fail in every mode.
 """
 
+import gzip
 import hashlib
 import json
 import os
@@ -123,12 +126,37 @@ def build_archives(src, work):
 
     a["7z archive (whole file to 7-Zip)"] = p = os.path.join(work, "archive.7z")
     sevenzip("a", "-t7z", p, ".", cwd=src)
-    a["tar.gz (whole file to 7-Zip)"] = p = os.path.join(work, "archive.tar.gz")
+    a["tar.gz (Python tarfile)"] = p = os.path.join(work, "archive.tar.gz")
     with tarfile.open(p, "w:gz") as t:
         for entry in sorted(os.listdir(src)):
             t.add(os.path.join(src, entry), entry)
     return a
 
+
+def build_gzips(src, work):
+    """Plain gzip files, each with the one file it must extract to: label -> (path, tree)"""
+    logs = [open(os.path.join(src, "docs", f"large{i}.log"), "rb").read() for i in range(3)]
+    blob = b"".join(open(os.path.join(src, "data", f"blob{i}.bin"), "rb").read() for i in range(20))
+    one = logs[0] + blob + logs[1] * 3  # about 30 MB: big enough for the GPU in auto mode
+    digest = lambda b: hashlib.sha256(b).hexdigest()
+    g = {}
+    p = os.path.join(work, "one.txt.gz")
+    with open(p, "wb") as f:
+        f.write(gzip.compress(one, 6))
+    g["gzip, one member (Python gzip)"] = (p, {"one.txt": (digest(one), 0)})
+    p = os.path.join(work, "three.txt.gz")
+    with open(p, "wb") as f:
+        for part in logs:
+            f.write(gzip.compress(part, 9))
+    g["gzip, three members"] = (p, {"three.txt": (digest(b"".join(logs)), 0)})
+    raw = os.path.join(work, "seven.txt")
+    with open(raw, "wb") as f:
+        f.write(one)
+    p = os.path.join(work, "seven.txt.gz")
+    sevenzip("a", "-tgzip", "-mx=7", p, raw)
+    os.remove(raw)
+    g["gzip by 7-Zip -mx7"] = (p, {"seven.txt": (digest(one), 0)})
+    return g
 
 def run_gpuzip(*args):
     r = subprocess.run([*GPUZIP, *args, "--json"], capture_output=True, text=True)
@@ -145,12 +173,15 @@ def main():
     make_source(src)
     expected = tree(src)
     archives = build_archives(src, work)
+    gzips = build_gzips(src, work)
     failures = 0
     print(f"testing: {' '.join(GPUZIP)}")
     print(f"source: {len(expected)} files and empty folders\n")
-    for label, path in archives.items():
-        exp = expected
-        check_times = "PowerShell" not in label  # .NET Framework stores times its own way
+    cases = [(label, path, expected) for label, path in archives.items()]
+    cases += [(label, path, exp) for label, (path, exp) in gzips.items()]
+    for label, path, exp in cases:
+        # .NET Framework stores times its own way; a plain .gz output takes the .gz file's time
+        check_times = "PowerShell" not in label and not path.endswith(".txt.gz")
         for mode in ("cpu", "gpu", "gpu-batches", "auto"):
             out = os.path.join(work, "out")
             shutil.rmtree(out, ignore_errors=True)
@@ -171,6 +202,18 @@ def main():
             print(f"{status} {label:<42} {mode:<5} {where}")
             for p in problems[:8]:
                 print(f"       {p}")
+
+    # a damaged gzip file must fail, whichever decodes it
+    path, _ = gzips["gzip, one member (Python gzip)"]
+    data = bytearray(open(path, "rb").read())
+    data[len(data) // 2] ^= 0x55
+    bad = os.path.join(work, "damaged.txt.gz")
+    open(bad, "wb").write(bytes(data))
+    for mode in ("cpu", "gpu", "auto"):
+        rc, rep = run_gpuzip("t", bad, "--mode", mode, "-q")
+        ok = rc == 2 and rep.get("failed")
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} damaged gzip refused{'':<26} {mode:<5} {(rep.get('failed') or [{}])[0].get('reason', rep)}")
 
     # zip slip: an entry that tries to write outside the output folder must be refused
     evil = os.path.join(work, "zipslip.zip")

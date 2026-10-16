@@ -1,8 +1,10 @@
 //! Extracting or testing one ZIP archive. CPU threads and the GPU share the Deflate entries
-//! (the GPU takes batches of the smallest, the CPU threads the largest, until they meet),
-//! writer threads save the GPU's results, and 7-Zip takes the entries neither reads.
+//! (nvCOMP takes batches of the smallest, the CPU threads the largest, until they meet),
+//! writer threads save nvCOMP's results, gpuinflate decodes the largest entries one at a time
+//! when that beats a CPU thread, and 7-Zip takes the entries none of them reads.
 
 use crate::gpu::{self, Api, Decoder, MAX_BATCH_ENTRIES};
+use crate::inflate;
 use crate::sevenzip;
 use crate::zip::{self, DEFLATED, Entry, Route, STORED};
 use crate::{Mode, Opts};
@@ -18,6 +20,13 @@ use std::time::{Duration, Instant};
 const MIB: u64 = 1 << 20;
 const WRITE_CHUNK: usize = 64; // GPU results go to the writer threads this many files at a time
 const STREAM_ABOVE: u64 = 512 * MIB; // larger entries are decoded in pieces, not in one buffer
+// Rough speeds for giving large entries to gpuinflate: an entry goes to it when the GPU, after
+// starting up and finishing the entries it already has, would be done before one CPU thread.
+const BIG_MIN: u64 = 32 * MIB;
+const BIG_MIN_GPU_MODE: u64 = MIB; // gpu mode: nvCOMP keeps only the small ones
+const CPU_RATE: f64 = 1.0e9; // bytes/s, one thread with libdeflate
+const GPU_RATE: f64 = 4.0e9; // bytes/s, gpuinflate on one stream
+const GPU_START: f64 = 0.15; // s
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Via {
@@ -48,6 +57,8 @@ pub struct Outcome {
     pub info: Vec<String>,
     pub gpu: Option<GpuInfo>,
     pub retried: usize,
+    /// gzip files: (compressed, decompressed) bytes
+    pub stream: Option<(u64, u64)>,
 }
 
 /// The driver and nvCOMP, loaded once per process on first use.
@@ -84,6 +95,7 @@ pub struct Run<'a> {
     entries: &'a [Entry],
     out_root: Option<PathBuf>,
     pending: Mutex<VecDeque<usize>>, // Deflate entries by size: the GPU eats from the front
+    big: Mutex<VecDeque<usize>>,     // the largest Deflate entries, for gpuinflate, largest first
     cpu_queue: Mutex<VecDeque<usize>>,
     counts: Mutex<[Count; 3]>,
     failed: Mutex<Vec<(String, String)>>,
@@ -101,6 +113,22 @@ impl<'a> Run<'a> {
     pub fn new(opts: &'a Opts, archive: &'a str, data: &'a [u8], entries: &'a [Entry], out_root: Option<PathBuf>) -> Self {
         let mut deflate: Vec<usize> = (0..entries.len()).filter(|&i| entries[i].route == Route::Deflate).collect();
         deflate.sort_by_key(|&i| entries[i].size);
+        let mut big = VecDeque::new();
+        if opts.mode != Mode::Cpu && inflate::available() {
+            let mut queued = 0.0;
+            while let Some(&i) = deflate.last() {
+                let size = entries[i].size as f64;
+                let take = match opts.mode {
+                    Mode::Gpu => entries[i].size >= BIG_MIN_GPU_MODE,
+                    _ => entries[i].size >= BIG_MIN && GPU_START + (queued + size) / GPU_RATE < size / CPU_RATE,
+                };
+                if !take {
+                    break; // smaller entries would not qualify either
+                }
+                queued += size;
+                big.push_back(deflate.pop().unwrap());
+            }
+        }
         let gpu_max_entry = if opts.mode == Mode::Auto { opts.gpu_max_entry_kb * 1024 } else { u64::MAX };
         let eligible: u64 = deflate
             .iter()
@@ -108,7 +136,8 @@ impl<'a> Run<'a> {
             .map(|&i| gpu::align(entries[i].size as usize) as u64)
             .sum();
         let slot_bytes = (opts.batch_mb * MIB).min(gpu::align(eligible as usize) as u64).max(MIB) as usize;
-        let use_gpu = opts.mode == Mode::Gpu || (opts.mode == Mode::Auto && eligible >= opts.gpu_min_mb * MIB);
+        // nvCOMP: only for what gpuinflate did not take
+        let use_gpu = (opts.mode == Mode::Gpu && !deflate.is_empty()) || (opts.mode == Mode::Auto && eligible >= opts.gpu_min_mb * MIB);
         let mut info = Vec::new();
         if opts.mode == Mode::Auto && !use_gpu && !deflate.is_empty() {
             info.push(format!(
@@ -125,6 +154,7 @@ impl<'a> Run<'a> {
             out_root,
             cpu_queue: Mutex::new((0..entries.len()).filter(|&i| entries[i].route == Route::Cpu).collect()),
             pending: Mutex::new(deflate.into()),
+            big: Mutex::new(big),
             counts: Mutex::new([Count::default(); 3]),
             failed: Mutex::new(Vec::new()),
             retry: Mutex::new(Vec::new()),
@@ -200,6 +230,84 @@ impl<'a> Run<'a> {
         }
         self.add(Via::Cpu, e);
         Ok(true)
+    }
+
+    /// A large Deflate entry on gpuinflate, written as it comes. Ok(false): redo it on the CPU.
+    fn deliver_inflate(&self, g: &inflate::Gpu, e: &Entry) -> Result<bool, String> {
+        let src = &self.data[e.data_offset as usize..(e.data_offset + e.csize) as usize];
+        let mut out = match self.target(e) {
+            Some(p) => Some(File::create(&p).map_err(|x| x.to_string())?),
+            None => None,
+        };
+        let (mut crc, mut total, mut write_err) = (crc32fast::Hasher::new(), 0u64, None);
+        let r = g.inflate(src, e.size, |c| {
+            crc.update(c);
+            total += c.len() as u64;
+            match out.as_mut().map(|f| f.write_all(c)) {
+                Some(Err(x)) => {
+                    write_err = Some(x.to_string());
+                    false
+                }
+                _ => total <= e.size, // more than the directory says: stop, the CPU will tell
+            }
+        });
+        if let Some(x) = write_err {
+            return Err(x);
+        }
+        if r.is_err() || total != e.size || crc.finalize() != e.crc {
+            return Ok(false);
+        }
+        if let (Some(f), Some(t)) = (out.as_ref(), zip::dos_time(e.dos_date, e.dos_time)) {
+            let _ = f.set_modified(t);
+        }
+        self.add(Via::Gpu, e);
+        Ok(true)
+    }
+
+    fn big_thread(&self) {
+        let t0 = Instant::now();
+        let g = match inflate::get() {
+            Ok(g) => g,
+            Err(x) => {
+                let msg = format!("gpuinflate unavailable ({x}); large entries used the CPU");
+                if self.opts.mode == Mode::Gpu { self.note(msg) } else { self.info.lock().unwrap().push(msg) }
+                self.retry_all_big();
+                return;
+            }
+        };
+        {
+            let mut info = self.gpu.lock().unwrap();
+            info.device.get_or_insert_with(|| g.device.clone());
+            info.startup_seconds.get_or_insert(t0.elapsed().as_secs_f64());
+        }
+        let (mut n, mut bytes, t) = (0u64, 0u64, Instant::now());
+        loop {
+            let Some(i) = self.big.lock().unwrap().pop_front() else { break };
+            let e = &self.entries[i];
+            match self.deliver_inflate(g, e) {
+                Ok(true) => {
+                    n += 1;
+                    bytes += e.size;
+                    self.gpu.lock().unwrap().batches += 1;
+                }
+                Ok(false) => self.retry.lock().unwrap().push(i),
+                Err(x) => self.fail(e, x),
+            }
+        }
+        if n > 0 {
+            let secs = t.elapsed().as_secs_f64();
+            self.gpu.lock().unwrap().busy_seconds += secs;
+            self.info.lock().unwrap().push(format!(
+                "gpuinflate: {n} large entries, {} in {secs:.2} s ({:.2} GB/s)",
+                crate::human(bytes),
+                bytes as f64 / secs / 1e9
+            ));
+        }
+    }
+
+    fn retry_all_big(&self) {
+        let rest: Vec<usize> = self.big.lock().unwrap().drain(..).collect();
+        self.retry.lock().unwrap().extend(rest);
     }
 
     fn run_cpu(&self, i: usize, d: &mut libdeflater::Decompressor) {
@@ -458,11 +566,15 @@ impl<'a> Run<'a> {
                 sc.spawn(move || this.gpu_thread(tx))
             });
             drop(jobs_tx);
+            let big = (!this.big.lock().unwrap().is_empty()).then(|| sc.spawn(move || this.big_thread()));
             let cpus: Vec<_> = (0..threads).map(|_| sc.spawn(move || this.cpu_worker())).collect();
             for h in cpus {
                 h.join().unwrap();
             }
             if let Some(h) = gpu {
+                h.join().unwrap();
+            }
+            if let Some(h) = big {
                 h.join().unwrap();
             }
             for h in writers {
@@ -500,8 +612,10 @@ impl<'a> Run<'a> {
             failed: std::mem::take(&mut *self.failed.lock().unwrap()),
             notes: std::mem::take(&mut *self.notes.lock().unwrap()),
             info: std::mem::take(&mut *self.info.lock().unwrap()),
-            gpu: self.use_gpu.then(|| std::mem::take(&mut *self.gpu.lock().unwrap())),
+            gpu: (self.use_gpu || self.gpu.lock().unwrap().device.is_some())
+                .then(|| std::mem::take(&mut *self.gpu.lock().unwrap())),
             retried,
+            stream: None,
         }
     }
 }

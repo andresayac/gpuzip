@@ -10,3 +10,17 @@ build/
 
 # Claude Code's per-machine settings
 .claude/settings.local.json
+
+# CUDA prototype builds
+/research/**/*.exe
+/research/**/*.exp
+/research/**/*.lib
+/research/**/*.pdb
+
+# gpuinflate builds (build.cmd)
+/gpuinflate/*.dll
+/gpuinflate/*.exe
+/gpuinflate/*.exp
+/gpuinflate/*.lib
+/gpuinflate/*.obj
+/gpuinflate/build.log

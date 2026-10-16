@@ -1,0 +1,62 @@
+{
+ "machine": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+ "runs": 3,
+ "datasets": {
+  "text.gz": {
+   "description": "128 MB of text, 7-Zip -mx5",
+   "packed": 53322551,
+   "jobs": {
+    "test": {
+     "7-Zip": 0.47029339999426156,
+     "GNU gzip": 0.6231423000062932,
+     "rapidgzip, 16 threads": 0.15475789999618428,
+     "gpuzip cpu": 0.2423519999938435,
+     "gpuzip gpu": 0.18974909999815281,
+     "gpuzip auto": 0.19015719999879366
+    },
+    "extract": {
+     "7-Zip": 0.5058609999978216,
+     "GNU gzip": 0.6758754999973462,
+     "rapidgzip, 16 threads": 0.16539210000337334,
+     "gpuzip cpu": 0.27815800000098534,
+     "gpuzip auto": 0.2210745999982464
+    }
+   }
+  },
+  "big6.txt.gz": {
+   "description": "6.4 GB of text, zlib level 4",
+   "packed": 2629633543,
+   "jobs": {
+    "test": {
+     "7-Zip": 21.22323779999715,
+     "GNU gzip": 28.495769300003303,
+     "rapidgzip, 16 threads": 3.3411001000058604,
+     "gpuzip cpu": 10.630204799999774,
+     "gpuzip gpu": 2.237695199997688,
+     "gpuzip auto": 2.239656900004775
+    }
+   }
+  },
+  "medium.tar.gz": {
+   "description": "2,000 files (1.4 GB) in a tar.gz, Python tarfile level 6",
+   "packed": 583459375,
+   "jobs": {
+    "test": {
+     "7-Zip": 4.667051399999764,
+     "GNU gzip": 6.251823300000979,
+     "rapidgzip, 16 threads": 0.8157253000026685,
+     "gpuzip cpu": 2.4485719000003883,
+     "gpuzip gpu": 0.6979546000002301,
+     "gpuzip auto": 0.7002527000004193
+    },
+    "extract": {
+     "7-Zip (gz, then tar)": 7.0751690000033705,
+     "Windows tar": 3.873787500000617,
+     "gpuzip cpu": 2.831410300001153,
+     "gpuzip auto": 2.6915628999995533,
+     "rapidgzip, then Windows tar": 2.8672777000028873
+    }
+   }
+  }
+ }
+}
