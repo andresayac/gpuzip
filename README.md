@@ -217,6 +217,8 @@ research/gpu-inflate/   the experiment gpuinflate grew from: the algorithm, meas
 research/gpu-zstd/      feasibility study of a GPU compressor writing standard zstd at level-19
                         ratio: match finding by radix sorts and an optimal parse on the GPU,
                         0.3-0.5 GB/s on an RTX 5080, 75x one CPU thread (see its README)
+research/recovery/      gzrescue: recovering damaged .gz files block by block with the finder;
+                        98-99.8% back on ordinary data where gzip gives 30-60% (see its README)
 ```
 
 Tests: `python tests\test_gpuzip.py` checks the Python version; with

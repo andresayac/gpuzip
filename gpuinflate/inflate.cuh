@@ -62,6 +62,9 @@ struct Result {
     int32_t landed;     // index in the target list it stopped on; -1: end of the stream
     int32_t end_final;  // BFINAL of the block it stopped in; -1: unknown
     uint32_t blocks;
+    uint64_t last_block_bit;  // header of the last block this run started (UINT64_MAX: none)
+    uint32_t last_block_out;  // symbols written before it: after an error, where the damage may begin
+    uint32_t symbols;         // literals and matches decoded (zlib's blocks hold a fixed number)
 };
 
 constexpr uint32_t MAX_SYMBOL_OUT = 258;  // the most one symbol writes
@@ -440,9 +443,11 @@ struct Decoder {
             if (sym < 256) {
                 if (sym < 0) { r.status = ERR_DATA; return -1; }
                 out[op++] = (uint16_t)sym;
+                r.symbols++;
                 continue;
             }
             if (sym == 256) return 0;
+            r.symbols++;
             sym -= 257;
             if (sym >= 29) { r.status = ERR_DATA; return -1; }
             uint32_t len = GI_TAB(lbase, sym) + br.get(GI_TAB(lext, sym));
@@ -476,6 +481,9 @@ struct Decoder {
         r.landed = -1;
         r.end_final = s.mode == AT_BLOCK ? -1 : s.final;
         r.blocks = 0;
+        r.last_block_bit = UINT64_MAX;
+        r.last_block_out = 0;
+        r.symbols = 0;
         Bits br;
         uint32_t op = 0;
         int t = 0;
@@ -515,6 +523,8 @@ struct Decoder {
                     break;
                 }
                 header = p;
+                r.last_block_bit = p;
+                r.last_block_out = op;
                 int final = (int)br.get(1);
                 int type = (int)br.get(2);
                 r.blocks++;
