@@ -215,6 +215,36 @@ def main():
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} damaged gzip refused{'':<26} {mode:<5} {(rep.get('failed') or [{}])[0].get('reason', rep)}")
 
+    # rescue (Rust only): a .tar.gz with a zeroed stretch must give back nearly every file, the
+    # damage must be reported, and no file the report calls intact may differ from the source
+    if os.environ.get("GPUZIP_BIN"):
+        src_tgz = archives["tar.gz (Python tarfile)"]
+        files = {k: v for k, v in expected.items() if v[0] != "dir"}
+        for where in (0.4, 0.85):  # the random blobs (stored blocks: only the CRC can tell), then text
+            data = bytearray(open(src_tgz, "rb").read())
+            p = int(len(data) * where)
+            data[p:p + 2048] = bytes(2048)
+            bad = os.path.join(work, f"damaged{int(where * 100)}.tar.gz")
+            open(bad, "wb").write(bytes(data))
+            out = os.path.join(work, f"rescued{int(where * 100)}")
+            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                rep = {}
+            got = tree(out)
+            identical = sum(1 for k, v in files.items() if k in got and got[k][0] == v[0])
+            t = rep.get("tar") or {}
+            intact, unverified = t.get("intact", -1), t.get("unverified", 0)
+            # the test's text repeats a small vocabulary, so a damaged block taints what copies from
+            # it for a long way: many files come back partial, and that is the honest answer
+            reported = rep.get("damaged_blocks", 0) >= 1 or rep.get("crc_check") == 0
+            ok = r.returncode == 2 and reported and identical >= 0.5 * len(files) and identical >= intact
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} rescue of a tar.gz zeroed at {int(where * 100)}%: {identical} of {len(files)} files identical, "
+                  f"{intact} called intact, {unverified} unverifiable, {len(t.get('partial', []))} partial, "
+                  f"{rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}")
+
     # zip slip: an entry that tries to write outside the output folder must be refused
     evil = os.path.join(work, "zipslip.zip")
     with zipfile.ZipFile(evil, "w") as z:

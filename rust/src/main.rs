@@ -6,6 +6,7 @@ mod extract;
 mod gpu;
 mod gz;
 mod inflate;
+mod rescue;
 mod sevenzip;
 mod zip;
 
@@ -23,6 +24,7 @@ const EPILOG: &str = r"examples:
   gpuzip x backup.rar               RAR, 7z and other tar.* go to 7-Zip
   gpuzip t backup.zip               check every file's CRC, write nothing
   gpuzip l backup.zip               list entries and where each is decoded
+  gpuzip rescue broken.tar.gz       recover what a damaged .gz or .tar.gz still holds
   gpuzip doctor                     check the GPU, nvCOMP and 7-Zip
 
 exit codes: 0 ok · 1 missing file or setup problem · 2 some entries failed";
@@ -66,6 +68,19 @@ enum Command {
     L {
         #[arg(required = true, value_name = "ARCHIVE")]
         archives: Vec<String>,
+        #[command(flatten)]
+        opts: Opts,
+    },
+    /// Recover what a damaged .gz or .tar.gz still holds
+    Rescue {
+        #[arg(required = true, value_name = "FILE")]
+        archives: Vec<String>,
+        /// Output folder (default: the archive's name, in the current folder; a plain .gz goes into the current folder)
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+        /// Byte written where the data cannot be known
+        #[arg(long, default_value_t = 0)]
+        fill: u8,
         #[command(flatten)]
         opts: Opts,
     },
@@ -407,11 +422,226 @@ fn run_all(cmd: char, patterns: &[String], output: Option<PathBuf>, opts: &Opts)
     rc
 }
 
+/// `gpuzip rescue`: recover a damaged .gz (one file) or .tar.gz (its files, skipping what was destroyed)
+fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
+    if !Path::new(path).is_file() {
+        eprintln!("No such file: {path}");
+        return 1;
+    }
+    let archive = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
+    let file = match std::fs::File::open(&archive) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return 1;
+        }
+    };
+    let map = unsafe { memmap2::Mmap::map(&file) };
+    let data: &[u8] = map.as_deref().unwrap_or(&[]);
+    if zip::find_eocd(data).is_some() {
+        eprintln!("{path}: a ZIP file; rescue reads gzip files (.gz, .tar.gz, .tgz) for now");
+        return 1;
+    }
+    let lib = match rescue::get() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let tar = gz::is_tar_name(&archive);
+    let t0 = std::time::Instant::now();
+    let mut failed: Vec<(String, String)> = Vec::new();
+    let (report, tar_out, target) = if tar {
+        let mut out = Vec::with_capacity(data.len().saturating_mul(4));
+        let mut mask = Vec::with_capacity(data.len().saturating_mul(4));
+        let report = lib.rescue(data, fill, |d, m| {
+            out.extend_from_slice(d);
+            mask.extend_from_slice(m);
+            true
+        });
+        let report = match report {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                return 1;
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&out_root) {
+            eprintln!("{}: {e}", out_root.display());
+            return 1;
+        }
+        let mut t = rescue::untar(&out, &mask, Some(&out_root), true);
+        failed.extend(t.failed.iter().cloned());
+        // a checksum failure with no block to blame: the damage is somewhere no decoder can see
+        // it (raw stored data, a flipped bit that stayed in step), so no file can be vouched for
+        if report.stats.crc_check == 0 && report.stats.damaged == 0 {
+            t.unverified = t.intact;
+            t.intact = 0;
+        }
+        (report, Some(t), None)
+    } else {
+        let target = out_root.join(gz::output_name(&archive));
+        if let Err(e) = std::fs::create_dir_all(&out_root) {
+            eprintln!("{}: {e}", out_root.display());
+            return 1;
+        }
+        let mut f = match std::fs::File::create(&target) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{}: {e}", target.display());
+                return 1;
+            }
+        };
+        let mut write_err = None;
+        let report = lib.rescue(data, fill, |d, _| match f.write_all(d) {
+            Ok(()) => true,
+            Err(e) => {
+                write_err = Some(e.to_string());
+                false
+            }
+        });
+        if let Some(e) = write_err {
+            eprintln!("{}: {e}", target.display());
+            return 1;
+        }
+        let report = match report {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                return 1;
+            }
+        };
+        (report, None, Some(target))
+    };
+    let secs = t0.elapsed().as_secs_f64();
+    let s = &report.stats;
+    let total = s.output_size.max(1) as f64;
+    let pct = |x: u64| 100.0 * x as f64 / total;
+    let clean = report.clean();
+    let damaged: Vec<&rescue::Piece> = report.pieces.iter().filter(|p| p.suspect).collect();
+    if opts.json {
+        let v = json!({
+            "archive": archive, "command": "rescue", "format": if tar { "tar.gz" } else { "gz" },
+            "input_bytes": s.input_size, "output_bytes": s.output_size,
+            "exact_bytes": s.exact_bytes, "suspect_bytes": s.suspect_bytes, "unknown_bytes": s.unknown_bytes,
+            "block_headers": s.headers, "damaged_blocks": s.damaged, "crc_check": s.crc_check, "length_off": s.length_off,
+            "truncated": s.truncated != 0, "header_damaged": s.header_damaged != 0, "clean": clean,
+            "seconds": (secs * 1e4).round() / 1e4,
+            "damaged": damaged.iter().map(|p| json!({
+                "input_byte": p.in_byte_start, "input_byte_end": p.in_byte_end, "output_offset": p.out_offset, "length": p.length,
+                "decoded": p.decoded, "known": p.known, "blocks": p.blocks, "symbols": p.symbols, "why": p.why,
+            })).collect::<Vec<_>>(),
+            "notes": report.notes,
+            "output": target.as_ref().map(|t| t.display().to_string()),
+            "tar": tar_out.as_ref().map(|t| json!({
+                "intact": t.intact, "unverified": t.unverified, "suspect": t.suspect, "partial": t.partial, "repaired_headers": t.repaired,
+                "skipped": t.skipped.iter().map(|(o, n)| json!({"offset": o, "bytes": n})).collect::<Vec<_>>(),
+            })),
+            "failed": failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
+            "implementation": "rust",
+        });
+        println!("{}", ascii_json(&v));
+        return if failed.is_empty() && clean { 0 } else { 2 };
+    }
+    if opts.quiet && clean && failed.is_empty() {
+        return 0;
+    }
+    let name = Path::new(&archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if let Some(t) = &tar_out {
+        println!(
+            "Rescued {name} in {secs:.2} s: {} files intact, {} possibly damaged, {} partial, {} region{} unreadable ({}) · data {:.2}% exact, {:.2}% unknown",
+            commas(t.intact),
+            commas(t.suspect.len() as u64),
+            commas(t.partial.len() as u64),
+            t.skipped.len(),
+            if t.skipped.len() == 1 { "" } else { "s" },
+            human(t.skipped.iter().map(|(_, n)| n).sum()),
+            pct(s.exact_bytes),
+            pct(s.unknown_bytes)
+        );
+        if t.unverified > 0 {
+            println!(
+                "  {} files extracted but unverifiable: the archive's checksum fails and the damage could not be located (it lies in raw stored data, such as an already compressed or random file, or is a flipped bit that kept the decoder in step); any of them may be the damaged one",
+                commas(t.unverified)
+            );
+        }
+        for n in t.partial.iter().take(20) {
+            println!("  Partial: {n}");
+        }
+        if t.partial.len() > 20 {
+            println!("  ... and {} more partial", t.partial.len() - 20);
+        }
+        for n in t.suspect.iter().take(20) {
+            println!("  Possibly damaged: {n}");
+        }
+        if t.suspect.len() > 20 {
+            println!("  ... and {} more possibly damaged", t.suspect.len() - 20);
+        }
+        if t.repaired > 0 {
+            println!("  Note: {} tar headers had unknown bytes and were made whole from the header before them (checksums confirm)", t.repaired);
+        }
+    } else if let Some(t) = &target {
+        println!(
+            "Rescued {} in {secs:.2} s: {} written, {:.2}% exact, {:.2}% unknown, {:.2}% in {} damaged block{}{}",
+            t.display(),
+            human(s.output_size),
+            pct(s.exact_bytes),
+            pct(s.unknown_bytes),
+            pct(s.suspect_bytes),
+            s.damaged,
+            if s.damaged == 1 { "" } else { "s" },
+            if clean { " · intact" } else { "" }
+        );
+    }
+    for p in damaged.iter().take(20) {
+        println!("  Damaged block at input byte {} (output offset {}): {}", commas(p.in_byte_start), commas(p.out_offset), p.why);
+    }
+    if damaged.len() > 20 {
+        println!("  ... and {} more damaged blocks", damaged.len() - 20);
+    }
+    if s.crc_check == 0 {
+        println!("  Note: the CRC does not match: an error the decoder could not place remains somewhere");
+    }
+    for n in &report.notes {
+        println!("  Note: {n}");
+    }
+    for (n, reason) in failed.iter().take(20) {
+        println!("  Failed: {n}: {reason}");
+    }
+    if failed.is_empty() && clean { 0 } else { 2 }
+}
+
+fn run_rescue(patterns: &[String], output: Option<PathBuf>, fill: u8, opts: &Opts) -> i32 {
+    let archives = expand(patterns);
+    let mut rc = 0;
+    for path in &archives {
+        let plain_gz = !gz::is_tar_name(path);
+        let dir = match &output {
+            Some(o) if plain_gz => o.clone(),
+            None if plain_gz => PathBuf::from("."),
+            Some(o) if archives.len() > 1 => o.join(archive_stem(path)),
+            Some(o) => o.clone(),
+            None => PathBuf::from(archive_stem(path)),
+        };
+        let dir = std::path::absolute(&dir).unwrap_or(dir);
+        if archives.len() > 1 && !(opts.quiet || opts.json) {
+            println!("{path}:");
+        }
+        rc = rc.max(rescue_one(path, dir, fill, opts));
+    }
+    rc
+}
+
 fn doctor(opts: &Opts) -> i32 {
     println!("gpuzip {} (Rust) · {} CPU threads · libdeflate", env!("CARGO_PKG_VERSION"), cpu_threads());
     match sevenzip::find(opts.sevenzip.as_deref()) {
         Some(exe) => println!("7-Zip:  {} at {}", sevenzip::version(&exe), exe.display()),
         None => println!("7-Zip:  not found; needed for RAR, 7z, tar.* and encrypted entries (https://www.7-zip.org)"),
+    }
+    match rescue::get() {
+        Ok(r) => println!("rescue: gzrescue loaded from {}", r.path),
+        Err(e) => println!("rescue: not available ({e}); `gpuzip rescue` needs gzrescue.dll next to gpuzip.exe"),
     }
     match inflate::get() {
         Ok(g) => {
@@ -479,6 +709,7 @@ fn main() {
         Command::X { archives, output, opts } => run_all('x', archives, output.clone(), opts),
         Command::T { archives, opts } => run_all('t', archives, None, opts),
         Command::L { archives, opts } => run_all('l', archives, None, opts),
+        Command::Rescue { archives, output, fill, opts } => run_rescue(archives, output.clone(), *fill, opts),
     };
     std::process::exit(rc);
 }

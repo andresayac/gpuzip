@@ -22,6 +22,7 @@ gpuzip x dump.sql.gz              decompress to .\dump.sql, like gunzip
 gpuzip x backup.rar               RAR, 7z and other tar.* go to 7-Zip
 gpuzip t backup.zip               check every file's CRC, write nothing
 gpuzip l backup.zip               list entries and where each is decoded
+gpuzip rescue broken.tar.gz       recover what a damaged .gz or .tar.gz still holds (Rust)
 gpuzip doctor                     check the GPU, nvCOMP and 7-Zip
 ```
 
@@ -60,6 +61,9 @@ optional (without one, that work goes to the CPU):
 - `gpuinflate.dll`, for `.gz`, `.tar.gz` and large ZIP entries (or point `GPUZIP_INFLATE_DIR`
   at its folder). Build it with `gpuinflate\build.cmd release`, which needs the CUDA toolkit
   (see [gpuinflate/README.md](gpuinflate/README.md)).
+
+- `gzrescue.dll`, for `gpuzip rescue` (or point `GPUZIP_RESCUE_DIR` at its folder). CPU only;
+  `gpuinflate\build.cmd` builds it too, and it needs only the Visual Studio C++ compiler.
 
 Running needs no CUDA toolkit: the NVIDIA driver is enough. `gpuzip doctor` shows what was found.
 
@@ -110,6 +114,31 @@ would leave the output folder are refused. A plain `.gz` becomes one file in the
 Every file's CRC32 is checked; a GPU result that fails the check, or a GPU error, means the
 work is done again on the CPU. Entries whose path would leave the output folder ("zip slip")
 are refused.
+
+### Rescue
+
+`gpuzip rescue` reads a damaged `.gz` or `.tar.gz`: an interrupted download, a bad sector, a
+flipped bit. gzip stops at the first damaged byte and loses everything after it; worse, Deflate
+often decodes damage as plausible garbage that only the trailer's CRC reveals, with no
+location. gzrescue (`gpuinflate/rescue.cpp`, the method and measurements in
+[research/recovery](research/recovery)) finds every block header in the file with the finder
+from gpuinflate, decodes block by block and knows a block went through damage when its decode
+does not land exactly on the next header, or holds a number of symbols other than the
+encoder's regular one. The damaged block is kept but flagged, decoding restarts at the next
+header, bytes that copied from a damaged block are marked unknown (written as `--fill`), and
+the block's true length comes from the trailer so the offsets after it stay right. For a
+`.tar.gz` the files are then extracted from the recovered stream. Tar headers copy their
+repeated fields from the header before them, so after damage their unknown bytes are made whole
+from the previous header, with the checksum as the judge; where a header is beyond repair, the
+extractor finds the next readable one byte by byte and reports the files between as lost.
+Every file is classified: intact (every byte exact), possibly damaged (inside a flagged block or
+behind a repaired header), partial (unknown bytes or cut short). When the checksum fails and no
+block can be blamed (damage inside raw stored data, such as an already compressed file, or a
+flipped bit that kept the decoder in step), no file is called intact: they are all "unverified",
+because any of them may be the one. On a 128 MB tar of source code
+with a 4 KB stretch zeroed, 7,149 of 7,411 files come back intact (and identical to the
+originals, checked), 23 possibly damaged, 45 partial, 194 lost, where gzip gives the first 42% of
+the archive and nothing else. Exit code 2 says something was damaged or lost.
 
 Implementation notes learned the hard way:
 
@@ -206,11 +235,12 @@ rust/           the Rust version
   src/sevenzip.rs   hands entries and whole archives to 7-Zip
   src/gz.rs         gzip members, trailers, tar extraction from a pipe
   src/inflate.rs    gpuinflate.dll, loaded at run time
+  src/rescue.rs     gzrescue.dll, loaded at run time; tar extraction that skips destroyed headers
   src/main.rs       the command line, reports and doctor
 python/         the Python version (gpuzip.py, pyproject.toml)
 tests/          correctness tests for both versions (ZIP, gzip, tar.gz, damaged files, zip slip)
 gpuinflate/     the library that decodes one Deflate stream on the GPU, in segments (C/CUDA),
-                with its tests and fuzzer
+                with its tests and fuzzer; rescue.cpp, the recovery of damaged gzip files (CPU)
 bench/          the benchmarks and their latest results (results*.md, results*.json)
 research/gpu-inflate/   the experiment gpuinflate grew from: the algorithm, measurements and
                         dead ends, 4-18x faster than rapidgzip on 16 threads (see its README)

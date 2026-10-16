@@ -92,15 +92,39 @@ What it says:
 Speed: 5-10 s for a 26 MB `.gz` on one CPU thread; the header scan is the GPU prefilter's job
 for large files.
 
+## In gpuzip
+
+The method lives in `gpuinflate/rescue.cpp` (C API in `rescue.h`, built as `gzrescue.dll`, CPU
+only); `gzrescue.cpp` here is a command line over it, used by `measure.py`. `gpuzip rescue`
+(Rust, `rust/src/rescue.rs`) adds the tar side: the files are extracted from the recovered
+stream and classified as intact, possibly damaged or partial. Two things make that work on a
+damaged archive:
+
+- Tar headers copy their repeated fields (magic, mode, owner) from the header before them, so
+  after damage those bytes are unknown in every later header, and a header with unknown bytes
+  does not verify. The extractor fills the unknown bytes of a header with the previous
+  header's bytes at the same places, the very bytes the encoder had copied, and the checksum
+  says whether the repair is right.
+- Where a header is beyond repair, the next readable one is searched for byte by byte (a
+  damaged block whose length was only estimated shifts everything after it by an arbitrary
+  amount), and the chain of members ending there is walked back, so only the destroyed stretch
+  is skipped.
+
+On the zeroed-sector case above, `gpuzip rescue` gives back 7,149 of 7,411 files intact (every
+one checked identical to the original by `check_extract.py`), 23 possibly damaged, 45 partial
+and 194 lost, in 6.7 s; on the two-damage case 6,937 intact, 25 possibly damaged, 163 partial,
+286 lost. `tests/test_gpuzip.py` damages a tar.gz and checks the same properties on the Rust
+build.
+
 ## What is not done
 
 - gzrecover for comparison (it needs a download); the baseline here is gzip itself.
-- A tar reader that re-anchors on the next valid header after a damaged region, so partial
-  archives extract to the files that survived (Python's tarfile and GNU tar stop at the first
-  bad header; the recovered tar has its offsets right, but a damaged member's header may be
-  garbage).
+- Headers whose varying fields (size, name, time) were lost cannot be repaired from the previous
+  header; a few more files per damaged region could be saved by searching the checksum over
+  a few unknown bytes.
 - Fixed-Huffman and stored blocks after damage are restarted at the next dynamic header only;
   a probe-based restart inside a fixed block exists for the case where no header follows.
+- The whole recovered stream is held in memory for a tar.gz (twice: bytes and mask).
 - ZIP (rebuilding a lost central directory, recovering entries), and Office files (docx, xlsx,
   pptx are ZIPs) on top of this.
 - Real damaged files from the world, not only synthetic damage.
@@ -108,8 +132,16 @@ for large files.
 ## Running it
 
 ```
-build.cmd                                                       (cl; CPU only)
+build.cmd                                                       (cl; CPU only: gzrescue.exe over ..\..\gpuinflate\rescue.cpp)
 python damage.py <original> <dir>                               (a .gz and six damaged copies)
 gzrescue <damaged.gz> <out> [--report r.json] [--mask m.mask] [--fill 0]
 python measure.py <dir>                                         (needs numpy)
+gpuzip rescue <damaged.tar.gz> -o <dir> --json > r.json         (the Rust build, with gzrescue.dll next to it)
+python check_extract.py <original.tar> <dir> r.json             (every file called intact must be identical)
+python repro_test.py <work-dir> [0.4]                           (the test suite's damaged tar.gz, with the report and every differing file)
 ```
+
+One more lesson from the test suite: damage inside a stored block (zlib keeps incompressible
+data raw, so random or already compressed files) changes nothing a decoder can see; only the
+trailer's CRC fails, with no location. `gpuzip rescue` then calls no file intact: all are
+"unverified", because any of them may be the one.

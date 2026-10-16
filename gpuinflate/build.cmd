@@ -12,3 +12,7 @@ if /i "%1"=="release" set ARCH=-gencode arch=compute_75,code=sm_75 -gencode arch
 cl /nologo /O2 /EHsc /std:c++20 /MT gi_test.cpp gpuinflate.lib /Fe:gi_test.exe >nul || exit /b 1
 del /q gi_test.obj 2>nul
 echo built gpuinflate.dll and gi_test.exe
+rem gzrescue.dll: recovery of damaged gzip files, CPU only (no CUDA needed to build or run)
+cl /nologo /O2 /EHsc /std:c++20 /MT /LD /DGR_BUILD rescue.cpp /Fe:gzrescue.dll >nul || exit /b 1
+del /q rescue.obj 2>nul
+echo built gzrescue.dll
