@@ -27,6 +27,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GPUZIP = [os.path.abspath(os.environ["GPUZIP_BIN"])] if os.environ.get("GPUZIP_BIN") else \
@@ -279,6 +280,68 @@ def main():
             print(f"{'ok  ' if ok else 'FAIL'} rescue of a tar.gz zeroed at {int(where * 100)}%: {identical} of {len(files)} files identical, "
                   f"{intact} called intact, {unverified} unverifiable, {len(t.get('partial', []))} partial, "
                   f"{rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}")
+
+    # rescue of gzip files of one Deflate block (Rust only): a small text, and repetitive data that
+    # packs megabytes into one block, with zeros written over the middle. Zeros decode as valid
+    # codes: the decoder may fall back in step after them (only the CRC tells), or run on to the
+    # end of the file. No byte called exact may differ from the original at its place, and the
+    # bytes before the damage must be certified about as far as gzip decodes them right. Exact
+    # bytes are told apart from unknown ones by rescuing with two fill bytes, from suspect ones by
+    # the damaged list.
+    if os.environ.get("GPUZIP_BIN"):
+        rust_src = os.path.join(HERE, "..", "rust", "src")
+        names = ["ziprescue.rs"] + sorted(n for n in os.listdir(rust_src) if n.endswith(".rs") and n != "ziprescue.rs")
+        code = b"".join(open(os.path.join(rust_src, n), "rb").read() for n in names)
+        repeated = b"gpuzip release check " * 200000
+        cases = []
+        for n in (20000, 60000):
+            for zeros in (512, 64):
+                cases.append((f"{n // 1000} KB of code, {zeros} zero bytes", code[:n], 6, zeros))
+        for level in (6, 9):  # level 6: the decoder falls back in step; level 9: it runs to the end
+            cases.append((f"repetitive 4.2 MB (level {level}), 4096 zero bytes", repeated, level, 4096))
+        for label, plain, level, zeros in cases:
+            data = bytearray(gzip.compress(plain, level, mtime=0))
+            mid = len(data) // 2
+            data[mid:mid + zeros] = bytes(zeros)
+            bad = os.path.join(work, "single_block.gz")
+            open(bad, "wb").write(bytes(data))
+            d = zlib.decompressobj(31)
+            try:
+                got = d.decompress(bytes(data))
+            except zlib.error:
+                got = bytearray()
+                d = zlib.decompressobj(31)
+                for i in range(0, len(data), 64):  # what gzip gives before it stops
+                    try:
+                        got += d.decompress(bytes(data[i:i + 64]))
+                    except zlib.error:
+                        break
+            gzip_right = next((i for i in range(min(len(got), len(plain))) if got[i] != plain[i]), min(len(got), len(plain)))
+            runs = []
+            for fill in (0, 255):
+                out = os.path.join(work, f"rescued_single{fill}")
+                shutil.rmtree(out, ignore_errors=True)
+                r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--fill", str(fill), "--json"], capture_output=True, text=True, encoding="utf-8")
+                try:
+                    rep = json.loads(r.stdout.strip().splitlines()[-1])
+                    runs.append((open(rep["output"], "rb").read(), rep, r.returncode))
+                except (json.JSONDecodeError, IndexError, KeyError, TypeError, OSError):
+                    runs.append((b"", {}, r.returncode))
+            (a, rep, rc), (b, _, _) = runs
+            flagged = bytearray(len(a))
+            for dmg in rep.get("damaged", []):
+                s = dmg["output_offset"]
+                e = min(len(flagged), s + dmg["length"])
+                flagged[s:e] = b"\1" * max(0, e - s)
+            exact = [i for i in range(min(len(a), len(b))) if not flagged[i] and a[i] == b[i]]
+            wrong = sum(1 for i in exact if i >= len(plain) or a[i] != plain[i])
+            certified = next((k for k, i in enumerate(exact) if i != k or a[i] != plain[i]), len(exact))
+            ok = (rc == 2 and a and wrong == 0 and rep.get("damaged_blocks", 0) >= 1 and rep.get("inferred_bytes") == 0
+                  and rep.get("exact_bytes") == len(exact) and certified >= 0.95 * gzip_right)
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} rescue of one block, {label}: {certified:,} bytes certified before the damage "
+                  f"(gzip decodes {gzip_right:,} right), {len(exact):,} called exact, {wrong:,} of them wrong, "
+                  f"{rep.get('damaged_blocks', '?')} damaged block, exit {rc}")
 
     # rescue of ZIPs (Rust only): without its central directory (cut, or zeroed), and with a zeroed
     # stretch inside; every entry called intact must be identical, the damage reported
