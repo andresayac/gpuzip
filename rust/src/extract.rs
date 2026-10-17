@@ -1,7 +1,8 @@
 //! Extracting or testing one ZIP archive. CPU threads and the GPU share the Deflate entries
-//! (nvCOMP takes batches of the smallest, the CPU threads the largest, until they meet),
-//! writer threads save nvCOMP's results, gpuinflate decodes the largest entries one at a time
-//! when that beats a CPU thread, and 7-Zip takes the entries none of them reads.
+//! (nvCOMP takes batches of the smallest, the CPU threads the largest, until they meet; in auto
+//! mode nvCOMP starts only if the CPU threads, timed on their first entries, would be slower
+//! alone), writer threads save nvCOMP's results, gpuinflate decodes the largest entries one at a
+//! time when that beats a CPU thread, and 7-Zip takes the entries none of them reads.
 
 use crate::gpu::{self, Api, Decoder, MAX_BATCH_ENTRIES};
 use crate::inflate;
@@ -13,7 +14,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,26 @@ const BIG_MIN_GPU_MODE: u64 = MIB; // gpu mode: nvCOMP keeps only the small ones
 const CPU_RATE: f64 = 1.0e9; // bytes/s, one thread with libdeflate
 const GPU_RATE: f64 = 4.0e9; // bytes/s, gpuinflate on one stream
 const GPU_START: f64 = 0.15; // s
+// auto mode starts nvCOMP only when it and the CPU threads together would finish sooner than the
+// CPU threads alone, start-up included. The CPU threads' speed is measured on the first entries
+// they decode; the GPU's figures are rough (RTX 5080).
+const NVCOMP_RATE: f64 = 2.5e9; // bytes/s, batches of small entries
+const NVCOMP_START: f64 = 0.15; // s, the driver, nvCOMP and the pinned buffers
+const GPU_EXIT: f64 = 0.05; // s, what a loaded CUDA driver adds when the program ends
+const MEASURE: Duration = Duration::from_millis(5); // CPU decode time to see before deciding
+const MEASURE_MAX: Duration = Duration::from_millis(20); // decide anyway after this long
+const CPU_RATE_BUSY: f64 = 0.5e9; // bytes/s, one thread while every thread decodes, if not measured
+
+/// auto mode: whether nvCOMP joining the CPU threads would finish sooner than they would alone.
+/// `small`: bytes nvCOMP could take, `rest`: bytes only the CPU takes, `cpu`: bytes/s of all the
+/// CPU threads together.
+fn nvcomp_pays(small: f64, rest: f64, cpu: f64) -> bool {
+    let all = small + rest;
+    // from the moment it is running the GPU takes its share at NVCOMP_RATE, but no more than the
+    // small entries; the CPU threads take everything else
+    let shared = (rest / cpu).max((all + NVCOMP_RATE * NVCOMP_START) / (cpu + NVCOMP_RATE));
+    shared + GPU_EXIT < all / cpu
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Via {
@@ -107,6 +128,9 @@ pub struct Run<'a> {
     slot_bytes: usize,
     use_gpu: bool,
     steal: bool, // in gpu mode the CPU only takes what the GPU cannot
+    threads: usize,
+    cpu_bytes: AtomicU64, // Deflate entries the CPU threads decoded, and the time they took
+    cpu_nanos: AtomicU64,
 }
 
 impl<'a> Run<'a> {
@@ -165,6 +189,9 @@ impl<'a> Run<'a> {
             slot_bytes,
             use_gpu,
             steal: opts.mode != Mode::Gpu,
+            threads: opts.threads.unwrap_or_else(crate::cpu_threads).max(1),
+            cpu_bytes: AtomicU64::new(0),
+            cpu_nanos: AtomicU64::new(0),
         }
     }
 
@@ -317,9 +344,14 @@ impl<'a> Run<'a> {
             STORED => self.deliver(e, &self.data[start..start + e.size as usize], Via::Cpu),
             DEFLATED if e.size > STREAM_ABOVE => self.deliver_streamed(e),
             DEFLATED => {
+                let t = Instant::now();
                 let mut out = vec![0u8; e.size as usize];
                 match d.deflate_decompress(&self.data[start..start + e.csize as usize], &mut out) {
-                    Ok(n) if n == out.len() => self.deliver(e, &out, Via::Cpu),
+                    Ok(n) if n == out.len() => {
+                        self.cpu_nanos.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        self.cpu_bytes.fetch_add(e.size, Ordering::Relaxed);
+                        self.deliver(e, &out, Via::Cpu)
+                    }
                     Ok(_) => Ok(false),
                     Err(x) => Err(format!("Deflate error: {x:?}")),
                 }
@@ -367,7 +399,43 @@ impl<'a> Run<'a> {
         batch
     }
 
+    /// auto mode: watch the CPU threads for a moment, then say whether starting nvCOMP pays off.
+    fn nvcomp_worth_starting(&self) -> bool {
+        let t0 = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(1));
+            if self.pending.lock().unwrap().is_empty() {
+                self.info.lock().unwrap().push("GPU not started: the CPU threads took every entry first".into());
+                return false;
+            }
+            if Duration::from_nanos(self.cpu_nanos.load(Ordering::Relaxed)) >= MEASURE || t0.elapsed() >= MEASURE_MAX {
+                break;
+            }
+        }
+        let (bytes, nanos) = (self.cpu_bytes.load(Ordering::Relaxed), self.cpu_nanos.load(Ordering::Relaxed));
+        // every thread still on its first entry (large ones come first): assume the usual speed
+        let (per_thread, how) = if bytes == 0 { (CPU_RATE_BUSY, "about ") } else { (bytes as f64 * 1e9 / nanos as f64, "") };
+        let cpu = per_thread * self.threads as f64;
+        let (mut small, mut rest) = (0u64, 0u64);
+        for &i in self.pending.lock().unwrap().iter() {
+            let size = self.entries[i].size;
+            if size <= self.gpu_max_entry { small += size } else { rest += size }
+        }
+        let go = nvcomp_pays(small as f64, rest as f64, cpu);
+        self.info.lock().unwrap().push(format!(
+            "GPU {}: the CPU threads decode at {how}{:.1} GB/s and would need {:.2} s for the {} left",
+            if go { "started" } else { "not started, the CPU is faster" },
+            cpu / 1e9,
+            (small + rest) as f64 / cpu,
+            crate::human(small + rest)
+        ));
+        go
+    }
+
     fn gpu_thread(&self, jobs: Sender<WriteJob>) {
+        if self.steal && !self.nvcomp_worth_starting() {
+            return;
+        }
         let t0 = Instant::now();
         let api = match gpu_api() {
             Ok(a) => a,
@@ -542,7 +610,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        let threads = self.opts.threads.unwrap_or_else(crate::cpu_threads).max(1);
+        let threads = self.threads;
         let io_threads = self.opts.io_threads.unwrap_or_else(|| crate::cpu_threads().min(32)).max(1);
         let stop = &AtomicBool::new(false);
         let show_progress = !(self.opts.quiet || self.opts.json) && std::io::stderr().is_terminal();
@@ -617,5 +685,19 @@ impl<'a> Run<'a> {
             retried,
             stream: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nvcomp_pays;
+
+    #[test]
+    fn nvcomp_only_when_the_cpu_is_slow() {
+        // 1 GB of small entries: 16 Zen 5 threads (6 GB/s) finish before the GPU helps, 2 do not
+        assert!(!nvcomp_pays(1e9, 0.0, 6e9));
+        assert!(nvcomp_pays(1e9, 0.0, 1.2e9));
+        // too little the GPU could take: the CPU has the large entries to do anyway
+        assert!(!nvcomp_pays(0.02e9, 2e9, 1.2e9));
     }
 }

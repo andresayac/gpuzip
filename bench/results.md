@@ -2,11 +2,11 @@ System: NVIDIA GeForce RTX 5080, 617.14 · AMD Ryzen 7 9700X 8-Core Processor (1
 
 | Dataset | Job | 7-zip | Python cpu | Python gpu | Python auto | Rust cpu | Rust gpu | Rust auto | best vs 7-Zip |
 |---|---|---|---|---|---|---|---|---|---|
-| small | test | 4.78 s | 0.87 s | 1.79 s | 1.00 s | 0.28 s | 0.61 s | 0.39 s | 16.8x |
-| small | extract | 26.81 s | 9.86 s | - | 11.20 s | 19.56 s | - | 19.77 s | 2.7x |
-| medium | test | 5.08 s | 0.46 s | 2.03 s | 0.48 s | 0.26 s | 0.86 s | 0.35 s | 19.5x |
-| medium | extract | 7.31 s | 1.08 s | - | 1.53 s | 1.56 s | - | 1.87 s | 6.8x |
-| large | test | 3.66 s | 0.45 s | 42.23 s | 0.45 s | 0.27 s | 21.16 s | 0.27 s | 13.6x |
-| large | extract | 4.01 s | 0.67 s | - | 0.66 s | 0.62 s | - | 1.45 s | 6.5x |
-| mixed | test | 2.80 s | 0.46 s | 11.93 s | 0.51 s | 0.19 s | 5.77 s | 0.22 s | 15.0x |
-| mixed | extract | 9.07 s | 2.89 s | - | 3.24 s | 5.38 s | - | 5.21 s | 3.1x |
+| small | test | 4.34 s | 0.81 s | 1.64 s | 0.93 s | 0.26 s | 0.57 s | 0.26 s | 16.6x |
+| small | extract | 25.54 s | 9.29 s | - | 9.30 s | 18.80 s | - | 19.36 s | 2.7x |
+| medium | test | 5.02 s | 0.43 s | 1.96 s | 0.47 s | 0.26 s | 2.36 s | 0.26 s | 19.6x |
+| medium | extract | 7.12 s | 1.10 s | - | 1.11 s | 1.48 s | - | 1.58 s | 6.5x |
+| large | test | 3.63 s | 0.44 s | 43.29 s | 0.43 s | 0.26 s | 0.48 s | 0.26 s | 14.3x |
+| large | extract | 3.90 s | 0.64 s | - | 0.67 s | 0.48 s | - | 0.48 s | 8.1x |
+| mixed | test | 2.83 s | 0.43 s | 12.22 s | 0.52 s | 0.22 s | 0.85 s | 0.20 s | 13.9x |
+| mixed | extract | 9.59 s | 2.83 s | - | 3.09 s | 5.41 s | - | 5.29 s | 3.4x |

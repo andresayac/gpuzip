@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `auto` starts nvCOMP only when the CPU threads, timed on the archive's first entries, would
+  be slower alone than with the GPU, start-up included: on a strong CPU it is as fast as
+  `--mode cpu`, on a weak one the GPU still takes the small entries.
+
 ## 0.1.1 (2026-10-17)
 
 ### Fixed

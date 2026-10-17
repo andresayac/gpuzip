@@ -17,7 +17,13 @@ stream, decodes from all of them at once and stitches the pieces, at 3-5 GB/s (h
 | Whole RAR, 7z, other tar.*, ... archives | 7-Zip |
 
 In `auto` mode nvCOMP takes the smallest Deflate entries and the CPU threads take the largest,
-until they meet. gpuinflate takes, one at a time, the largest entries that it would finish
+until they meet. nvCOMP is started only when that pays: the CPU threads begin at once, and after
+about 5 ms of their decoding gpuzip knows how fast they are on this archive and this machine.
+The GPU joins only if it and the CPU threads together would finish sooner than the CPU threads
+alone, counting its start-up (about 0.15 s), its speed on small entries (about 2.5 GB/s on an
+RTX 5080) and the 0.05 s a loaded CUDA driver adds at exit. 16 Zen 5 threads decode the
+benchmark archives at 6-8 GB/s and are done in about 0.2 s, so the GPU stays off; with 2 or 4
+threads it is started and saves a third of the time. gpuinflate takes, one at a time, the largest entries that it would finish
 before a CPU thread could (it runs at about 4 GB/s on one stream after starting in about
 0.15 s, a CPU thread at about 1 GB/s): one 2 GB entry goes to it, eight entries of 128 MB stay
 with the 16 CPU threads. In `gpu` mode it takes every entry of 1 MB or more.
