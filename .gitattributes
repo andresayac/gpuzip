@@ -1,0 +1,7 @@
+# Shell scripts must keep LF to run on Linux and macOS, even from a Windows checkout;
+# batch files are safest with CR LF in cmd.exe.
+*.sh   text eol=lf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+# Charts and terminal sessions are generated (bench/charts.py, bench/terminal.py)
+docs/img/*.svg  linguist-generated

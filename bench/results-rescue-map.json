@@ -1,0 +1,1150 @@
+{
+"label": "tar.gz of Python's standard library (37 MB), three bad 4 KB sectors",
+"damaged_size": 10951962,
+"output_size": 36894720,
+"gzip_prefix": 2787230,
+"totals": {
+"exact": 35567240,
+"inferred": 21911,
+"suspect": 478358,
+"unknown": 827211
+},
+"bins": [
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 0.4377,
+"suspect": 0.5623
+},
+{
+"exact": 0.1476,
+"inferred": 0.0246,
+"suspect": 0.2262,
+"unknown": 0.6015
+},
+{
+"exact": 0.3827,
+"inferred": 0.0408,
+"unknown": 0.5765
+},
+{
+"exact": 0.5274,
+"inferred": 0.0453,
+"unknown": 0.4273
+},
+{
+"exact": 0.6364,
+"inferred": 0.0262,
+"unknown": 0.3374
+},
+{
+"exact": 0.6695,
+"inferred": 0.0162,
+"unknown": 0.3142
+},
+{
+"exact": 0.6996,
+"inferred": 0.0136,
+"unknown": 0.2869
+},
+{
+"exact": 0.6626,
+"inferred": 0.0121,
+"unknown": 0.3254
+},
+{
+"exact": 0.7328,
+"inferred": 0.0067,
+"unknown": 0.2605
+},
+{
+"exact": 0.7146,
+"inferred": 0.007,
+"unknown": 0.2784
+},
+{
+"exact": 0.7203,
+"inferred": 0.0063,
+"unknown": 0.2734
+},
+{
+"exact": 0.7505,
+"inferred": 0.0073,
+"unknown": 0.2422
+},
+{
+"exact": 0.815,
+"inferred": 0.0042,
+"unknown": 0.1808
+},
+{
+"exact": 0.6629,
+"inferred": 0.0016,
+"unknown": 0.3356
+},
+{
+"exact": 0.7049,
+"inferred": 0.0001,
+"unknown": 0.295
+},
+{
+"exact": 0.718,
+"unknown": 0.282
+},
+{
+"exact": 0.7525,
+"unknown": 0.2475
+},
+{
+"exact": 0.6943,
+"unknown": 0.3057
+},
+{
+"exact": 0.7252,
+"unknown": 0.2748
+},
+{
+"exact": 0.7165,
+"unknown": 0.2835
+},
+{
+"exact": 0.7418,
+"unknown": 0.2582
+},
+{
+"exact": 0.7526,
+"unknown": 0.2474
+},
+{
+"exact": 0.7645,
+"unknown": 0.2355
+},
+{
+"exact": 0.9974,
+"unknown": 0.0026
+},
+{
+"exact": 0.9988,
+"unknown": 0.0012
+},
+{
+"exact": 0.9997,
+"unknown": 0.0003
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 0.2998,
+"suspect": 0.7002
+},
+{
+"suspect": 1.0
+},
+{
+"suspect": 1.0
+},
+{
+"exact": 0.0054,
+"suspect": 0.6641,
+"unknown": 0.3305
+},
+{
+"exact": 0.6686,
+"unknown": 0.3314
+},
+{
+"exact": 0.9342,
+"unknown": 0.0658
+},
+{
+"exact": 0.9987,
+"unknown": 0.0013
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 0.3784,
+"suspect": 0.5147,
+"unknown": 0.1069
+},
+{
+"exact": 0.8912,
+"inferred": 0.0006,
+"unknown": 0.1082
+},
+{
+"exact": 0.8954,
+"inferred": 0.001,
+"unknown": 0.1036
+},
+{
+"exact": 0.8732,
+"inferred": 0.0002,
+"unknown": 0.1266
+},
+{
+"exact": 0.9765,
+"unknown": 0.0235
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+},
+{
+"exact": 1.0
+}
+]
+}

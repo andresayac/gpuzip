@@ -278,7 +278,7 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
         let file = e.header().entry_type().is_file();
         let size = e.size();
         if list {
-            println!("{:>12}  {name}", if file { crate::commas(size) } else { String::new() });
+            crate::ui::say!("{:>12}  {name}", if file { crate::commas(size) } else { String::new() });
         }
         match root {
             Some(r) => match e.unpack_in(r) {

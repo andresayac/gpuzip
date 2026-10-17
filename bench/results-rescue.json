@@ -1,0 +1,1880 @@
+[
+ {
+  "baseline": {
+   "gzip": 0.0
+  },
+  "gpuzip": 100.0,
+  "silent": 0,
+  "warned_wrong": 0,
+  "inferred_right": 0,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.25264839999726973,
+  "report": {
+   "clean": true,
+   "damaged_blocks": 0,
+   "crc_check": 1,
+   "notes": []
+  },
+  "original": "logs.txt.gz",
+  "failure": "ftp_ascii"
+ },
+ {
+  "baseline": {
+   "gzip": 1.5971183776855469
+  },
+  "gpuzip": 25.870931148529053,
+  "silent": 0,
+  "warned_wrong": 719362,
+  "inferred_right": 9185,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.5974395000084769,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 15,
+   "crc_check": -1,
+   "notes": [
+    "15 block(s) with a symbol count other than the stream's regular 16383 (52 of 67 blocks)",
+    "the file went through an ASCII-mode transfer that removed the CR of every CR LF (it has no CR LF pair where chance would put dozens): the blocks it broke are flagged; the CRs cannot be put back here, with one CRC for the whole file to judge them. A copy transferred in binary mode is whole",
+    "13412 of 23825762 bytes that copied from data lost with a damaged block were inferred (29 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "ascii_strip"
+ },
+ {
+  "baseline": {
+   "gzip": 6.889063119888306
+  },
+  "gpuzip": 44.06554102897644,
+  "silent": 0,
+  "warned_wrong": 302213,
+  "inferred_right": 51042,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.4023031999968225,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 3,
+   "crc_check": -1,
+   "notes": [
+    "3 block(s) with a symbol count other than the stream's regular 16383 (64 of 67 blocks)",
+    "51932 of 18269318 bytes that copied from data lost with a damaged block were inferred (6 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "bad_sectors"
+ },
+ {
+  "baseline": {
+   "gzip": 8.59375
+  },
+  "gpuzip": 41.919153928756714,
+  "silent": 0,
+  "warned_wrong": 1,
+  "inferred_right": 23,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.2869462999951793,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 1,
+   "crc_check": -1,
+   "notes": [
+    "23 of 16005232 bytes that copied from data lost with a damaged block were inferred (1 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "flash_ff"
+ },
+ {
+  "baseline": {
+   "gzip": 73.68698716163635
+  },
+  "gpuzip": 78.55607867240906,
+  "silent": 0,
+  "warned_wrong": 343473,
+  "inferred_right": 2185,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.3467034999921452,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 4,
+   "crc_check": -1,
+   "notes": [
+    "1 block(s) with a symbol count other than the stream's regular 16383 (64 of 65 blocks)",
+    "3452 of 6733466 bytes that copied from data lost with a damaged block were inferred (8 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "crosslinked"
+ },
+ {
+  "baseline": {
+   "gzip": 64.21338319778442
+  },
+  "gpuzip": 75.60245096683502,
+  "silent": 0,
+  "warned_wrong": 388666,
+  "inferred_right": 0,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.25598480000917334,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 2,
+   "crc_check": -1,
+   "notes": [
+    "the decode ran to the end of the file through damaged data: its last block holds more symbols than the stream's blocks do",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "torrent_holes"
+ },
+ {
+  "baseline": {
+   "gzip": 85.32980680465698
+  },
+  "gpuzip": 85.32933294773102,
+  "silent": 0,
+  "warned_wrong": 0,
+  "inferred_right": 0,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.16687270000693388,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 0,
+   "crc_check": -1,
+   "notes": [
+    "the file ends inside the stream (truncated)"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "cut"
+ },
+ {
+  "baseline": {
+   "gzip": 48.80231022834778
+  },
+  "gpuzip": 67.99347400665283,
+  "silent": 0,
+  "warned_wrong": 1482313,
+  "inferred_right": 0,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.2979202999995323,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 1,
+   "crc_check": -1,
+   "notes": [
+    "8759 of 11409410 bytes that copied from data lost with a damaged block were inferred (1 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "resume_dup"
+ },
+ {
+  "baseline": {
+   "gzip": 54.1585773229599
+  },
+  "gpuzip": 65.58029353618622,
+  "silent": 0,
+  "warned_wrong": 612493,
+  "inferred_right": 186,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.24431760000879876,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 1,
+   "crc_check": -1,
+   "notes": [
+    "186 of 7023715 bytes that copied from data lost with a damaged block were inferred (3 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "resume_gap"
+ },
+ {
+  "baseline": {
+   "gzip": 81.08349144458771
+  },
+  "gpuzip": 81.08311295509338,
+  "silent": 0,
+  "warned_wrong": 0,
+  "inferred_right": 0,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.15637409999908414,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 0,
+   "crc_check": -1,
+   "notes": [
+    "the file ends inside the stream (truncated)",
+    "the file ends in 269455 zero bytes (written by a crash or an unfinished download, not by gzip): the data ends where they begin"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "crash_tail"
+ },
+ {
+  "baseline": {
+   "gzip": 7.072469592094421
+  },
+  "gpuzip": 63.7336790561676,
+  "silent": 9013201,
+  "warned_wrong": 410323,
+  "inferred_right": 0,
+  "inferred_wrong": 0,
+  "unit": "% bytes",
+  "seconds": 0.32513029999972787,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 1,
+   "crc_check": -1,
+   "notes": [
+    "1 block(s) with a symbol count other than the stream's regular 16383 (66 of 67 blocks)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ]
+  },
+  "original": "logs.txt.gz",
+  "failure": "bitrot"
+ },
+ {
+  "baseline": {
+   "Windows tar": 0,
+   "7-Zip": 0
+  },
+  "gpuzip": 1828,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 2.214037099998677,
+  "report": {
+   "clean": true,
+   "damaged_blocks": 0,
+   "crc_check": 1,
+   "notes": [],
+   "tar": {
+    "inferred": 0,
+    "intact": 1828,
+    "partial": 0,
+    "repaired_headers": 0,
+    "skipped": 0,
+    "suspect": 0,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "ftp_ascii"
+ },
+ {
+  "baseline": {
+   "Windows tar": 12,
+   "7-Zip": 12
+  },
+  "gpuzip": 106,
+  "of": 1828,
+  "silent": 1,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 16.667541300004814,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 130,
+   "crc_check": -1,
+   "notes": [
+    "121 block(s) with a symbol count other than the stream's regular 16383 (309 of 430 blocks)",
+    "the file went through an ASCII-mode transfer that removed the CR of every CR LF (it has no CR LF pair where chance would put dozens): the blocks it broke are flagged; the CRs cannot be put back here, with one CRC for the whole file to judge them. A copy transferred in binary mode is whole",
+    "80606 of 12164905 bytes that copied from data lost with a damaged block were inferred (978 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ],
+   "tar": {
+    "inferred": 1,
+    "intact": 82,
+    "partial": 127,
+    "repaired_headers": 3,
+    "skipped": 408,
+    "suspect": 39,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "ascii_strip"
+ },
+ {
+  "baseline": {
+   "Windows tar": 87,
+   "7-Zip": 87
+  },
+  "gpuzip": 1722,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 2.791445199996815,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 3,
+   "crc_check": -1,
+   "notes": [
+    "2 block(s) with a symbol count other than the stream's regular 16383 (441 of 443 blocks)",
+    "21911 of 809380 bytes that copied from data lost with a damaged block were inferred (113 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1690,
+    "partial": 102,
+    "repaired_headers": 1,
+    "skipped": 4,
+    "suspect": 32,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "bad_sectors"
+ },
+ {
+  "baseline": {
+   "Windows tar": 207,
+   "7-Zip": 207
+  },
+  "gpuzip": 1771,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 2.175000299990643,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 1,
+   "crc_check": -1,
+   "notes": [
+    "1830 of 337685 bytes that copied from data lost with a damaged block were inferred (22 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1771,
+    "partial": 39,
+    "repaired_headers": 0,
+    "skipped": 2,
+    "suspect": 1,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "flash_ff"
+ },
+ {
+  "baseline": {
+   "Windows tar": 1208,
+   "7-Zip": 1208
+  },
+  "gpuzip": 1753,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 2.1328293999977177,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 4,
+   "crc_check": -1,
+   "notes": [
+    "4271 of 106140 bytes that copied from data lost with a damaged block were inferred (55 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1722,
+    "partial": 21,
+    "repaired_headers": 0,
+    "skipped": 17,
+    "suspect": 32,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "crosslinked"
+ },
+ {
+  "baseline": {
+   "Windows tar": 1761,
+   "7-Zip": 1761
+  },
+  "gpuzip": 1761,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 2.086909799996647,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 1,
+   "crc_check": -1,
+   "notes": [
+    "4057 of 557385 bytes that copied from data lost with a damaged block were inferred (24 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1758,
+    "partial": 0,
+    "repaired_headers": 0,
+    "skipped": 27,
+    "suspect": 4,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "torrent_holes"
+ },
+ {
+  "baseline": {
+   "Windows tar": 1462,
+   "7-Zip": 1462
+  },
+  "gpuzip": 1462,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 1.5130667999910656,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 0,
+   "crc_check": -1,
+   "notes": [
+    "the file ends inside the stream (truncated)"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1462,
+    "partial": 1,
+    "repaired_headers": 0,
+    "skipped": 0,
+    "suspect": 0,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "cut"
+ },
+ {
+  "baseline": {
+   "Windows tar": 544,
+   "7-Zip": 544
+  },
+  "gpuzip": 1748,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 2.365416600005119,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 1,
+   "crc_check": -1,
+   "notes": [
+    "7136 of 131695 bytes that copied from data lost with a damaged block were inferred (42 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1744,
+    "partial": 74,
+    "repaired_headers": 0,
+    "skipped": 5,
+    "suspect": 4,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "resume_dup"
+ },
+ {
+  "baseline": {
+   "Windows tar": 794,
+   "7-Zip": 794
+  },
+  "gpuzip": 1484,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 2.0273697999946307,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 1,
+   "crc_check": -1,
+   "notes": [
+    "62735 of 297500 bytes that copied from data lost with a damaged block were inferred (67 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1484,
+    "partial": 1,
+    "repaired_headers": 0,
+    "skipped": 125,
+    "suspect": 0,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "resume_gap"
+ },
+ {
+  "baseline": {
+   "Windows tar": 1359,
+   "7-Zip": 1359
+  },
+  "gpuzip": 1359,
+  "of": 1828,
+  "silent": 0,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 1.553281300002709,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 0,
+   "crc_check": -1,
+   "notes": [
+    "the file ends inside the stream (truncated)",
+    "the file ends in 2190393 zero bytes (written by a crash or an unfinished download, not by gzip): the data ends where they begin"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1359,
+    "partial": 1,
+    "repaired_headers": 0,
+    "skipped": 0,
+    "suspect": 0,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "crash_tail"
+ },
+ {
+  "baseline": {
+   "Windows tar": 794,
+   "7-Zip": 794
+  },
+  "gpuzip": 1240,
+  "of": 1828,
+  "silent": 6,
+  "inferred_wrong": 0,
+  "unit": "files",
+  "seconds": 2.8358366999891587,
+  "report": {
+   "clean": false,
+   "damaged_blocks": 4,
+   "crc_check": -1,
+   "notes": [
+    "4 block(s) with a symbol count other than the stream's regular 16383 (447 of 451 blocks)",
+    "15622 of 695216 bytes that copied from data lost with a damaged block were inferred (185 lost window bytes, from where their copies appear and the file's own statistics)",
+    "with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal or a match length) would not show"
+   ],
+   "tar": {
+    "inferred": 0,
+    "intact": 1239,
+    "partial": 174,
+    "repaired_headers": 0,
+    "skipped": 281,
+    "suspect": 9,
+    "unverified": 0
+   }
+  },
+  "original": "code.tar.gz",
+  "failure": "bitrot"
+ },
+ {
+  "baseline": {
+   "7-Zip": 0,
+   "zipfile": 0
+  },
+  "gpuzip": 3440,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 2.330424600004335,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3440,
+    "lost": 0,
+    "partial": 6,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "original": "lib.zip",
+  "failure": "ftp_ascii"
+ },
+ {
+  "baseline": {
+   "7-Zip": 3,
+   "zipfile": 0
+  },
+  "gpuzip": 3429,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 48.56647570000496,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3429,
+    "lost": 0,
+    "partial": 11,
+    "unsupported": 0,
+    "unverified": 6
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (bad central directory entry at 18495888): the entries come from the local headers found by scanning",
+    "the file went through an ASCII-mode transfer that removed the CR of every CR LF: 233 CRs put back in 211 entries, each entry's CRC confirming them"
+   ]
+  },
+  "original": "lib.zip",
+  "failure": "ascii_strip"
+ },
+ {
+  "baseline": {
+   "7-Zip": 3436,
+   "zipfile": 3436
+  },
+  "gpuzip": 3436,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 2.296528299993952,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3436,
+    "lost": 0,
+    "partial": 8,
+    "unsupported": 0,
+    "unverified": 3
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "original": "lib.zip",
+  "failure": "bad_sectors"
+ },
+ {
+  "baseline": {
+   "7-Zip": 3401,
+   "zipfile": 3400
+  },
+  "gpuzip": 3401,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 3.076913600001717,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3400,
+    "lost": 0,
+    "partial": 46,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "original": "lib.zip",
+  "failure": "flash_ff"
+ },
+ {
+  "baseline": {
+   "7-Zip": 3438,
+   "zipfile": 3438
+  },
+  "gpuzip": 3438,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 2.188189799999236,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3438,
+    "lost": 0,
+    "partial": 6,
+    "unsupported": 0,
+    "unverified": 3
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "original": "lib.zip",
+  "failure": "crosslinked"
+ },
+ {
+  "baseline": {
+   "7-Zip": 3252,
+   "zipfile": 3243
+  },
+  "gpuzip": 3252,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 7.212352299990016,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3243,
+    "lost": 146,
+    "partial": 57,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "original": "lib.zip",
+  "failure": "torrent_holes"
+ },
+ {
+  "baseline": {
+   "7-Zip": 2654,
+   "zipfile": 0
+  },
+  "gpuzip": 2654,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 1.568848099996103,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 2654,
+    "lost": 0,
+    "partial": 7,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (not a ZIP file): the entries come from the local headers found by scanning"
+   ]
+  },
+  "original": "lib.zip",
+  "failure": "cut"
+ },
+ {
+  "baseline": {
+   "7-Zip": 1210,
+   "zipfile": 2240
+  },
+  "gpuzip": 3440,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 2.0215676999941934,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3440,
+    "lost": 0,
+    "partial": 6,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": true,
+   "notes": [
+    "1200 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC"
+   ]
+  },
+  "original": "lib.zip",
+  "failure": "resume_dup"
+ },
+ {
+  "baseline": {
+   "7-Zip": 1593,
+   "zipfile": 1729
+  },
+  "gpuzip": 3326,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 5.309619999999995,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3322,
+    "lost": 0,
+    "partial": 124,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": true,
+   "notes": [
+    "1593 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC"
+   ]
+  },
+  "original": "lib.zip",
+  "failure": "resume_gap"
+ },
+ {
+  "baseline": {
+   "7-Zip": 2452,
+   "zipfile": 0
+  },
+  "gpuzip": 2452,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 1.5244310999987647,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 2452,
+    "lost": 0,
+    "partial": 7,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (not a ZIP file): the entries come from the local headers found by scanning"
+   ]
+  },
+  "original": "lib.zip",
+  "failure": "crash_tail"
+ },
+ {
+  "baseline": {
+   "7-Zip": 3432,
+   "zipfile": 3432
+  },
+  "gpuzip": 3432,
+  "of": 3440,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 2.08218629998737,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 3432,
+    "lost": 0,
+    "partial": 8,
+    "unsupported": 0,
+    "unverified": 7
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "original": "lib.zip",
+  "failure": "bitrot"
+ },
+ {
+  "baseline": {
+   "7-Zip": 0,
+   "zipfile": 0
+  },
+  "gpuzip": 10,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.017058400000678375,
+  "report": {
+   "clean": true,
+   "counts": {
+    "intact": 10,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 0.0,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "ftp_ascii"
+ },
+ {
+  "baseline": {
+   "7-Zip": 2,
+   "zipfile": 2
+  },
+  "gpuzip": 10,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 4.1293111000122735,
+  "report": {
+   "clean": true,
+   "counts": {
+    "intact": 10,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": [
+    "7 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC",
+    "the file went through an ASCII-mode transfer that removed the CR of every CR LF: 3 CRs put back in 2 entries, each entry's CRC confirming them"
+   ]
+  },
+  "text_7z": 38.118811881188115,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "ascii_strip"
+ },
+ {
+  "baseline": {
+   "7-Zip": 8,
+   "zipfile": 8
+  },
+  "gpuzip": 8,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.03760560000955593,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 8,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 2
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 4.0594059405940595,
+  "text_gpuzip": 4.0594059405940595,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "bad_sectors"
+ },
+ {
+  "baseline": {
+   "7-Zip": 7,
+   "zipfile": 7
+  },
+  "gpuzip": 7,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.17546060000313446,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 7,
+    "lost": 0,
+    "partial": 3,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 0.0,
+  "text_gpuzip": 0.0,
+  "opens_damaged": false,
+  "opens_rebuilt": false,
+  "original": "report.docx",
+  "failure": "flash_ff"
+ },
+ {
+  "baseline": {
+   "7-Zip": 9,
+   "zipfile": 9
+  },
+  "gpuzip": 9,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.03705169999739155,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 9,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 61.68316831683168,
+  "text_gpuzip": 61.68316831683168,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "crosslinked"
+ },
+ {
+  "baseline": {
+   "7-Zip": 4,
+   "zipfile": 4
+  },
+  "gpuzip": 4,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.15966889999981504,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 4,
+    "lost": 4,
+    "partial": 2,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 83.11881188118812,
+  "text_gpuzip": 83.06930693069307,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "torrent_holes"
+ },
+ {
+  "baseline": {
+   "7-Zip": 2,
+   "zipfile": 0
+  },
+  "gpuzip": 2,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.03593870000622701,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 2,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (not a ZIP file): the entries come from the local headers found by scanning"
+   ]
+  },
+  "text_7z": 99.3069306930693,
+  "text_gpuzip": 99.25742574257426,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "cut"
+ },
+ {
+  "baseline": {
+   "7-Zip": 2,
+   "zipfile": 7
+  },
+  "gpuzip": 9,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.03827859999728389,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 9,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": [
+    "3 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC"
+   ]
+  },
+  "text_7z": 68.01980198019803,
+  "text_gpuzip": 68.01980198019803,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "resume_dup"
+ },
+ {
+  "baseline": {
+   "7-Zip": 2,
+   "zipfile": 7
+  },
+  "gpuzip": 9,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.03243730000394862,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 9,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": [
+    "2 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC"
+   ]
+  },
+  "text_7z": 65.04950495049505,
+  "text_gpuzip": 65.04950495049505,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "resume_gap"
+ },
+ {
+  "baseline": {
+   "7-Zip": 2,
+   "zipfile": 0
+  },
+  "gpuzip": 2,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.03288579999934882,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 2,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (not a ZIP file): the entries come from the local headers found by scanning"
+   ]
+  },
+  "text_7z": 95.54455445544555,
+  "text_gpuzip": 95.4950495049505,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "crash_tail"
+ },
+ {
+  "baseline": {
+   "7-Zip": 8,
+   "zipfile": 8
+  },
+  "gpuzip": 8,
+  "of": 10,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.037154200006625615,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 8,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 2
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 63.26732673267327,
+  "text_gpuzip": 63.26732673267327,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "report.docx",
+  "failure": "bitrot"
+ },
+ {
+  "baseline": {
+   "7-Zip": 1,
+   "zipfile": 0
+  },
+  "gpuzip": 14,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.029106600006343797,
+  "report": {
+   "clean": true,
+   "counts": {
+    "intact": 14,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 0.0,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "ftp_ascii"
+ },
+ {
+  "baseline": {
+   "7-Zip": 4,
+   "zipfile": 6
+  },
+  "gpuzip": 14,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.39230519998818636,
+  "report": {
+   "clean": true,
+   "counts": {
+    "intact": 14,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": [
+    "7 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC",
+    "the file went through an ASCII-mode transfer that removed the CR of every CR LF: 5 CRs put back in 3 entries, each entry's CRC confirming them"
+   ]
+  },
+  "text_7z": 16.666666666666668,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "ascii_strip"
+ },
+ {
+  "baseline": {
+   "7-Zip": 11,
+   "zipfile": 11
+  },
+  "gpuzip": 11,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.07041669999307487,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 11,
+    "lost": 0,
+    "partial": 2,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 67.41666666666667,
+  "text_gpuzip": 67.29166666666667,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "bad_sectors"
+ },
+ {
+  "baseline": {
+   "7-Zip": 10,
+   "zipfile": 10
+  },
+  "gpuzip": 10,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.13075529999332502,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 10,
+    "lost": 0,
+    "partial": 4,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 83.33333333333333,
+  "text_gpuzip": 83.33333333333333,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "flash_ff"
+ },
+ {
+  "baseline": {
+   "7-Zip": 11,
+   "zipfile": 11
+  },
+  "gpuzip": 11,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.07299410000268836,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 11,
+    "lost": 0,
+    "partial": 3,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 67.16666666666667,
+  "text_gpuzip": 67.16666666666667,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "crosslinked"
+ },
+ {
+  "baseline": {
+   "7-Zip": 12,
+   "zipfile": 12
+  },
+  "gpuzip": 12,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.06152770000335295,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 12,
+    "lost": 0,
+    "partial": 2,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 71.16666666666667,
+  "text_gpuzip": 71.125,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "torrent_holes"
+ },
+ {
+  "baseline": {
+   "7-Zip": 8,
+   "zipfile": 0
+  },
+  "gpuzip": 8,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.027479099997435696,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 8,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (not a ZIP file): the entries come from the local headers found by scanning"
+   ]
+  },
+  "text_7z": 84.08333333333333,
+  "text_gpuzip": 84.04166666666667,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "cut"
+ },
+ {
+  "baseline": {
+   "7-Zip": 6,
+   "zipfile": 8
+  },
+  "gpuzip": 14,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.02780009999696631,
+  "report": {
+   "clean": true,
+   "counts": {
+    "intact": 14,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": [
+    "6 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC"
+   ]
+  },
+  "text_7z": 57.708333333333336,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "resume_dup"
+ },
+ {
+  "baseline": {
+   "7-Zip": 6,
+   "zipfile": 6
+  },
+  "gpuzip": 12,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.06145150000520516,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 12,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": true,
+   "notes": [
+    "6 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC"
+   ]
+  },
+  "text_7z": 54.833333333333336,
+  "text_gpuzip": 71.5,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "resume_gap"
+ },
+ {
+  "baseline": {
+   "7-Zip": 7,
+   "zipfile": 0
+  },
+  "gpuzip": 7,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.03768129998934455,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 7,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (not a ZIP file): the entries come from the local headers found by scanning"
+   ]
+  },
+  "text_7z": 81.58333333333333,
+  "text_gpuzip": 81.54166666666667,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "crash_tail"
+ },
+ {
+  "baseline": {
+   "7-Zip": 10,
+   "zipfile": 10
+  },
+  "gpuzip": 10,
+  "of": 14,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.05215070000849664,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 10,
+    "lost": 0,
+    "partial": 2,
+    "unsupported": 0,
+    "unverified": 2
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 63.125,
+  "text_gpuzip": 63.125,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "budget.xlsx",
+  "failure": "bitrot"
+ },
+ {
+  "baseline": {
+   "7-Zip": 0,
+   "zipfile": 0
+  },
+  "gpuzip": 39,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.028590200003236532,
+  "report": {
+   "clean": true,
+   "counts": {
+    "intact": 39,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 0.0,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "ftp_ascii"
+ },
+ {
+  "baseline": {
+   "7-Zip": 39,
+   "zipfile": 39
+  },
+  "gpuzip": 39,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.023990000001504086,
+  "report": {
+   "clean": true,
+   "counts": {
+    "intact": 39,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 100.0,
+  "text_gpuzip": 100.0,
+  "opens_damaged": true,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "ascii_strip"
+ },
+ {
+  "baseline": {
+   "7-Zip": 19,
+   "zipfile": 19
+  },
+  "gpuzip": 19,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.9253980999928899,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 19,
+    "lost": 18,
+    "partial": 2,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 25.0,
+  "text_gpuzip": 25.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "bad_sectors"
+ },
+ {
+  "baseline": {
+   "7-Zip": 12,
+   "zipfile": 12
+  },
+  "gpuzip": 12,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 1.3599096999969333,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 12,
+    "lost": 0,
+    "partial": 27,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 16.666666666666668,
+  "text_gpuzip": 16.666666666666668,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "flash_ff"
+ },
+ {
+  "baseline": {
+   "7-Zip": 25,
+   "zipfile": 25
+  },
+  "gpuzip": 25,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.595011199999135,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 26,
+    "lost": 0,
+    "partial": 16,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 58.333333333333336,
+  "text_gpuzip": 58.333333333333336,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "crosslinked"
+ },
+ {
+  "baseline": {
+   "7-Zip": 12,
+   "zipfile": 12
+  },
+  "gpuzip": 12,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 1.3409537999978056,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 12,
+    "lost": 26,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 16.666666666666668,
+  "text_gpuzip": 16.666666666666668,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "torrent_holes"
+ },
+ {
+  "baseline": {
+   "7-Zip": 34,
+   "zipfile": 0
+  },
+  "gpuzip": 34,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.029780500000924803,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 34,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (not a ZIP file): the entries come from the local headers found by scanning"
+   ]
+  },
+  "text_7z": 100.0,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "cut"
+ },
+ {
+  "baseline": {
+   "7-Zip": 23,
+   "zipfile": 20
+  },
+  "gpuzip": 39,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.021900400010054,
+  "report": {
+   "clean": true,
+   "counts": {
+    "intact": 39,
+    "lost": 0,
+    "partial": 0,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": true,
+   "notes": [
+    "19 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC"
+   ]
+  },
+  "text_7z": 66.66666666666667,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "resume_dup"
+ },
+ {
+  "baseline": {
+   "7-Zip": 21,
+   "zipfile": 12
+  },
+  "gpuzip": 33,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.21277320000808686,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 33,
+    "lost": 0,
+    "partial": 5,
+    "unsupported": 0,
+    "unverified": 1
+   },
+   "directory_ok": true,
+   "notes": [
+    "21 entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC"
+   ]
+  },
+  "text_7z": 61.111111111111114,
+  "text_gpuzip": 77.77777777777777,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "resume_gap"
+ },
+ {
+  "baseline": {
+   "7-Zip": 32,
+   "zipfile": 0
+  },
+  "gpuzip": 32,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.030161199989379384,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 32,
+    "lost": 0,
+    "partial": 1,
+    "unsupported": 0,
+    "unverified": 0
+   },
+   "directory_ok": false,
+   "notes": [
+    "the central directory cannot be read (not a ZIP file): the entries come from the local headers found by scanning"
+   ]
+  },
+  "text_7z": 100.0,
+  "text_gpuzip": 100.0,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "crash_tail"
+ },
+ {
+  "baseline": {
+   "7-Zip": 32,
+   "zipfile": 32
+  },
+  "gpuzip": 33,
+  "of": 39,
+  "silent": 0,
+  "unit": "entries",
+  "seconds": 0.055847399999038316,
+  "report": {
+   "clean": false,
+   "counts": {
+    "intact": 33,
+    "lost": 0,
+    "partial": 3,
+    "unsupported": 0,
+    "unverified": 3
+   },
+   "directory_ok": true,
+   "notes": []
+  },
+  "text_7z": 91.66666666666667,
+  "text_gpuzip": 91.66666666666667,
+  "opens_damaged": false,
+  "opens_rebuilt": true,
+  "original": "slides.pptx",
+  "failure": "bitrot"
+ }
+]
