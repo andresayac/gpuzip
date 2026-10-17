@@ -564,7 +564,11 @@ void setup(gi_ctx& g, const gi_config& cfg) {
     CK(cudaFuncSetAttribute(k_decode, cudaFuncAttributeMaxDynamicSharedMemorySize, DECODE_SHMEM));
     CK(cudaFuncSetAttribute(k_probe, cudaFuncAttributeMaxDynamicSharedMemorySize, DECODE_SHMEM));
 
-    g.in_cap = HDR_BYTES + SEG_IN_MAX + MARGIN + 4 + IN_PAD;
+    // a segment's input: the header copy, at most SEG_IN_MAX, the margin, and 3 bytes more
+    // because it starts at cur.bit / 8 rounded down to a multiple of 4; then the zeros after it
+    // (IN_PAD + 4). Without the 3, a full-size segment (a stream that compresses less than about
+    // 2.4:1) starting at an unaligned byte ran its zeros past the buffer: "invalid argument".
+    g.in_cap = HDR_BYTES + SEG_IN_MAX + MARGIN + 3 + IN_PAD + 4;
     g.nchunks_max = SEG_IN_MAX * 8 / CHUNK_BITS + 2;
     g.njobs_max = 4 * g.nchunks_max + 8192;
     g.maxcand = (unsigned)(SEG_IN_MAX * 8 / 256);  // room for 1 survivor in 256 positions (real data: 1 in 1100)
@@ -923,6 +927,12 @@ GI_API int gi_inflate(gi_ctx* g, const uint8_t* in, uint64_t in_size, uint64_t o
         } catch (const std::bad_alloc&) {
             g->err = "out of host memory";
             r = GI_ERR_GPU;
+        }
+        if (r == GI_ERR_GPU) {
+            // leave the device ready for the next call: let the work already queued finish, and
+            // clear the error, or that call's first check reports this one again and fails too
+            cudaStreamSynchronize(g->st);
+            cudaGetLastError();
         }
     }
     if (stats) *stats = s;

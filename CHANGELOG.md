@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- gpuinflate ran past its input buffer on large streams that compress less than about 2.4:1
+  (a ROM image, already compressed data): every such `.gz` or ZIP entry failed on the GPU with
+  "invalid argument" and was decoded again on the CPU. The CUDA error also lingered and made the
+  next stream fail at once. Both fixed; a 246 MB stream at 0.85 now decodes on the GPU in 0.5 s.
+
 ## 0.1.0 (2026-10-17)
 
 The first release.

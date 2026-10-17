@@ -238,6 +238,24 @@ def main():
             for p in problems[:8]:
                 print(f"       {p}")
 
+    # a large stream that hardly compresses fills every segment's input (64 MB), so segments start
+    # at unaligned bytes: the GPU decoder once ran past its input buffer there and every such file
+    # fell back to the CPU. It must decode on the GPU, every byte right (Rust, with a GPU).
+    if gpu and os.environ.get("GPUZIP_BIN"):
+        rnd = random.Random(5)
+        words = b" ".join(rnd.choice([b"block", b"stream", b"segment", b"header"]) for _ in range(300))[:1024]
+        raw = b"".join(rnd.randbytes(3072) + words for _ in range(60000))  # 246 MB, compresses to about 0.8
+        hard = os.path.join(work, "hard.bin.gz")
+        with open(hard, "wb") as f:
+            f.write(gzip.compress(raw, 1))
+        rc, rep = run_gpuzip("t", hard, "--mode", "gpu", "-q")
+        routes = rep.get("routes", {})
+        ok = rc == 0 and routes.get("gpu", {}).get("files") == 1 and not routes.get("cpu", {}).get("files") and not rep.get("notes")
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} a 246 MB gzip stream that hardly compresses, on the GPU: "
+              f"routes {routes}, notes {rep.get('notes')}")
+        os.remove(hard)
+
     # a damaged gzip file must fail, whichever decodes it
     path, _ = gzips["gzip, one member (Python gzip)"]
     data = bytearray(open(path, "rb").read())
@@ -389,7 +407,6 @@ def main():
 
         # the reverse transfer (every CR LF made LF) removed bytes from compressed entries: the CRs
         # are put back where each entry's CRC says, and no entry called intact may differ
-        import random
         rnd = random.Random(7)
         texts = {f"t{k}.txt": "".join(rnd.choice("abcdefghij klmnop,.\r\n") for _ in range(16000)).encode() for k in range(120)}
         z_path = os.path.join(work, "deflated.zip")
