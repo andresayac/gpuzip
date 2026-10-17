@@ -182,4 +182,5 @@ def main():
             print(f"         note: {note}")
 
 
-main()
+if __name__ == "__main__":
+    main()

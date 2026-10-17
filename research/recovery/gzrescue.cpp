@@ -41,9 +41,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::string report_path, mask_path;
-    gr_options opt{sizeof(gr_options), 0};
+    gr_options opt{sizeof(gr_options), 0, 0};
     for (int i = 3; i < argc; i++) {
         std::string a = argv[i];
+        if (a == "--no-infer") opt.no_infer = 1;
         if (a == "--report" && i + 1 < argc) report_path = argv[++i];
         else if (a == "--mask" && i + 1 < argc) mask_path = argv[++i];
         else if (a == "--fill" && i + 1 < argc) opt.fill = (uint8_t)atoi(argv[++i]);
@@ -87,8 +88,9 @@ int main(int argc, char** argv) {
            (unsigned long long)s->output_size, s->headers, s->headers == 1 ? "" : "s");
     printf("  %u piece%s, %u damaged, %u member%s\n", s->pieces, s->pieces == 1 ? "" : "s", s->damaged, s->members,
            s->members == 1 ? "" : "s");
-    printf("  %llu bytes exact, %llu in damaged blocks (partly right, from their start), %llu unknown\n",
-           (unsigned long long)s->exact_bytes, (unsigned long long)s->suspect_bytes, (unsigned long long)s->unknown_bytes);
+    printf("  %llu bytes exact, %llu inferred, %llu in damaged blocks (partly right, from their start), %llu unknown\n",
+           (unsigned long long)s->exact_bytes, (unsigned long long)s->inferred_bytes, (unsigned long long)s->suspect_bytes,
+           (unsigned long long)s->unknown_bytes);
     for (uint32_t k = 0; k < np; k++)
         if (pieces[k].suspect)
             printf("  damaged block at input byte %llu, output offset %llu: %s\n", (unsigned long long)pieces[k].in_byte_start,

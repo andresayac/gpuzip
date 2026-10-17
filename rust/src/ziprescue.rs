@@ -9,7 +9,7 @@
 //! whether it is intact. For an Office document the damaged XML parts are made well-formed
 //! again, the text is extracted, and a document is rebuilt from the recovered parts.
 
-use crate::rescue::{EXACT, Rescue};
+use crate::rescue::{INFERRED, Rescue, UNKNOWN};
 use crate::zip::{self, DEFLATED, STORED};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -49,6 +49,8 @@ pub struct Outcome {
     pub notes: Vec<String>,
     pub failed: Vec<(String, String)>,
     pub office: Option<OfficeOutcome>,
+    /// directory entries whose local header was found elsewhere than the directory says
+    pub moved: usize,
 }
 
 #[derive(Default)]
@@ -58,6 +60,8 @@ pub struct OfficeOutcome {
     pub text_file: Option<PathBuf>,
     pub text_chars: usize,
     pub rebuilt: Option<PathBuf>,
+    /// what was changed so the rebuilt package opens
+    pub package_fixes: Vec<String>,
 }
 
 /// A local file header found by scanning
@@ -134,8 +138,10 @@ fn parse_local(data: &[u8], h: usize) -> Option<Local> {
 }
 
 /// Every plausible local file header in the file. A ZIP stored inside an entry (a wheel, a
-/// jar) shows its own headers in the data; one that lies inside an entry whose size is known
-/// is skipped, as are the entries nested in it.
+/// jar) shows its own headers in the data; one that lies inside a stored entry whose size is
+/// known is skipped, as are the entries nested in it. A compressed entry's data shows no such
+/// headers, and its size must not hide the real ones: after bytes were lost, an entry's size
+/// reaches over the entries that follow.
 fn scan_locals(data: &[u8]) -> Vec<Local> {
     let mut out: Vec<Local> = Vec::new();
     let mut i = 0;
@@ -148,7 +154,7 @@ fn scan_locals(data: &[u8]) -> Vec<Local> {
                     continue;
                 }
                 let known_size = l.flags & 8 == 0 || l.csize > 0;
-                if known_size {
+                if known_size && l.method == STORED {
                     cover_end = cover_end.max(l.data_offset + l.csize as usize);
                 }
                 i = l.data_offset.max(i + 1);
@@ -210,13 +216,33 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
 
     // what the directory says, if it can be read
     let mut tasks: Vec<Task> = Vec::new();
-    let mut covered: Vec<usize> = Vec::new(); // local header offsets the directory names
-    match zip::read_central_directory(data) {
+    let mut covered: Vec<usize> = Vec::new(); // local header offsets the directory's entries took
+    // the scanned headers by name: when bytes were inserted or lost before an entry, the offset
+    // the directory gives is off, but the entry's own local header is still there, elsewhere
+    let mut by_name: std::collections::HashMap<&str, Vec<&Local>> = std::collections::HashMap::new();
+    for l in &locals {
+        by_name.entry(l.name.as_str()).or_default().push(l);
+    }
+    match zip::read_central_directory(data, true) {
         Ok(cd) => {
             o.cd_ok = true;
             for e in &cd {
-                let h = e.data_offset as usize; // the local header, as the directory says
-                let local = by_offset.get(&h);
+                let at = e.data_offset as usize; // the local header, as the directory says
+                let local = by_offset.get(&at).copied().filter(|l| l.name == e.name).or_else(|| {
+                    // the same name, the same CRC when the header has one, nearest the expected place
+                    by_name.get(e.name.as_str()).and_then(|v| {
+                        v.iter()
+                            .filter(|l| !covered.contains(&l.offset) && (l.crc == e.crc || (l.flags & 8 != 0 && l.crc == 0)))
+                            .min_by_key(|l| (l.offset as i64 - at as i64).unsigned_abs())
+                            .copied()
+                    })
+                });
+                if let Some(l) = local {
+                    if l.offset != at {
+                        o.moved += 1;
+                    }
+                }
+                let h = local.map(|l| l.offset).unwrap_or(at);
                 covered.push(h);
                 tasks.push(Task {
                     name: e.name.clone(),
@@ -233,15 +259,24 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
                     cd_extra_len: 0,
                 });
             }
+            if o.moved > 0 {
+                o.notes.push(format!(
+                    "{} entries were not where the directory says: bytes were inserted or lost before them; found by name and CRC",
+                    o.moved
+                ));
+            }
         }
         Err(e) => {
             o.cd_error = e;
             o.notes.push(format!("the central directory cannot be read ({}): the entries come from the local headers found by scanning", o.cd_error));
         }
     }
+    let cd_names: std::collections::HashSet<String> = tasks.iter().map(|t| t.name.clone()).collect();
     // entries only the scan knows
     for l in &locals {
-        if covered.contains(&l.offset) {
+        // a header the directory took, or a second copy of a name the directory has (bytes
+        // written twice by a bad resume): skip
+        if covered.contains(&l.offset) || cd_names.contains(&l.name) {
             continue;
         }
         let bit3 = l.flags & 8 != 0;
@@ -261,7 +296,9 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
         });
     }
     tasks.sort_by_key(|t| t.header_offset);
-    let office = tasks.iter().any(|t| t.name == "[Content_Types].xml");
+    // an Office document; when cut short it has lost [Content_Types].xml, written last
+    let office = tasks.iter().any(|t| t.name == "[Content_Types].xml")
+        || (keep_parts && tasks.iter().any(|t| ["word/", "xl/", "ppt/"].iter().any(|d| t.name.starts_with(d))));
 
     for t in tasks {
         if t.name.ends_with('/') {
@@ -373,11 +410,25 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
             _ => limit,
         };
         let slice = &data[start..end];
+        // the common case first: an entry that inflates to its size and CRC is intact, with no
+        // need for the block-by-block rescue, which mostly searches for block headers (a 17 MB
+        // ZIP of 3,440 entries: 25 s through the rescue, 2 s this way)
+        if let (Some(size), Some(crc)) = (t.size, t.crc) {
+            if size <= 1 << 31 {
+                let mut out = vec![0u8; size as usize];
+                if let Ok(n) = libdeflater::Decompressor::new().deflate_decompress(slice, &mut out) {
+                    if n as u64 == size && crc32fast::hash(&out) == crc {
+                        return (Status::Intact, out, String::new());
+                    }
+                }
+            }
+        }
         let mut out = Vec::with_capacity(t.size.unwrap_or(slice.len() as u64 * 3) as usize);
-        let mut unknown = 0u64;
+        let (mut unknown, mut inferred) = (0u64, 0u64);
         let report = lib.rescue_raw(slice, (t.size, t.crc), fill, |d, m| {
             out.extend_from_slice(d);
-            unknown += m.iter().filter(|&&x| x != EXACT).count() as u64;
+            unknown += m.iter().filter(|&&x| x == UNKNOWN).count() as u64;
+            inferred += m.iter().filter(|&&x| x == INFERRED).count() as u64;
             true
         });
         let report = match report {
@@ -386,13 +437,16 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
         };
         let s = &report.stats;
         let cut = t.csize.map_or(false, |c| ((end - start) as u64) < c) || s.truncated != 0;
-        if s.damaged > 0 || unknown > 0 || cut {
+        if s.damaged > 0 || unknown > 0 || inferred > 0 || cut {
             let mut d = Vec::new();
             if s.damaged > 0 {
                 d.push(format!("{} damaged block{}", s.damaged, if s.damaged == 1 { "" } else { "s" }));
             }
             if unknown > 0 {
                 d.push(format!("{} bytes unknown", unknown));
+            }
+            if inferred > 0 {
+                d.push(format!("{} bytes inferred", inferred));
             }
             if cut {
                 d.push("cut short".into());
@@ -422,6 +476,7 @@ pub fn repair_xml(src: &[u8]) -> Vec<u8> {
     let mut out = String::with_capacity(bytes.len());
     let mut stack: Vec<String> = Vec::new();
     let mut declared: std::collections::HashSet<String> = ["xml".to_string()].into_iter().collect();
+    let mut root: Option<String> = None; // the document element, once it began
     let mut i = 0;
     let n = bytes.len();
     while i < n {
@@ -429,6 +484,14 @@ pub fn repair_xml(src: &[u8]) -> Vec<u8> {
             // text: keep what XML allows, up to the next tag; an '&' must begin a whole entity
             let j = text[i..].find('<').map(|k| i + k).unwrap_or(n);
             let seg = &text[i..j];
+            if stack.is_empty() {
+                // outside the document element only white space may stand (and a byte order mark)
+                if seg.chars().all(|c| c.is_whitespace() || c == '\u{feff}') {
+                    out.push_str(seg);
+                }
+                i = j;
+                continue;
+            }
             let mut k = 0;
             while k < seg.len() {
                 let ch = seg[k..].chars().next().unwrap();
@@ -523,7 +586,17 @@ pub fn repair_xml(src: &[u8]) -> Vec<u8> {
         let tag = &text[i..j + 1];
         i = j + 1;
         if tag.starts_with("<?") || tag.starts_with("<!") {
-            if tag.ends_with("?>") || tag.starts_with("<!DOCTYPE") {
+            // the XML declaration only at the very start, a doctype only before the document
+            // element: copies of them from garbage further in are dropped
+            let declaration = tag.len() > 5 && tag[2..5].eq_ignore_ascii_case("xml") && !is_name_char(tag[5..].chars().next().unwrap_or(' '));
+            let keep = if declaration {
+                out.is_empty() || out == "\u{feff}"
+            } else if tag.starts_with("<!DOCTYPE") {
+                root.is_none()
+            } else {
+                tag.ends_with("?>")
+            };
+            if keep {
                 out.push_str(tag);
             }
             continue;
@@ -534,8 +607,13 @@ pub fn repair_xml(src: &[u8]) -> Vec<u8> {
             if !valid_qname(name, &declared) {
                 continue;
             }
-            // close down to the matching element; an unmatched end tag is dropped
+            // close down to the matching element; an unmatched end tag is dropped, and so is one
+            // closing the document element with more than white space after it: garbage can
+            // hold such a tag, and what follows is still the document
             if let Some(pos) = stack.iter().rposition(|s| s == name) {
+                if pos == 0 && !text[i..].trim().is_empty() {
+                    continue;
+                }
                 while stack.len() > pos {
                     let open = stack.pop().unwrap();
                     out.push_str(&format!("</{open}>"));
@@ -546,6 +624,12 @@ pub fn repair_xml(src: &[u8]) -> Vec<u8> {
         let self_closing = inner.ends_with('/');
         let body = if self_closing { &inner[..inner.len() - 1] } else { inner };
         let Some(name) = tag_name_and_attributes(body, &mut declared) else { continue }; // garbage that looks like a tag
+        if stack.is_empty() && root.is_some() {
+            continue; // a second document element: XML allows one
+        }
+        if root.is_none() {
+            root = Some(name.clone());
+        }
         out.push_str(tag);
         if !self_closing {
             stack.push(name);
@@ -582,15 +666,17 @@ fn tag_name_and_attributes(body: &str, declared: &mut std::collections::HashSet<
     }
     let mut r = &body[name.len()..];
     let mut new_prefixes = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     loop {
         r = r.trim_start();
         if r.is_empty() {
             break;
         }
         let an: String = r.chars().take_while(|&c| is_name_char(c)).collect();
-        if an.is_empty() {
-            return None;
+        if an.is_empty() || seen.contains(&an) {
+            return None; // not an attribute, or one given twice: XML allows neither
         }
+        seen.push(an.clone());
         r = r[an.len()..].trim_start();
         if !r.starts_with('=') {
             return None;
@@ -707,49 +793,33 @@ fn office_repair(entries: &mut [Recovered], root: Option<&Path>, _fill: u8) -> O
             }
         }
         // a document from the recovered parts, stored, so an Office application can open it
-        let mut zipped = Vec::new();
-        let mut central = Vec::new();
-        let mut count = 0u16;
+        let mut parts: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for e in entries.iter() {
             let Some(part) = &e.office_part else { continue };
             if e.status == Status::Lost || e.status == Status::Unsupported {
                 continue;
             }
-            let name = e.name.as_bytes();
-            let crc = crc32fast::hash(part);
-            let offset = zipped.len() as u32;
-            let mut local = Vec::new();
-            local.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-            local.extend_from_slice(&[20, 0, 0, 8, 0, 0, 0, 0, 0, 0]); // version 2.0, UTF-8 names, stored, no time
-            local.extend_from_slice(&crc.to_le_bytes());
-            local.extend_from_slice(&(part.len() as u32).to_le_bytes());
-            local.extend_from_slice(&(part.len() as u32).to_le_bytes());
-            local.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            local.extend_from_slice(&0u16.to_le_bytes());
-            local.extend_from_slice(name);
-            zipped.extend_from_slice(&local);
-            zipped.extend_from_slice(part);
-            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-            central.extend_from_slice(&[20, 0, 20, 0, 0, 8, 0, 0, 0, 0, 0, 0]);
-            central.extend_from_slice(&crc.to_le_bytes());
-            central.extend_from_slice(&(part.len() as u32).to_le_bytes());
-            central.extend_from_slice(&(part.len() as u32).to_le_bytes());
-            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            central.extend_from_slice(&[0u8; 12]); // extra, comment, disk, attributes
-            central.extend_from_slice(&offset.to_le_bytes());
-            central.extend_from_slice(name);
-            count += 1;
+            // a damaged calculation chain is only a cache: Office rebuilds it
+            if e.name == "xl/calcChain.xml" && e.status != Status::Intact {
+                continue;
+            }
+            parts.insert(e.name.clone(), part.clone());
         }
-        if count > 0 {
-            let cd_offset = zipped.len() as u32;
-            zipped.extend_from_slice(&central);
-            zipped.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-            zipped.extend_from_slice(&[0, 0, 0, 0]);
-            zipped.extend_from_slice(&count.to_le_bytes());
-            zipped.extend_from_slice(&count.to_le_bytes());
-            zipped.extend_from_slice(&(central.len() as u32).to_le_bytes());
-            zipped.extend_from_slice(&cd_offset.to_le_bytes());
-            zipped.extend_from_slice(&0u16.to_le_bytes());
+        // a damaged part with nothing left of its XML is as good as lost
+        let damaged: std::collections::HashSet<&str> = entries.iter().filter(|e| e.status != Status::Intact).map(|e| e.name.as_str()).collect();
+        let mut fixes = Vec::new();
+        let gone: Vec<String> = parts.iter().filter(|(n, b)| damaged.contains(n.as_str()) && is_xml_part(n) && !has_element(b)).map(|(n, _)| n.clone()).collect();
+        for n in gone {
+            parts.remove(&n);
+            fixes.push(format!("{n}: nothing of it survived, left out"));
+        }
+        if of.kind == "xlsx" {
+            fixes.extend(fix_spreadsheet(&mut parts, &damaged));
+        }
+        fixes.extend(make_openable(&mut parts, &of.kind));
+        of.package_fixes = fixes;
+        if !parts.is_empty() {
+            let zipped = stored_zip(&parts);
             let p = r.join(format!("recovered.{}", of.kind));
             if std::fs::write(&p, &zipped).is_ok() {
                 of.rebuilt = Some(p);
@@ -757,6 +827,297 @@ fn office_repair(entries: &mut [Recovered], root: Option<&Path>, _fill: u8) -> O
         }
     }
     of
+}
+
+/// It holds at least one element
+fn has_element(xml: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(xml);
+    s.match_indices('<').any(|(i, _)| s[i + 1..].chars().next().map_or(false, |c| c.is_alphabetic() || c == '_'))
+}
+
+/// A workbook for sheets whose own was lost, and every sheet that cannot be opened as it is
+/// rebuilt from its valid cells: a damaged one, or one referring to strings or formats that
+/// are gone. An intact sheet that refers to nothing missing is kept as it is.
+fn fix_spreadsheet(parts: &mut BTreeMap<String, Vec<u8>>, damaged: &std::collections::HashSet<&str>) -> Vec<String> {
+    let mut fixes = Vec::new();
+    if !parts.contains_key("xl/workbook.xml") {
+        let n = crate::sheetfix::synthesize_workbook(parts);
+        if n > 0 {
+            fixes.push(format!("xl/workbook.xml was lost: one made for the {n} sheets found, named by their numbers"));
+        }
+    }
+    let lim = crate::sheetfix::limits(parts);
+    let sheets: Vec<String> = parts.keys().filter(|n| n.starts_with("xl/worksheets/") && n.ends_with(".xml")).cloned().collect();
+    for name in sheets {
+        let Some(r) = crate::sheetfix::sanitize_sheet(&parts[&name], &lim) else {
+            parts.remove(&name);
+            fixes.push(format!("{name}: no worksheet left in it, left out"));
+            continue;
+        };
+        if !damaged.contains(name.as_str()) && r.dropped == 0 && r.restyled == 0 {
+            continue;
+        }
+        let mut what = vec!["rebuilt from its valid cells".to_string()];
+        if r.dropped > 0 {
+            what.push(format!("{} cells that could not stand dropped", r.dropped));
+        }
+        if r.restyled > 0 {
+            what.push(format!("{} cells given the default format, theirs being lost", r.restyled));
+        }
+        parts.insert(name.clone(), r.xml);
+        fixes.push(format!("{name}: {}", what.join(", ")));
+    }
+    fixes
+}
+
+/// A ZIP of the parts, stored (no compression), in the order Office expects: content types first
+fn stored_zip(parts: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let mut names: Vec<&String> = parts.keys().collect();
+    names.sort_by_key(|n| (n.as_str() != "[Content_Types].xml", n.as_str() != "_rels/.rels", n.to_string()));
+    let (mut zipped, mut central, mut count) = (Vec::new(), Vec::new(), 0u16);
+    for name in names {
+        let part = &parts[name];
+        let nb = name.as_bytes();
+        let crc = crc32fast::hash(part);
+        let offset = zipped.len() as u32;
+        zipped.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        zipped.extend_from_slice(&[20, 0, 0, 8, 0, 0, 0, 0, 0x21, 0]); // version 2.0, UTF-8 names, stored, 1980-01-01
+        zipped.extend_from_slice(&crc.to_le_bytes());
+        zipped.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        zipped.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        zipped.extend_from_slice(&(nb.len() as u16).to_le_bytes());
+        zipped.extend_from_slice(&0u16.to_le_bytes());
+        zipped.extend_from_slice(nb);
+        zipped.extend_from_slice(part);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&[20, 0, 20, 0, 0, 8, 0, 0, 0, 0, 0x21, 0]);
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(nb.len() as u16).to_le_bytes());
+        central.extend_from_slice(&[0u8; 12]); // extra, comment, disk, attributes
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(nb);
+        count += 1;
+    }
+    let cd_offset = zipped.len() as u32;
+    zipped.extend_from_slice(&central);
+    zipped.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    zipped.extend_from_slice(&[0, 0, 0, 0]);
+    zipped.extend_from_slice(&count.to_le_bytes());
+    zipped.extend_from_slice(&count.to_le_bytes());
+    zipped.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    zipped.extend_from_slice(&cd_offset.to_le_bytes());
+    zipped.extend_from_slice(&0u16.to_le_bytes());
+    zipped
+}
+
+/// The value of attribute `name` in an element's text
+fn attr(elem: &str, name: &str) -> Option<String> {
+    let mut rest = elem;
+    loop {
+        let k = rest.find(name)?;
+        let before = rest[..k].chars().last();
+        let after = &rest[k + name.len()..];
+        let after_t = after.trim_start();
+        if before.map_or(false, |c| c.is_whitespace()) && after_t.starts_with('=') {
+            let v = after_t[1..].trim_start();
+            let q = v.chars().next()?;
+            if q == '"' || q == '\'' {
+                let end = v[1..].find(q)?;
+                return Some(v[1..1 + end].to_string());
+            }
+            return None;
+        }
+        rest = &rest[k + name.len()..];
+    }
+}
+
+/// The XML with the elements named `tag` for which `keep` says false removed (self-closing or
+/// with content); returns it and how many went
+fn filter_elements(xml: &str, tag: &str, mut keep: impl FnMut(&str) -> bool) -> (String, usize) {
+    let mut out = String::with_capacity(xml.len());
+    let mut removed = 0;
+    let open = format!("<{tag}");
+    let mut i = 0;
+    while let Some(k) = xml[i..].find(&open) {
+        let start = i + k;
+        let next = xml[start + open.len()..].chars().next();
+        if !matches!(next, Some(c) if c.is_whitespace() || c == '/' || c == '>') {
+            out.push_str(&xml[i..start + open.len()]);
+            i = start + open.len();
+            continue;
+        }
+        let Some(gt) = xml[start..].find('>') else { break };
+        let head_end = start + gt + 1;
+        let self_closing = xml[start..head_end].ends_with("/>");
+        let end = if self_closing {
+            head_end
+        } else {
+            let close = format!("</{tag}>");
+            xml[head_end..].find(&close).map(|c| head_end + c + close.len()).unwrap_or(head_end)
+        };
+        out.push_str(&xml[i..start]);
+        if keep(&xml[start..head_end]) {
+            out.push_str(&xml[start..end]);
+        } else {
+            removed += 1;
+        }
+        i = end;
+    }
+    out.push_str(&xml[i..]);
+    (out, removed)
+}
+
+/// The part a relationship's target names, from the folder of the part that owns the .rels
+fn resolve_target(rels_name: &str, target: &str) -> String {
+    if let Some(abs) = target.strip_prefix('/') {
+        return abs.to_string();
+    }
+    // xl/_rels/workbook.xml.rels -> xl/ ; _rels/.rels -> (root)
+    let base = rels_name.rsplit_once("_rels/").map(|(dir, _)| dir).unwrap_or("");
+    let mut parts: Vec<&str> = base.split('/').filter(|p| !p.is_empty()).collect();
+    for seg in target.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+fn main_part(kind: &str) -> &'static str {
+    match kind {
+        "docx" => "word/document.xml",
+        "xlsx" => "xl/workbook.xml",
+        "pptx" => "ppt/presentation.xml",
+        _ => "",
+    }
+}
+
+fn content_type_for(name: &str) -> Option<&'static str> {
+    let ct = |s: &'static str| Some(s);
+    if name == "word/document.xml" {
+        return ct("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml");
+    }
+    if name == "word/styles.xml" {
+        return ct("application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml");
+    }
+    if name == "word/settings.xml" {
+        return ct("application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml");
+    }
+    if name == "xl/workbook.xml" {
+        return ct("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml");
+    }
+    if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") {
+        return ct("application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml");
+    }
+    if name == "xl/sharedStrings.xml" {
+        return ct("application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml");
+    }
+    if name == "xl/styles.xml" {
+        return ct("application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml");
+    }
+    if name == "ppt/presentation.xml" {
+        return ct("application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml");
+    }
+    if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
+        return ct("application/vnd.openxmlformats-officedocument.presentationml.slide+xml");
+    }
+    if name.starts_with("xl/theme/theme") || name.starts_with("ppt/theme/theme") || name.starts_with("word/theme/theme") {
+        return ct("application/vnd.openxmlformats-officedocument.theme+xml");
+    }
+    if name == "docProps/core.xml" {
+        return ct("application/vnd.openxmlformats-package.core-properties+xml");
+    }
+    if name == "docProps/app.xml" {
+        return ct("application/vnd.openxmlformats-officedocument.extended-properties+xml");
+    }
+    None
+}
+
+/// Make the recovered parts a package an Office application opens: no references to parts that
+/// were lost, and the package's own files (content types, root relationships) present. Returns
+/// what was changed.
+fn make_openable(parts: &mut BTreeMap<String, Vec<u8>>, kind: &str) -> Vec<String> {
+    let mut fixes = Vec::new();
+    let well_formed = |b: &[u8]| -> bool { repair_xml(b) == b };
+    // [Content_Types].xml
+    let ct_ok = parts.get("[Content_Types].xml").map_or(false, |b| well_formed(b) && String::from_utf8_lossy(b).contains("<Types"));
+    if !ct_ok {
+        let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">");
+        for (ext, t) in [("rels", "application/vnd.openxmlformats-package.relationships+xml"), ("xml", "application/xml"), ("png", "image/png"),
+                         ("jpeg", "image/jpeg"), ("jpg", "image/jpeg"), ("gif", "image/gif"), ("emf", "image/x-emf"), ("wmf", "image/x-wmf"),
+                         ("bin", "application/vnd.openxmlformats-officedocument.oleObject")] {
+            x.push_str(&format!("<Default Extension=\"{ext}\" ContentType=\"{t}\"/>"));
+        }
+        for name in parts.keys() {
+            if let Some(t) = content_type_for(name) {
+                x.push_str(&format!("<Override PartName=\"/{name}\" ContentType=\"{t}\"/>"));
+            }
+        }
+        x.push_str("</Types>");
+        parts.insert("[Content_Types].xml".into(), x.into_bytes());
+        fixes.push("[Content_Types].xml rebuilt from the parts present".to_string());
+    } else {
+        let present: std::collections::HashSet<String> = parts.keys().cloned().collect();
+        let ct = String::from_utf8_lossy(&parts["[Content_Types].xml"]).into_owned();
+        let (x, n) = filter_elements(&ct, "Override", |e| attr(e, "PartName").map_or(true, |p| present.contains(p.trim_start_matches('/'))));
+        if n > 0 {
+            parts.insert("[Content_Types].xml".into(), x.into_bytes());
+            fixes.push(format!("{n} content types of lost parts removed"));
+        }
+    }
+    // _rels/.rels
+    let main = main_part(kind);
+    if !parts.get("_rels/.rels").map_or(false, |b| well_formed(b)) && !main.is_empty() && parts.contains_key(main) {
+        let x = format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"{main}\"/></Relationships>");
+        parts.insert("_rels/.rels".into(), x.into_bytes());
+        fixes.push("_rels/.rels rebuilt".to_string());
+    }
+    // relationships to lost parts
+    let present: std::collections::HashSet<String> = parts.keys().cloned().collect();
+    let rels: Vec<String> = parts.keys().filter(|n| n.ends_with(".rels")).cloned().collect();
+    let mut kept_ids: BTreeMap<String, std::collections::HashSet<String>> = BTreeMap::new();
+    for rn in rels {
+        let x = String::from_utf8_lossy(&parts[&rn]).into_owned();
+        let (y, n) = filter_elements(&x, "Relationship", |e| {
+            if attr(e, "TargetMode").map_or(false, |m| m == "External") {
+                return true;
+            }
+            attr(e, "Target").map_or(false, |t| present.contains(&resolve_target(&rn, &t)))
+        });
+        let ids: std::collections::HashSet<String> = {
+            let mut v = std::collections::HashSet::new();
+            filter_elements(&y, "Relationship", |e| {
+                if let Some(id) = attr(e, "Id") {
+                    v.insert(id);
+                }
+                true
+            });
+            v
+        };
+        kept_ids.insert(rn.clone(), ids);
+        if n > 0 {
+            parts.insert(rn.clone(), y.into_bytes());
+            fixes.push(format!("{rn}: {n} relationships to lost parts removed"));
+        }
+    }
+    // the workbook's sheets and the presentation's slides that are gone
+    for (owner, rels_name, tag) in [("xl/workbook.xml", "xl/_rels/workbook.xml.rels", "sheet"), ("ppt/presentation.xml", "ppt/_rels/presentation.xml.rels", "p:sldId")] {
+        let (Some(doc), Some(ids)) = (parts.get(owner), kept_ids.get(rels_name)) else { continue };
+        let x = String::from_utf8_lossy(doc).into_owned();
+        let (y, n) = filter_elements(&x, tag, |e| attr(e, "r:id").map_or(true, |id| ids.contains(&id)));
+        if n > 0 {
+            parts.insert(owner.to_string(), y.into_bytes());
+            fixes.push(format!("{owner}: {n} references to lost {} removed", if tag == "sheet" { "sheets" } else { "slides" }));
+        }
+    }
+    fixes
 }
 
 /// The extension says it is an Office document
@@ -769,4 +1130,30 @@ pub fn is_office_name(path: &str) -> bool {
 pub fn looks_like_zip(data: &[u8]) -> bool {
     (data.len() >= 4 && data[0] == b'P' && data[1] == b'K' && (data[2] == 3 || data[2] == 5 || data[2] == 7))
         || zip::find_eocd(data).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fix(x: &str) -> String {
+        String::from_utf8(repair_xml(x.as_bytes())).unwrap()
+    }
+
+    #[test]
+    fn well_formed_xml_comes_back_unchanged() {
+        let x = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<w:document xmlns:w=\"u\"><w:body><w:p a=\"1\"/>t &amp; u</w:body></w:document>\n";
+        assert_eq!(fix(x), x);
+    }
+
+    #[test]
+    fn declarations_and_end_tags_from_garbage_are_dropped() {
+        let x = "<?xml version=\"1.0\"?><doc><p>one</p></doc>garbage<?xml version=\"1.0\"?><p>two</p></doc>";
+        assert_eq!(fix(x), "<?xml version=\"1.0\"?><doc><p>one</p>garbage<p>two</p></doc>");
+    }
+
+    #[test]
+    fn duplicate_attributes_and_text_outside_the_root_are_dropped() {
+        assert_eq!(fix("junk<a><b r=\"1\" r=\"2\">x</b><c/></a>"), "<a>x<c/></a>");
+    }
 }

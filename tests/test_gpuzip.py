@@ -324,6 +324,34 @@ def main():
         print(f"{'ok  ' if ok else 'FAIL'} rescue of a docx with zeros in its document: {found} of {len(paragraphs)} paragraphs in the text, "
               f"document.xml well-formed {well_formed}, rebuilt document opens {rebuilt_ok}, exit {r.returncode}")
 
+        # an ASCII-mode transfer (every LF made CR LF) is undone; but a sound ZIP of Windows text
+        # stored as is, where nearly every LF has its CR too, must be left alone
+        lines = "".join(f"line {i} of a Windows text file\r\n" for i in range(3000))
+        for label, convert in (("a sound ZIP of stored CR LF text", False), ("a ZIP sent through FTP in ASCII mode", True)):
+            z_path = os.path.join(work, "text.zip")
+            with zipfile.ZipFile(z_path, "w", zipfile.ZIP_STORED) as z:
+                for k in range(4):
+                    z.writestr(f"text{k}.txt", lines)
+            raw = open(z_path, "rb").read()
+            if convert:
+                raw = raw.replace(b"\n", b"\r\n")  # the sender makes every LF a line end, CR or not
+            bad = os.path.join(work, "text_case.zip")
+            open(bad, "wb").write(raw)
+            out = os.path.join(work, "rescued_text")
+            shutil.rmtree(out, ignore_errors=True)
+            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                rep = {}
+            restored = all(os.path.exists(os.path.join(out, f"text{k}.txt"))
+                           and open(os.path.join(out, f"text{k}.txt"), "rb").read() == lines.encode() for k in range(4))
+            intact = rep.get("counts", {}).get("intact", 0)
+            ok = restored and intact == 4 and rep.get("ascii_transfer_undone") == convert
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} rescue of {label}: {intact} of 4 entries intact, "
+                  f"ASCII transfer undone {rep.get('ascii_transfer_undone')}, exit {r.returncode}")
+
     # zip slip: an entry that tries to write outside the output folder must be refused
     evil = os.path.join(work, "zipslip.zip")
     with zipfile.ZipFile(evil, "w") as z:

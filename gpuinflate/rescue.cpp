@@ -13,6 +13,12 @@
 // 4. A damaged block is kept but flagged; decoding restarts at the next header; bytes that copy
 //    from a damaged block, and whatever copies from those, are unknown.
 // 5. The damaged block's true length comes from the trailer when there is one such block.
+// 6. The unknown bytes are inferred: each is a copy of one byte of the window that was lost, and
+//    every copy of it appears somewhere in the output with bytes around it. A trigram model of
+//    the file's exact bytes scores each possible value over all those places; the values it is
+//    sure of are kept, marked inferred, and serve as context for the next round.
+// 7. Transfers in ASCII mode are undone: LF to CR LF exactly; CR LF to LF by putting a CR back
+//    before the LFs where that makes a damaged block decode in step again.
 #ifndef GR_BUILD
 #define GR_STATIC
 #endif
@@ -24,9 +30,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -38,7 +46,8 @@ constexpr uint64_t FIXED_SEARCH = 8ull << 23;  // bits: how far past an error to
 
 struct Piece {
     uint64_t in_bit_start = 0, in_bit_end = 0;
-    std::vector<uint8_t> bytes, known;
+    std::vector<uint8_t> bytes, known;  // known: 0 unknown, 1 exact, 2 inferred
+    std::vector<uint32_t> var;          // an unknown byte: the window byte it copies (0: none)
     bool suspect = false;       // damaged somewhere inside
     std::string why;            // how the damage showed
     uint64_t true_len = 0;      // suspect: what its length must have been (0: unknown)
@@ -46,6 +55,8 @@ struct Piece {
     bool landed = false;        // ended by landing on the next header
     int status = gi::OK;
     uint32_t blocks = 0, symbols = 0;
+    uint64_t last_block_bit = UINT64_MAX;  // header of the last block it started
+    size_t last_block_at = 0;              // where that block's output begins
 };
 
 struct Member {
@@ -118,7 +129,9 @@ struct Rescuer {
     std::vector<uint16_t> scratch;
     // the last 32 KB of trusted output, for references that reach before a piece's start
     std::vector<uint8_t> win_bytes, win_known;
+    std::vector<uint32_t> win_var;
     bool win_valid = false;
+    uint32_t next_var = 1;  // variables: the bytes of lost windows, WINDOW + 1 per window
 
     Rescuer(const uint8_t* d, uint64_t n) : in(d), size(n), nbits(n * 8), scratch(SCRATCH + 2 * gi::MAX_SYMBOL_OUT) { dec.attach(luts); }
 
@@ -160,35 +173,51 @@ struct Rescuer {
     gi::Result decode_piece(gi::Start s, bool stream_start, const gi::Start* targets, int ntargets, Piece& piece) {
         piece.in_bit_start = s.bit;
         piece.stream_start = stream_start;
+        // a piece with no window before it: its references before its start are copies of
+        // the lost window's bytes, each a variable
+        uint32_t var_base = 0;
+        if (!win_valid && !stream_start && next_var < 0xF0000000u) {
+            var_base = next_var;
+            next_var += gi::WINDOW + 1;
+        }
         gi::Result r;
         for (;;) {
             r = dec.run(in, size, s, targets, ntargets, scratch.data(), (uint32_t)scratch.size(), stream_start && piece.bytes.empty());
             size_t base = piece.bytes.size();
             piece.bytes.resize(base + r.out_len);
             piece.known.resize(base + r.out_len);
+            piece.var.resize(base + r.out_len);
             for (uint32_t i = 0; i < r.out_len; i++) {
                 uint16_t v = scratch[i];
                 size_t p = base + i;
                 if (v <= gi::REF) {
                     piece.bytes[p] = (uint8_t)v;
                     piece.known[p] = 1;
+                    piece.var[p] = 0;
                     continue;
                 }
                 uint32_t d = v - gi::REF;
                 if (d <= p) {
                     piece.bytes[p] = piece.bytes[p - d];
                     piece.known[p] = piece.known[p - d];
+                    piece.var[p] = piece.var[p - d];
                 } else if (win_valid && d - p <= win_bytes.size()) {
                     size_t q = win_bytes.size() - (d - p);
                     piece.bytes[p] = win_bytes[q];
                     piece.known[p] = win_known[q];
+                    piece.var[p] = win_var[q];
                 } else {
                     piece.bytes[p] = 0;
                     piece.known[p] = 0;
+                    piece.var[p] = var_base && d - p <= gi::WINDOW ? var_base + (uint32_t)(d - p) : 0;
                 }
             }
             piece.blocks += r.blocks;
             piece.symbols += r.symbols;
+            if (r.last_block_bit != UINT64_MAX) {
+                piece.last_block_bit = r.last_block_bit;
+                piece.last_block_at = base + r.last_block_out;
+            }
             if (r.status == gi::ERR_OVERFLOW) {
                 s = r.resume;
                 stream_start = false;
@@ -224,14 +253,70 @@ struct Rescuer {
         return 1;
     }
 
+    // Literals and matches in the block at bit, up to its end-of-block code or where it fails
+    uint64_t block_symbols(uint64_t bit) {
+        gi::Start st{bit, bit, gi::AT_BLOCK, -1};
+        uint64_t n = 0;
+        for (;;) {
+            gi::Result q = dec.run(in, size, st, nullptr, 0, scratch.data(), (uint32_t)scratch.size(), false);
+            n += q.symbols;
+            if (q.status != gi::ERR_OVERFLOW || q.eob_bit != UINT64_MAX) return n;
+            st = q.resume;
+        }
+    }
+
+    // A block holds no more symbols than the stream's regular count: zlib fills each to it but
+    // the last. A decode that ran off the end of the file through more than that went through
+    // damage that decodes as plausible data (a stretch of zeros, say): from that block on, the
+    // bytes are suspect. Without this they would pass for a truncated file's last exact bytes.
+    void suspect_overfull_tail(Outcome& o, uint32_t regular) {
+        if (!regular || !o.truncated || o.pieces.empty()) return;
+        Piece& p = o.pieces.back();
+        if (p.suspect || p.status != gi::ERR_INPUT || p.last_block_bit == UINT64_MAX || p.last_block_at > p.bytes.size()) return;
+        uint64_t n = block_symbols(p.last_block_bit);
+        if (n <= regular) return;
+        Piece t;
+        size_t at = p.last_block_at;
+        t.bytes.assign(p.bytes.begin() + at, p.bytes.end());
+        t.known.assign(p.known.begin() + at, p.known.end());
+        t.var.assign(p.var.begin() + at, p.var.end());
+        t.in_bit_start = p.last_block_bit;
+        t.in_bit_end = p.in_bit_end;
+        t.status = p.status;
+        t.blocks = 1;
+        t.symbols = (uint32_t)std::min<uint64_t>(n, UINT32_MAX);
+        t.suspect = true;
+        t.why = "its block holds " + std::to_string(n) + " symbols, more than the stream's regular " + std::to_string(regular) +
+                ": the decode ran through damaged data to the end of the file";
+        p.bytes.resize(at);
+        p.known.resize(at);
+        p.var.resize(at);
+        p.in_bit_end = p.last_block_bit;
+        p.status = gi::OK;
+        p.blocks = p.blocks ? p.blocks - 1 : 0;
+        p.symbols = p.symbols > t.symbols ? p.symbols - t.symbols : 0;
+        if (p.bytes.empty()) {
+            t.stream_start = p.stream_start;
+            p = std::move(t);
+        } else {
+            o.pieces.push_back(std::move(t));
+        }
+        o.members.back().last_piece = o.pieces.size() - 1;
+        for (std::string& note : o.notes)
+            if (note == "the file ends inside the stream (truncated)")
+                note = "the decode ran to the end of the file through damaged data: its last block holds more symbols than the stream's blocks do";
+    }
+
     // the trusted output grows by a piece; the window keeps its last 32 KB (several pieces, when
     // blocks are small)
     void set_window(const Piece& p) {
         win_bytes.insert(win_bytes.end(), p.bytes.begin(), p.bytes.end());
         win_known.insert(win_known.end(), p.known.begin(), p.known.end());
+        win_var.insert(win_var.end(), p.var.begin(), p.var.end());
         if (win_bytes.size() > gi::WINDOW) {
             win_bytes.erase(win_bytes.begin(), win_bytes.end() - gi::WINDOW);
             win_known.erase(win_known.begin(), win_known.end() - gi::WINDOW);
+            win_var.erase(win_var.begin(), win_var.end() - gi::WINDOW);
         }
         win_valid = true;
     }
@@ -239,6 +324,7 @@ struct Rescuer {
     void drop_window() {
         win_bytes.clear();
         win_known.clear();
+        win_var.clear();
         win_valid = false;
     }
 
@@ -250,6 +336,7 @@ struct Rescuer {
                    uint64_t expected_size = UINT64_MAX, bool has_crc = false, uint32_t expected_crc = 0) {
         Outcome o;
         drop_window();
+        next_var = 1;
         bool stream_start = !gzip || hlen != 0;
         if (gzip && !hlen) o.notes.push_back("the gzip header is damaged: decoding starts at the first block header found");
         gi::Start cur = !gzip ? gi::Start{0, 0, gi::AT_BLOCK, -1}
@@ -326,6 +413,12 @@ struct Rescuer {
                 break;
             }
             if (r.status == gi::ERR_INPUT && t0 >= headers.size()) {
+                // the last symbol may have been read from bits past the end: what one symbol can
+                // write (258 bytes) is not trusted
+                for (size_t i = p.bytes.size() > gi::MAX_SYMBOL_OUT ? p.bytes.size() - gi::MAX_SYMBOL_OUT : 0; i < p.bytes.size(); i++) {
+                    p.known[i] = 0;
+                    p.var[i] = 0;
+                }
                 o.pieces.push_back(std::move(p));
                 o.notes.push_back("the file ends inside the stream (truncated)");
                 o.truncated = true;
@@ -360,7 +453,8 @@ struct Rescuer {
 // zlib fills every block with the same number of symbols (16,383 by default); other encoders
 // have their habits too. Pieces of one block whose count stands out from a clear majority are
 // damaged in a way landing cannot see. Returns their start bits.
-std::set<uint64_t> symbol_count_anomalies(const Outcome& o, std::string& note) {
+std::set<uint64_t> symbol_count_anomalies(const Outcome& o, std::string& note, uint32_t& regular) {
+    regular = 0;
     std::map<uint32_t, int> freq;
     int considered = 0;
     auto eligible = [&](size_t k) {
@@ -378,12 +472,344 @@ std::set<uint64_t> symbol_count_anomalies(const Outcome& o, std::string& note) {
     if (considered < 10) return out;
     auto best = std::max_element(freq.begin(), freq.end(), [](auto& a, auto& b) { return a.second < b.second; });
     if (best->second < considered * 7 / 10) return out;
+    regular = best->first;
     for (size_t k = 0; k < o.pieces.size(); k++)
         if (eligible(k) && o.pieces[k].symbols != best->first) out.insert(o.pieces[k].in_bit_start);
     if (!out.empty())
         note = std::to_string(out.size()) + " block(s) with a symbol count other than the stream's regular " +
                std::to_string(best->first) + " (" + std::to_string(best->second) + " of " + std::to_string(considered) + " blocks)";
     return out;
+}
+
+
+// ---------------------------------------------------------------- inferring the lost window
+
+// A variable-order model of the exact bytes: for contexts of 1 to 5 bytes, how often each byte
+// followed; probabilities blend from the longest context seen down, as PPM does. Counts live in
+// one open-addressing table keyed by the full (order, context, byte): no collision can lend a
+// context counts it never had. It learns from about 1 MB of exact output, taken from the pieces
+// nearest the damage: the text most like what was lost.
+struct Model {
+    static constexpr int ORDERS = 5;
+    static constexpr uint32_t BITS = 23;
+    static constexpr uint64_t TRAIN = 1u << 20;
+    std::vector<uint64_t> keys;
+    std::vector<uint32_t> vals;
+    std::vector<uint32_t> uni;
+    uint64_t n = 0;
+    bool empty = true;
+
+    static uint64_t key(uint64_t ctx, int k, int c) {
+        uint64_t x = ctx & ((1ull << (8 * k)) - 1);
+        x = x * 0x9E3779B97F4A7C15ull + ((uint64_t)k << 52) + (uint64_t)(c + 1) * 0xC2B2AE3D27D4EB4Full;
+        x ^= x >> 31;
+        x *= 0xBF58476D1CE4E5B9ull;
+        x ^= x >> 29;
+        return x | 1;  // never 0: 0 marks an empty slot
+    }
+    void add(uint64_t k) {
+        uint32_t mask = (1u << BITS) - 1, i = (uint32_t)(k >> 20) & mask;
+        for (int probe = 0; probe < 64; probe++, i = (i + 1) & mask) {
+            if (keys[i] == k) {
+                vals[i]++;
+                return;
+            }
+            if (!keys[i]) {
+                keys[i] = k;
+                vals[i] = 1;
+                return;
+            }
+        }
+    }
+    uint32_t get(uint64_t k) const {
+        uint32_t mask = (1u << BITS) - 1, i = (uint32_t)(k >> 20) & mask;
+        for (int probe = 0; probe < 64; probe++, i = (i + 1) & mask) {
+            if (keys[i] == k) return vals[i];
+            if (!keys[i]) return 0;
+        }
+        return 0;
+    }
+
+    void learn(const Piece& p, uint64_t& budget) {
+        const uint8_t* x = p.bytes.data();
+        const uint8_t* kn = p.known.data();
+        uint64_t ctx = 0;
+        int run = 0;
+        for (size_t i = 0; i < p.bytes.size() && budget; i++) {
+            if (kn[i] != 1) {
+                run = 0;
+                ctx = 0;
+                continue;
+            }
+            uni[x[i]]++;
+            n++;
+            budget--;
+            for (int k = 1; k <= ORDERS && k <= run; k++) {
+                add(key(ctx, k, x[i]));
+                add(key(ctx, k, -1));
+            }
+            ctx = ctx << 8 | x[i];
+            run++;
+        }
+    }
+
+    void build(const std::vector<Piece>& pieces) {
+        keys.assign(1u << BITS, 0);
+        vals.assign(1u << BITS, 0);
+        uni.assign(256, 0);
+        // the pieces nearest a piece with lost bytes first
+        std::vector<int64_t> dist(pieces.size(), INT64_MAX);
+        for (size_t k = 0; k < pieces.size(); k++) {
+            bool lost = false;
+            for (size_t i = 0; i < pieces[k].var.size() && !lost; i += 64) lost = pieces[k].var[i] != 0;
+            if (!lost) continue;
+            for (size_t j = 0; j < pieces.size(); j++) dist[j] = std::min<int64_t>(dist[j], std::abs((int64_t)j - (int64_t)k));
+        }
+        std::vector<size_t> order(pieces.size());
+        for (size_t k = 0; k < order.size(); k++) order[k] = k;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return dist[a] < dist[b]; });
+        uint64_t budget = TRAIN;
+        for (size_t k : order) {
+            if (!budget) break;
+            if (!pieces[k].suspect) learn(pieces[k], budget);
+        }
+        empty = n < 4096;
+    }
+
+    // log P(c | the bytes before), from the longest context known down (ctx: newest lowest)
+    float lp(uint64_t ctx, int known, int c) const {
+        double pr = (uni[c] + 1.0) / (n + 256.0);
+        for (int k = 1; k <= ORDERS && k <= known; k++) {
+            double t = get(key(ctx, k, -1));
+            if (t == 0) break;  // a context never seen: longer ones were not either
+            double e = get(key(ctx, k, c));
+            pr = (e + 1.5 * pr) / (t + 1.5);
+        }
+        return (float)std::log(pr);
+    }
+};
+
+struct Occ {
+    uint32_t piece, pos;
+};
+
+// Infers the bytes of lost windows; returns how many output bytes got a value
+uint64_t infer_window(std::vector<Piece>& pieces, std::string& note) {
+    constexpr size_t MAX_OCC = 64;  // places per variable used for scoring
+    constexpr int AHEAD = 6;        // bytes after the candidate that are scored with it
+    // log-odds the best value must lead the second by; GR_INFER_MARGIN / GR_INFER_ROUNDS for experiments
+    const char* em = getenv("GR_INFER_MARGIN");
+    const char* er = getenv("GR_INFER_ROUNDS");
+    const float MARGIN = em ? (float)atof(em) : 14.0f;
+    const int ROUNDS = er ? atoi(er) : 60;
+    // how far one place alone must favour a value, and how far no place may favour another;
+    // GR_INFER_SOLO / _AGAINST for experiments, infer_sweep.ps1 measured them on code and logs
+    const char* es = getenv("GR_INFER_SOLO");
+    const char* ea = getenv("GR_INFER_AGAINST");
+    const float SOLO = es ? (float)atof(es) : 6.0f;
+    const float AGAINST = ea ? (float)atof(ea) : 2.0f;
+    FILE* dbg = getenv("GR_INFER_DEBUG") ? fopen(getenv("GR_INFER_DEBUG"), "w") : nullptr;
+    std::unordered_map<uint32_t, std::vector<Occ>> occ;
+    uint64_t unknown = 0;
+    for (uint32_t k = 0; k < pieces.size(); k++) {
+        const Piece& p = pieces[k];
+        for (uint32_t i = 0; i < p.bytes.size(); i++) {
+            if (p.known[i] || !p.var[i]) continue;
+            unknown++;
+            auto& v = occ[p.var[i]];
+            if (v.size() < MAX_OCC) v.push_back({k, i});
+        }
+    }
+    if (occ.empty()) return 0;
+    Model m;
+    m.build(pieces);
+    if (m.empty) return 0;
+    std::unordered_map<uint32_t, int> value;  // resolved variables
+    auto val = [&](uint32_t k, int64_t i, uint32_t self, int cand) -> int {
+        const Piece& p = pieces[k];
+        if (i < 0 || i >= (int64_t)p.bytes.size()) return -1;
+        if (p.known[i] == 1) return p.bytes[i];
+        uint32_t v = p.var[i];
+        if (!v) return -1;
+        if (v == self) return cand;
+        auto it = value.find(v);
+        return it == value.end() ? -1 : it->second;
+    };
+    std::vector<uint32_t> todo;
+    for (auto& [v, list] : occ) todo.push_back(v);
+    std::sort(todo.begin(), todo.end());
+    std::vector<float> score(256), per;
+    for (int round = 0; round < ROUNDS && !todo.empty(); round++) {
+        std::vector<std::pair<uint32_t, int>> accepted;
+        std::vector<uint32_t> left;
+        for (uint32_t v : todo) {
+            const auto& list = occ[v];
+            // the distinct contexts this byte appears in: a line copied 40 times is one piece of evidence
+            struct Ctx {
+                uint64_t before;  // up to 6 bytes before, newest lowest
+                int nbefore;
+                int after[AHEAD];
+                int nafter;
+            };
+            std::vector<Ctx> ctxs;
+            for (const Occ& o : list) {
+                Ctx c{0, 0, {}, 0};
+                for (int q = 1; q <= Model::ORDERS; q++) {
+                    int b = val(o.piece, (int64_t)o.pos - q, v, -1);
+                    if (b < 0) break;
+                    c.before |= (uint64_t)b << (8 * (q - 1));
+                    c.nbefore = q;
+                }
+                for (int q = 1; q <= AHEAD; q++) {
+                    int b = val(o.piece, (int64_t)o.pos + q, v, -1);
+                    if (b < 0) break;
+                    c.after[q - 1] = b;
+                    c.nafter = q;
+                }
+                // Only contexts with known bytes on both sides count: a byte known only from what
+                // precedes it is guessed as the commonest continuation, and measured, that misleads
+                if (c.nbefore < 2 || c.nafter < 2) continue;
+                // contexts that agree on the 3 bytes either side are one piece of evidence: what
+                // lies further away says little about this byte, and copies repeat it
+                bool dup = false;
+                for (const Ctx& d : ctxs) {
+                    int nb = std::min(3, std::min(d.nbefore, c.nbefore)), na = std::min(3, std::min(d.nafter, c.nafter));
+                    if (std::min(3, d.nbefore) != std::min(3, c.nbefore) || std::min(3, d.nafter) != std::min(3, c.nafter)) continue;
+                    if (((d.before ^ c.before) & ((1ull << (8 * nb)) - 1)) == 0 && std::equal(d.after, d.after + na, c.after)) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) ctxs.push_back(c);
+            }
+            if (ctxs.empty()) {
+                left.push_back(v);
+                continue;
+            }
+            // Every byte is a candidate: measured, keeping only the bytes seen after the byte before
+            // let a value never seen there lose without a contest, and the wrong one win. Many weak
+            // contexts that agree are not strong evidence, since their errors are alike (hex digits
+            // in a fingerprint, say): at least one context must favour the value on its own by SOLO,
+            // and none may favour another by AGAINST.
+            // per context, each candidate's score; the total is their sum
+            per.assign(ctxs.size() * 256, 0.0f);
+            for (int x = 0; x < 256; x++) {
+                float sc = 0;
+                for (size_t ci = 0; ci < ctxs.size(); ci++) {
+                    const Ctx& c = ctxs[ci];
+                    // P(x | before), then each byte after given what precedes it, x included
+                    uint64_t ctx = c.before;
+                    int kn = c.nbefore;
+                    float s1 = m.lp(ctx, kn, x);
+                    ctx = ctx << 8 | (uint64_t)x;
+                    kn++;
+                    for (int q = 0; q < c.nafter; q++) {
+                        s1 += m.lp(ctx, kn, c.after[q]);
+                        ctx = ctx << 8 | (uint64_t)c.after[q];
+                        kn++;
+                    }
+                    per[ci * 256 + x] = s1;
+                    sc += s1;
+                }
+                score[x] = sc;
+            }
+            float best = -1e30f, second = -1e30f;
+            int bc = 0;
+            for (int x = 0; x < 256; x++) {
+                if (score[x] > best) {
+                    second = best;
+                    best = score[x];
+                    bc = x;
+                } else if (score[x] > second) {
+                    second = score[x];
+                }
+            }
+            bool favoured = false, against = false;
+            for (size_t ci = 0; ci < ctxs.size(); ci++) {
+                const float* row = &per[ci * 256];
+                float other = -1e30f;
+                for (int x = 0; x < 256; x++)
+                    if (x != bc) other = std::max(other, row[x]);
+                favoured |= row[bc] - other >= SOLO;
+                against |= other - row[bc] >= AGAINST;
+            }
+            if (favoured && !against && best - second >= MARGIN) {
+                accepted.push_back({v, bc});
+                if (dbg) {
+                    fprintf(dbg, "%d %u %d %.2f %.2f %d %zu |", round, v, bc, best, second, 256, ctxs.size());
+                    for (size_t q = 0; q < ctxs.size() && q < 3; q++) {
+                        const Ctx& c = ctxs[q];
+                        fprintf(dbg, " [");
+                        for (int z = c.nbefore - 1; z >= 0; z--) fprintf(dbg, "%02x", (unsigned)((c.before >> (8 * z)) & 0xff));
+                        fprintf(dbg, "_");
+                        for (int z = 0; z < c.nafter; z++) fprintf(dbg, "%02x", (unsigned)c.after[z]);
+                        fprintf(dbg, "]");
+                    }
+                    std::vector<std::pair<float, int>> top;
+                    for (int x = 0; x < 256; x++) top.push_back({score[x], x});
+                    std::sort(top.rbegin(), top.rend());
+                    fprintf(dbg, " |");
+                    for (size_t q = 0; q < top.size() && q < 3; q++) fprintf(dbg, " %02x:%.1f", top[q].second, top[q].first);
+                    fprintf(dbg, "\n");
+                }
+            } else {
+                left.push_back(v);
+            }
+        }
+        if (accepted.empty()) break;
+        for (auto& [v, c] : accepted) value[v] = c;
+        todo.swap(left);
+    }
+    if (dbg) fclose(dbg);
+    uint64_t done = 0;
+    for (Piece& p : pieces)
+        for (size_t i = 0; i < p.bytes.size(); i++) {
+            if (p.known[i] || !p.var[i]) continue;
+            auto it = value.find(p.var[i]);
+            if (it == value.end()) continue;
+            p.bytes[i] = (uint8_t)it->second;
+            p.known[i] = 2;
+            done++;
+        }
+    if (done)
+        note = std::to_string(done) + " of " + std::to_string(unknown) +
+               " bytes that copied from data lost with a damaged block were inferred (" + std::to_string(value.size()) +
+               " lost window bytes, from where their copies appear and the file's own statistics)";
+    return done;
+}
+
+// ---------------------------------------------------------------- ASCII-mode transfers
+
+// When nearly every LF has a CR before it (Unix to Windows in ASCII mode; in compressed data one
+// LF in 256 does by chance), the input with one CR removed before each LF
+// A file that ends in a long run of zeros (a crash while it was written, a preallocated file, a
+// download that stopped) ends where the zeros begin: Deflate never writes 64 zero bytes in a
+// row, and decoding them yields plausible garbage. Returns the bytes cut.
+uint64_t cut_zero_tail(uint64_t& size, const std::vector<uint8_t>& in) {
+    uint64_t z = size;
+    while (z > 0 && in[z - 1] == 0) z--;
+    if (size - z < 64) return 0;
+    uint64_t cut = size - z;
+    size = z;
+    return cut;
+}
+
+bool undo_lf_to_crlf(std::vector<uint8_t>& in, uint64_t& size) {
+    uint64_t lf = 0, crlf = 0;
+    for (uint64_t i = 0; i < size; i++)
+        if (in[i] == '\n') {
+            lf++;
+            crlf += i > 0 && in[i - 1] == '\r';
+        }
+    if (lf < 16 || crlf < 0.98 * lf) return false;
+    uint64_t o = 0;
+    for (uint64_t i = 0; i < size; i++) {
+        if (in[i] == '\r' && i + 1 < size && in[i + 1] == '\n') continue;
+        in[o++] = in[i];
+    }
+    std::fill(in.begin() + o, in.end(), 0);
+    size = o;
+    return true;
 }
 
 }  // namespace
@@ -403,10 +829,13 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
                          const gr_options* opt, gr_sink sink, void* user, gr_result** result) {
     if (result) *result = nullptr;
     if (!in_ && size) return GR_ERR_ARG;
-    uint8_t fill = opt && opt->size >= sizeof(gr_options) ? opt->fill : 0;
+    uint8_t fill = opt && opt->size >= 5 ? opt->fill : 0;
+    bool infer = !(opt && opt->size >= 6 && opt->no_infer);
     try {
         std::vector<uint8_t> in(size + 64, 0);  // zero padding: the readers look ahead
         if (size) memcpy(in.data(), in_, size);
+        bool ascii_undone = undo_lf_to_crlf(in, size);
+        uint64_t zero_tail = cut_zero_tail(size, in);
         Rescuer rs(in.data(), size);
         uint64_t hlen = gzip ? gzip_header(in.data(), size, 0) : 0;
         std::vector<gi::Start> headers = rs.find_headers(gzip ? (hlen ? hlen * 8 : 80) : 1);
@@ -415,12 +844,24 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         // first pass; a second one when blocks that stayed in step have the wrong symbol count
         Outcome o = rs.rescue(headers, gzip, hlen, {}, expected_size, has_crc, expected_crc);
         std::string anomaly_note;
-        std::set<uint64_t> anomalies = symbol_count_anomalies(o, anomaly_note);
+        uint32_t regular = 0;
+        std::set<uint64_t> anomalies = symbol_count_anomalies(o, anomaly_note, regular);
         if (!anomalies.empty()) {
             o = rs.rescue(headers, gzip, hlen, anomalies, expected_size, has_crc, expected_crc);
             o.notes.push_back(anomaly_note);
         }
+        rs.suspect_overfull_tail(o, regular);
+        if (ascii_undone) o.notes.push_back("the file had gone through an ASCII-mode transfer (every LF became CR LF): undone");
+        if (zero_tail)
+            o.notes.push_back("the file ends in " + std::to_string(zero_tail) +
+                              " zero bytes (written by a crash or an unfinished download, not by gzip): the data ends where they begin");
         std::vector<Piece>& pieces = o.pieces;
+        uint64_t inferred = 0;
+        if (infer) {
+            std::string note;
+            inferred = infer_window(pieces, note);
+            if (!note.empty()) o.notes.push_back(note);
+        }
         gr_result* res = new gr_result;
         res->stats.input_size = size;
         res->stats.headers = (uint32_t)headers.size();
@@ -429,6 +870,8 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         res->stats.header_damaged = gzip && hlen == 0;
         res->stats.crc_check = -1;
         res->stats.input_end = o.input_end;
+        res->stats.inferred_bytes = inferred;
+        res->stats.ascii_undone = ascii_undone;
 
         // The true length of each suspect piece: the trailer's size minus what is certain, spread
         // over the suspect pieces by their compressed size when there are several. ISIZE counts
@@ -461,7 +904,7 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
             if (m.trailer && nsus == 0 && !pieces.empty() && pieces[m.last_piece].status == gi::OK) {
                 bool all_known = true;
                 for (size_t k = m.first_piece; k <= m.last_piece; k++)
-                    for (uint8_t kn : pieces[k].known) all_known &= kn != 0;
+                    for (uint8_t kn : pieces[k].known) all_known &= kn == 1;
                 if (all_known) {
                     uint32_t c = 0;
                     for (size_t k = m.first_piece; k <= m.last_piece; k++) c = crc32(pieces[k].bytes.data(), pieces[k].bytes.size(), c);
@@ -478,7 +921,30 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
                 }
             }
         }
+        // With damaged blocks in the stream its CRC cannot be checked, and "exact" means exact as
+        // far as decoding can tell: measured on bit rot, a flipped bit that kept the decoder in
+        // step left megabytes of a log wrong and unflagged.
+        if (res->stats.crc_check == -1) {
+            bool damaged = false;
+            for (const Piece& p : pieces) damaged |= p.suspect;
+            if (damaged)
+                o.notes.push_back("with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as "
+                                  "decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal "
+                                  "or a match length) would not show");
+        }
 
+        // GR_DUMP_VARS=<file>: the variable of every output byte (uint32, 0: none), for checking
+        if (const char* dv = getenv("GR_DUMP_VARS")) {
+            if (FILE* f = fopen(dv, "wb")) {
+                for (const Piece& p : pieces) {
+                    size_t len = p.suspect && p.true_len ? (size_t)p.true_len : p.bytes.size();
+                    std::vector<uint32_t> v(len, 0);
+                    for (size_t i = 0; i < std::min(len, p.var.size()); i++) v[i] = p.known[i] == 1 ? 0 : p.var[i];
+                    fwrite(v.data(), 4, v.size(), f);
+                }
+                fclose(f);
+            }
+        }
         // the output: every piece, a suspect one cut or padded to its true length when known
         std::vector<uint8_t> buf, mask;
         uint64_t pos = 0;
@@ -495,10 +961,16 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
                     continue;
                 }
                 buf[i] = p.bytes[i];
-                mask[i] = p.suspect ? GR_SUSPECT : GR_EXACT;
                 known++;
-                if (p.suspect) res->stats.suspect_bytes++;
-                else res->stats.exact_bytes++;
+                if (p.suspect) {
+                    mask[i] = GR_SUSPECT;
+                    res->stats.suspect_bytes++;
+                } else if (p.known[i] == 2) {
+                    mask[i] = GR_INFERRED;
+                } else {
+                    mask[i] = GR_EXACT;
+                    res->stats.exact_bytes++;
+                }
             }
             if (len > p.bytes.size()) res->stats.unknown_bytes += len - p.bytes.size();
             res->why.push_back(p.why);

@@ -147,6 +147,237 @@ text is extracted (`w:t`, `a:t`, `t`), and a document is rebuilt from the recove
 so an Office application can open it. A docx's `document.xml` is usually one Deflate block, so
 damage inside it costs the rest of that block's text; the text before it survives.
 
+## Damage the way it happens (`realistic.py`, `evaluate.py`)
+
+The cases above are damage chosen to stress the method. `realistic.py` breaks files the way they
+break in the world instead, eleven ways, on six originals made from data already on this
+machine: a 32 MB Windows CBS log (`gzip -6`), a 32 MB tar.gz of Python's standard library, the
+same library as a 17 MB ZIP, and a docx (2,000 paragraphs, styles, two images), an xlsx (six
+sheets written by openpyxl: text, numbers, formulas) and a pptx (12 slides with images).
+
+| Failure | How it happens | What it does to the file |
+|---|---|---|
+| ftp_ascii | FTP in ASCII mode, Unix to Windows | every LF becomes CR LF |
+| ascii_strip | the same, Windows to Unix | every CR LF becomes LF |
+| bad_sectors | read off a failing disk with ddrescue | three aligned 4 KB sectors are zeros |
+| flash_ff | a USB stick or SD card loses an erase block | 128 KB, aligned, of 0xFF |
+| crosslinked | chkdsk cross-links two clusters | two 4 KB clusters hold another file's data |
+| torrent_holes | a download that stalled at 97% | the pieces never received are zeros |
+| cut | an interrupted download | the last 17% missing |
+| resume_dup | a download resumed from the wrong offset | 64 KB written twice |
+| resume_gap | a download resumed past where it stopped | 512 KB missing in the middle |
+| crash_tail | a crash while copying a preallocated file | the last 20% are zeros |
+| bitrot | failing RAM or storage | eight random bits flipped |
+
+`evaluate.py` runs `gpuzip rescue` on each of the 66 damaged files, and what people reach for:
+`gzip -d` (counted up to its first wrong byte: after it, it stops or decodes garbage), Windows
+`tar`, 7-Zip, Python's `zipfile`. It counts what each gives back identical to the original, and
+gpuzip's silent errors: bytes it marks exact, or files and entries it calls intact, that are
+wrong. Inferred bytes (next section) are counted apart. For the Office documents also the share of
+the document's text units (paragraphs, cells, slide texts) found in the recovered XML, and
+whether the result opens (every XML part parses, and openpyxl loads the workbook; neither Word
+nor Excel was run).
+
+**logs.txt.gz**, the share of the 32 MB log given back right:
+
+| Failure | gzip | gpuzip rescue | silent errors | inferred, wrong |
+|---|---|---|---|---|
+| ftp_ascii | 0.0% | **100.0%** | 0 | 0 |
+| ascii_strip | 1.6% | **25.9%** | 0 | 0 |
+| bad_sectors | 6.9% | **44.1%** | 0 | 0 |
+| flash_ff | 8.6% | **41.9%** | 0 | 0 |
+| crosslinked | 73.7% | **78.6%** | 0 | 0 |
+| torrent_holes | 64.2% | **75.6%** | 0 | 0 |
+| cut | 85.3% | **85.3%** | 0 | 0 |
+| resume_dup | 48.8% | **68.0%** | 0 | 0 |
+| resume_gap | 54.2% | **65.6%** | 0 | 0 |
+| crash_tail | 81.1% | **81.1%** | 0 | 0 |
+| bitrot | 7.1% | **63.7%** | 9013201 | 0 |
+
+**code.tar.gz**, files identical to the original (of 1,828):
+
+| Failure | Windows tar | 7-Zip | gpuzip rescue | silent errors | inferred, wrong |
+|---|---|---|---|---|---|
+| ftp_ascii | 0 | 0 | **1828** | 0 | 0 |
+| ascii_strip | 12 | 12 | **106** | 1 | 0 |
+| bad_sectors | 87 | 87 | **1722** | 0 | 0 |
+| flash_ff | 207 | 207 | **1771** | 0 | 0 |
+| crosslinked | 1208 | 1208 | **1753** | 0 | 0 |
+| torrent_holes | 1761 | 1761 | **1761** | 0 | 0 |
+| cut | 1462 | 1462 | **1462** | 0 | 0 |
+| resume_dup | 544 | 544 | **1748** | 0 | 0 |
+| resume_gap | 794 | 794 | **1484** | 0 | 0 |
+| crash_tail | 1359 | 1359 | **1359** | 0 | 0 |
+| bitrot | 794 | 794 | **1240** | 6 | 0 |
+
+**lib.zip**, entries identical (of 3,440):
+
+| Failure | 7-Zip | zipfile | gpuzip rescue | silent errors |
+|---|---|---|---|---|
+| ftp_ascii | 0 | 0 | **3440** | 0 |
+| ascii_strip | 3 | 0 | **3218** | 0 |
+| bad_sectors | 3436 | 3436 | **3436** | 0 |
+| flash_ff | 3401 | 3400 | **3401** | 0 |
+| crosslinked | 3438 | 3438 | **3438** | 0 |
+| torrent_holes | 3252 | 3243 | **3252** | 0 |
+| cut | 2654 | 0 | **2654** | 0 |
+| resume_dup | 1210 | 2240 | **3440** | 0 |
+| resume_gap | 1593 | 1729 | **3326** | 0 |
+| crash_tail | 2452 | 0 | **2452** | 0 |
+| bitrot | 3432 | 3432 | **3432** | 0 |
+
+**report.docx**, parts identical (of 10), and the document's text and whether it opens:
+
+| Failure | 7-Zip | zipfile | gpuzip rescue | silent errors | text: 7-Zip | text: gpuzip | damaged file opens | rebuilt opens |
+|---|---|---|---|---|---|---|---|---|
+| ftp_ascii | 0 | 0 | **10** | 0 | 0% | **100%** | no | yes |
+| ascii_strip | 2 | 2 | **8** | 0 | 38% | **38%** | no | yes |
+| bad_sectors | 8 | 8 | **8** | 0 | 4% | **4%** | no | yes |
+| flash_ff | 7 | 7 | **7** | 0 | 0% | **0%** | no | yes |
+| crosslinked | 9 | 9 | **9** | 0 | 62% | **62%** | no | yes |
+| torrent_holes | 4 | 4 | **4** | 0 | 83% | **83%** | no | yes |
+| cut | 2 | 0 | **2** | 0 | 99% | **99%** | no | yes |
+| resume_dup | 2 | 7 | **9** | 0 | 68% | **68%** | no | yes |
+| resume_gap | 2 | 7 | **9** | 0 | 65% | **65%** | no | yes |
+| crash_tail | 2 | 0 | **2** | 0 | 96% | **95%** | no | yes |
+| bitrot | 8 | 8 | **8** | 0 | 63% | **63%** | no | yes |
+
+**budget.xlsx** (of 14 parts):
+
+| Failure | 7-Zip | zipfile | gpuzip rescue | silent errors | text: 7-Zip | text: gpuzip | damaged file opens | rebuilt opens |
+|---|---|---|---|---|---|---|---|---|
+| ftp_ascii | 1 | 0 | **14** | 0 | 0% | **100%** | no | yes |
+| ascii_strip | 4 | 6 | **11** | 0 | 17% | **67%** | no | yes |
+| bad_sectors | 11 | 11 | **11** | 0 | 67% | **67%** | no | yes |
+| flash_ff | 10 | 10 | **10** | 0 | 83% | **83%** | no | yes |
+| crosslinked | 11 | 11 | **11** | 0 | 67% | **67%** | no | yes |
+| torrent_holes | 12 | 12 | **12** | 0 | 71% | **71%** | no | yes |
+| cut | 8 | 0 | **8** | 0 | 84% | **84%** | no | yes |
+| resume_dup | 6 | 8 | **14** | 0 | 58% | **100%** | no | yes |
+| resume_gap | 6 | 6 | **12** | 0 | 55% | **72%** | no | yes |
+| crash_tail | 7 | 0 | **7** | 0 | 82% | **82%** | no | yes |
+| bitrot | 10 | 10 | **10** | 0 | 63% | **63%** | no | yes |
+
+**slides.pptx** (of 22 parts):
+
+| Failure | 7-Zip | zipfile | gpuzip rescue | silent errors | text: 7-Zip | text: gpuzip | damaged file opens | rebuilt opens |
+|---|---|---|---|---|---|---|---|---|
+| ftp_ascii | 0 | 0 | **22** | 0 | 0% | **100%** | no | yes |
+| ascii_strip | 22 | 22 | **22** | 0 | 100% | **100%** | yes | yes |
+| bad_sectors | 16 | 16 | **16** | 0 | 58% | **58%** | no | yes |
+| flash_ff | 0 | 0 | **0** | 0 | 0% | **0%** | no | no |
+| crosslinked | 16 | 16 | **16** | 0 | 58% | **58%** | no | yes |
+| torrent_holes | 22 | 22 | **22** | 0 | 100% | **100%** | yes | yes |
+| cut | 18 | 0 | **18** | 0 | 87% | **85%** | no | yes |
+| resume_dup | 13 | 10 | **22** | 0 | 58% | **100%** | no | yes |
+| resume_gap | 13 | 6 | **19** | 0 | 58% | **83%** | no | yes |
+| crash_tail | 18 | 0 | **18** | 0 | 83% | **83%** | no | yes |
+| bitrot | 16 | 16 | **17** | 0 | 76% | **84%** | no | yes |
+
+Another tool gives back more than gpuzip in ten of the 66 cases, by under 0.1 points in nine of
+them and by 1.8 points of text in a cut pptx: wherever a stream ends early, its last symbol may
+have been read from bits past the end, so gpuzip does not trust what that symbol wrote (up to
+258 bytes); the others keep it, and here it happened to be right. The flash-damaged pptx is
+16 KB, and the erase block covered all of it. Silent errors: the bitrot cases and one file of the
+CR-stripped tar, below; inferred bytes that were wrong: none.
+
+What the cases taught, each a fix now in the code:
+
+- **An ASCII-mode transfer** (every LF to CR LF) defeats every other tool completely. It is
+  undone exactly when at least 98% of the file's LFs follow a CR (in compressed data about one in
+  256 does): everything comes back, in all six formats. The reverse transfer removed bytes that
+  nothing marks; the blocks with none in them decode, the rest are flagged. Putting the CRs
+  back by trying them where a decode breaks is not done.
+- **A crash leaves zeros where the data should be.** gzip decodes them as data, and so did the
+  first version (6 million bytes marked exact that were not). Sixty-four or more zero bytes at
+  the end are not gzip's: the input now ends where they begin. gzip's own output is right 131
+  bytes further in this case; its garbage after that agrees with the log here and there by
+  chance (0.9% of it, which a byte-by-byte comparison would have counted for gzip).
+- **A truncated file's last symbol** may be read from bits past its end: the last 258 bytes
+  (what one symbol can write) are no longer trusted (94 wrong bytes before).
+- **A torrent hole that reaches the end.** A block decoding through 16 KB of zeros writes
+  plausible repeated text ("0000...") and runs off the end of the file: it looked like a
+  truncated file whose bytes were exact (110,194 wrong bytes). Its symbol count gives it away:
+  40,326 in one block, where zlib never puts more than 16,383. That block is now split off and
+  flagged; the block before it is exact, to the byte.
+- **A lost byte that the decoder survives.** A CR removed inside a block, after which the
+  Huffman codes fell back in step with the very same symbol count: the block lands on the next
+  header and nothing in the stream shows the damage. The tar does: the next header is not where
+  the file's size says it must be. That file is now flagged instead of called intact.
+- **Spreadsheets need more than well-formed XML.** After damage a worksheet holds cells at
+  "1A168", numbers like "172.t>", a type "=", shared strings that do not exist; openpyxl
+  refused the rebuilt workbook in ten of the eleven cases (Excel would at best offer to repair
+  it). A damaged sheet
+  is now rebuilt from its valid cells only (reference in range and in order, known type, value
+  that parses, string and format indices that exist; formulas kept when balanced), a part with
+  nothing left is left out with its references, and a workbook cut before its main part (Excel
+  and openpyxl write `workbook.xml` near the end) gets one listing the sheets found. All eleven
+  now open, with what was dropped listed in the report.
+- **A ZIP resumed at the wrong offset** shifts every entry after the splice: entries are matched
+  to the scanned local headers by name, CRC and nearest offset, not by the directory's offset.
+  When bytes before the directory were lost, its own offset points past the end of the file:
+  it is read where it ends, at the end record, as Python's zipfile does. And a compressed
+  entry's size no longer hides the local headers inside its declared extent (only a stored entry
+  can hold another ZIP's headers): after a gap, the size of the entry before it reaches over the
+  entries that follow. The resumed-past-a-gap docx went from 4 parts back to 9.
+- **Undoing an ASCII transfer needs a guard**: a sound ZIP of Windows text stored as is has a CR
+  before every LF too. A ZIP whose directory ends exactly where its end record says has had no
+  bytes inserted, and is left alone (`tests/test_gpuzip.py` checks both ways).
+- **Speed**: every entry went through the block-by-block rescue, 25 s for `lib.zip`. An entry
+  that inflates to its size and CRC is now taken as it is: 2 s.
+
+The limits that remain:
+
+- **A flipped bit that keeps the decoder in step** and changes one literal into another of the
+  same code length (`hasattr` became `haaattr`) is invisible in the stream. When it is the only
+  damage, the trailer's CRC fails and no file is called intact. When other damage makes the CRC
+  uncheckable, it passes: six files in the bitrot tar, and 9 MB of the bitrot log, where a flip
+  in a match length moved the rest of its block by a byte and later blocks copied the moved
+  bytes on. The report now says so whenever the CRC cannot be checked: exact then means exact
+  as far as decoding can tell.
+- **A substitution of the same length** inside a file (one in the CR-stripped tar) leaves the
+  tar's headers in place: nothing to see without a checksum per file.
+- **LZ77 taint** on repetitive data: with bad sectors the log keeps 44% where gzip gives 7%, and
+  the rest is marked unknown, not guessed.
+
+## Inferring the lost window
+
+After a damaged block the bytes that copy from the lost window are unknown, but not free: every
+copy of one window byte holds the same value, and a byte is often copied to many places. The
+decoder gives each lost window position a variable and carries it through copies (a copy of a
+copy is the same variable). gzrescue then infers values from the file's own statistics: a model
+of contexts of 1 to 5 bytes, blended from the longest seen down as PPM does, with exact keys,
+trained on the 1 MB of exact output nearest the damage. Every byte value is scored by how well
+it fits between the known bytes before and after each place the variable appears. A value is
+taken only when
+
+- it leads the next by 14 nats (about a million to one) summed over those places,
+- one place on its own favours it by 6, and no place favours another by 2,
+- and only places with at least two known bytes on each side count (places alike on the three
+  bytes either side count once).
+
+Values taken become known for the next round, up to 60 rounds. Inferred bytes are their own
+class in the mask (3), never exact, and a tar file holding any is reported as "inferred", not
+intact.
+
+| Damaged file | bytes inferred | wrong |
+|---|---|---|
+| code.tar.gz, bad_sectors | 21,911 | 0 |
+| code.tar.gz, flash_ff | 1,830 | 0 |
+| code.tar.gz, torrent_holes | 4,057 | 66 |
+| logs.txt.gz, bad_sectors | 51,145 | 0 |
+| logs.txt.gz, flash_ff | 23 | 0 |
+
+That is 78,966 bytes, 99.92% right (`infer_sweep.ps1`). The 66 wrong ones are two decisions,
+each copied many times, and both are true ambiguities: `operator.lt` read as `operator.le`,
+which is just as valid. Each rule came from a failure. Summing many weak one-sided places was
+right 86% of the time on the tar: in a certificate bundle's fingerprints (`94:45:?`) sixty places
+each said "a digit" a little, and together they said it loudly, sixty times wrong. Keeping as
+candidates only the bytes ever seen after the byte before let a value never seen there lose
+without a contest (676 wrong bytes). Coverage is small: tens of KB out of the megabytes lost,
+because most unknown bytes lie in runs with no known neighbour, out of reach of a byte-by-byte
+method; decoding whole runs jointly would be the next step.
+
 ## What is not done
 
 - gzrecover for comparison (it needs a download); the baseline here is gzip itself.
@@ -156,9 +387,15 @@ damage inside it costs the rest of that block's text; the text before it survive
 - Fixed-Huffman and stored blocks after damage are restarted at the next dynamic header only;
   a probe-based restart inside a fixed block exists for the case where no header follows.
 - The whole recovered stream is held in memory for a tar.gz (twice: bytes and mask).
-- ZIP (rebuilding a lost central directory, recovering entries), and Office files (docx, xlsx,
-  pptx are ZIPs) on top of this.
-- Real damaged files from the world, not only synthetic damage.
+- CR re-insertion for a file that went through a Windows-to-Unix ASCII transfer.
+- Trusting the output of a cut stream to the last whole symbol instead of distrusting its last
+  258 bytes: the decoder would have to say where its last symbol began (it is shared with the
+  GPU kernel, so not changed for this).
+- Joint inference of runs of lost window bytes.
+- Opening the rebuilt documents in Word, Excel and PowerPoint themselves; the check here is that
+  every XML part parses and openpyxl loads the workbook.
+- Real damaged files from the world: the damage here is modelled on how files break, but made
+  here.
 
 ## Running it
 
@@ -173,6 +410,11 @@ python repro_test.py <work-dir> [0.4]                           (the test suite'
 python make_zip_cases.py <dir> [48]                             (a ZIP of Python's library and a docx, six damaged copies)
 gpuzip rescue <dir>\lib.nocd.zip -o <out> --json > r.json
 python check_zip.py <dir>\lib.zip <out> r.json                  (every entry called intact must be identical; the docx checks)
+python realistic.py <dir>                                       (six originals, eleven real-world failures each: 66 files; needs openpyxl, Pillow)
+python evaluate.py <dir> [--only lib.zip] [--failures cut]      (gpuzip against gzip, tar, 7-Zip, zipfile: results.md; needs numpy, openpyxl)
+infer_sweep.ps1 [-SoloAgainst "6:2"] [-Margins "14:60"]         (inference accuracy and coverage by setting)
+python infer_debug.py <dir> <damaged.gz> <original> [14] [60]   (wrong inference decisions, with their contexts)
+python var_check.py <dir> <damaged.gz> <original>               (every byte of one variable must share one true value)
 ```
 
 One more lesson from the test suite: damage inside a stored block (zlib keeps incompressible

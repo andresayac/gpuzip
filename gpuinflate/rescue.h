@@ -31,14 +31,17 @@ extern "C" {
 #define GR_API
 #endif
 
-#define GR_ABI_VERSION 1
+#define GR_ABI_VERSION 2
 
 enum { GR_OK = 0, GR_ERR_NO_DEFLATE = 1, GR_ERR_ABORTED = 2, GR_ERR_ARG = 3, GR_ERR_MEMORY = 4 };
-enum { GR_UNKNOWN = 0, GR_EXACT = 1, GR_SUSPECT = 2 };
+/* GR_INFERRED: a byte that copied from data lost with a damaged block, its value inferred from
+ * every place that copy appears and the file's own statistics; likely right, not certain */
+enum { GR_UNKNOWN = 0, GR_EXACT = 1, GR_SUSPECT = 2, GR_INFERRED = 3 };
 
 typedef struct {
-    uint32_t size; /* sizeof(gr_options) */
-    uint8_t fill;  /* written where a byte is unknown */
+    uint32_t size;    /* sizeof(gr_options) */
+    uint8_t fill;     /* written where a byte is unknown */
+    uint8_t no_infer; /* 1: leave the bytes copied from lost data unknown, do not infer them */
 } gr_options;
 
 typedef struct {
@@ -60,6 +63,8 @@ typedef struct {
     int32_t truncated;  /* the file ends inside the stream */
     int32_t header_damaged;
     uint64_t input_end; /* byte after the last decoded block of the first member (a ZIP's data descriptor follows it) */
+    uint64_t inferred_bytes;
+    int32_t ascii_undone; /* the input had gone through an ASCII-mode transfer (LF to CR LF), undone */
 } gr_stats;
 
 /* Receives the output in order. Return nonzero to stop. */

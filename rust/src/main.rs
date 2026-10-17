@@ -8,6 +8,7 @@ mod gz;
 mod inflate;
 mod rescue;
 mod sevenzip;
+mod sheetfix;
 mod zip;
 mod ziprescue;
 
@@ -438,7 +439,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         }
     };
     let map = unsafe { memmap2::Mmap::map(&file) };
-    let data: &[u8] = map.as_deref().unwrap_or(&[]);
+    let mapped: &[u8] = map.as_deref().unwrap_or(&[]);
     let lib = match rescue::get() {
         Ok(l) => l,
         Err(e) => {
@@ -446,6 +447,21 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
             return 1;
         }
     };
+    // A file sent through FTP in ASCII mode from Unix to Windows has a CR before every LF it
+    // ever held. Compressed data is close to random, where a CR precedes an LF one time in 256;
+    // when nearly every LF has one, the conversion is undone exactly, before anything else.
+    // A ZIP whose central directory ends exactly where its end record says has had no bytes
+    // inserted: not converted, even if most of its LFs have a CR (Windows text stored as is).
+    let zip_in_place = zip::find_eocd(mapped).map_or(false, |e| {
+        let (size, offset) = (u32::from_le_bytes(mapped[e + 12..e + 16].try_into().unwrap()), u32::from_le_bytes(mapped[e + 16..e + 20].try_into().unwrap()));
+        size == u32::MAX || offset == u32::MAX || offset as u64 + size as u64 == e as u64
+    });
+    let unconverted = if zip_in_place { None } else { rescue::undo_lf_to_crlf(mapped) };
+    let data: &[u8] = unconverted.as_deref().unwrap_or(mapped);
+    if unconverted.is_some() && !(opts.quiet || opts.json) {
+        println!("  Note: the file went through an ASCII-mode transfer (every LF became CR LF); undone before the rescue");
+    }
+    rescue::set_ascii_note(unconverted.is_some());
     if ziprescue::is_office_name(&archive) || (!gz::is_gzip(data) && ziprescue::looks_like_zip(data)) {
         return rescue_zip_file(&archive, data, lib, out_root, fill, opts);
     }
@@ -524,7 +540,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         let v = json!({
             "archive": archive, "command": "rescue", "format": if tar { "tar.gz" } else { "gz" },
             "input_bytes": s.input_size, "output_bytes": s.output_size,
-            "exact_bytes": s.exact_bytes, "suspect_bytes": s.suspect_bytes, "unknown_bytes": s.unknown_bytes,
+            "exact_bytes": s.exact_bytes, "inferred_bytes": s.inferred_bytes, "suspect_bytes": s.suspect_bytes, "unknown_bytes": s.unknown_bytes,
             "block_headers": s.headers, "damaged_blocks": s.damaged, "crc_check": s.crc_check, "length_off": s.length_off,
             "truncated": s.truncated != 0, "header_damaged": s.header_damaged != 0, "clean": clean,
             "seconds": (secs * 1e4).round() / 1e4,
@@ -532,10 +548,10 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
                 "input_byte": p.in_byte_start, "input_byte_end": p.in_byte_end, "output_offset": p.out_offset, "length": p.length,
                 "decoded": p.decoded, "known": p.known, "blocks": p.blocks, "symbols": p.symbols, "why": p.why,
             })).collect::<Vec<_>>(),
-            "notes": report.notes,
+            "notes": report.notes, "ascii_transfer_undone": rescue::ascii_undone(),
             "output": target.as_ref().map(|t| t.display().to_string()),
             "tar": tar_out.as_ref().map(|t| json!({
-                "intact": t.intact, "unverified": t.unverified, "suspect": t.suspect, "partial": t.partial, "repaired_headers": t.repaired,
+                "intact": t.intact, "unverified": t.unverified, "inferred": t.inferred, "suspect": t.suspect, "partial": t.partial, "repaired_headers": t.repaired,
                 "skipped": t.skipped.iter().map(|(o, n)| json!({"offset": o, "bytes": n})).collect::<Vec<_>>(),
             })),
             "failed": failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
@@ -550,8 +566,9 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
     let name = Path::new(&archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if let Some(t) = &tar_out {
         println!(
-            "Rescued {name} in {secs:.2} s: {} files intact, {} possibly damaged, {} partial, {} region{} unreadable ({}) · data {:.2}% exact, {:.2}% unknown",
+            "Rescued {name} in {secs:.2} s: {} files intact, {} with inferred bytes, {} possibly damaged, {} partial, {} region{} unreadable ({}) · data {:.2}% exact, {:.2}% unknown",
             commas(t.intact),
+            commas(t.inferred.len() as u64),
             commas(t.suspect.len() as u64),
             commas(t.partial.len() as u64),
             t.skipped.len(),
@@ -578,15 +595,22 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         if t.suspect.len() > 20 {
             println!("  ... and {} more possibly damaged", t.suspect.len() - 20);
         }
+        for n in t.inferred.iter().take(20) {
+            println!("  Inferred bytes (likely right, not certain): {n}");
+        }
+        if t.inferred.len() > 20 {
+            println!("  ... and {} more with inferred bytes", t.inferred.len() - 20);
+        }
         if t.repaired > 0 {
             println!("  Note: {} tar headers had unknown bytes and were made whole from the header before them (checksums confirm)", t.repaired);
         }
     } else if let Some(t) = &target {
         println!(
-            "Rescued {} in {secs:.2} s: {} written, {:.2}% exact, {:.2}% unknown, {:.2}% in {} damaged block{}{}",
+            "Rescued {} in {secs:.2} s: {} written, {:.2}% exact, {:.2}% inferred, {:.2}% unknown, {:.2}% in {} damaged block{}{}",
             t.display(),
             human(s.output_size),
             pct(s.exact_bytes),
+            pct(s.inferred_bytes),
             pct(s.unknown_bytes),
             pct(s.suspect_bytes),
             s.damaged,
@@ -647,8 +671,9 @@ fn rescue_zip_file(archive: &str, data: &[u8], lib: &rescue::Rescue, out_root: P
             "office": o.office.as_ref().map(|f| json!({
                 "kind": f.kind, "repaired_parts": f.repaired_parts, "text_file": f.text_file.as_ref().map(|p| p.display().to_string()),
                 "text_chars": f.text_chars, "rebuilt": f.rebuilt.as_ref().map(|p| p.display().to_string()),
+                "package_fixes": f.package_fixes,
             })),
-            "notes": o.notes, "failed": o.failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
+            "notes": o.notes, "ascii_transfer_undone": rescue::ascii_undone(), "failed": o.failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
             "seconds": (secs * 1e4).round() / 1e4, "implementation": "rust",
         });
         println!("{}", ascii_json(&v));
@@ -688,6 +713,9 @@ fn rescue_zip_file(archive: &str, data: &[u8], lib: &rescue::Rescue, out_root: P
         }
         if let Some(r) = &f.rebuilt {
             println!("  Office: document rebuilt from the recovered parts: {}", r.display());
+        }
+        for fx in &f.package_fixes {
+            println!("  Office: {fx}");
         }
     }
     for n in &o.notes {

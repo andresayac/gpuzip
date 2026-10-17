@@ -122,14 +122,17 @@ pub fn dos_time(date: u16, time: u16) -> Option<SystemTime> {
 
 /// Every entry of the archive, each with its route.
 pub fn read_entries(data: &[u8]) -> Result<Vec<Entry>, String> {
-    let mut entries = read_central_directory(data)?;
+    let mut entries = read_central_directory(data, false)?;
     plan(data, &mut entries)?;
     Ok(entries)
 }
 
 /// The central directory alone: names, sizes, CRCs and where each local header is
 /// (`data_offset`), without looking at the local headers. For the rescue of damaged files.
-pub fn read_central_directory(data: &[u8]) -> Result<Vec<Entry>, String> {
+/// `lost_ok`: the directory may say it lies further on than it does, when bytes before it were
+/// lost (a download resumed past a gap); it is read where it ends, at the end record, and the
+/// offsets it gives are moved back by as much (right for the entries after the gap only).
+pub fn read_central_directory(data: &[u8], lost_ok: bool) -> Result<Vec<Entry>, String> {
     let eocd = find_eocd(data).ok_or("not a ZIP file")?;
     let mut size_cd = u32le(data, eocd + 12) as u64;
     let mut offset_cd = u32le(data, eocd + 16) as u64;
@@ -143,10 +146,11 @@ pub fn read_central_directory(data: &[u8]) -> Result<Vec<Entry>, String> {
         }
     }
     // data prepended to the archive (self-extractors) shifts every offset
-    let concat = end_of_cd
-        .checked_sub(size_cd + offset_cd)
-        .ok_or("central directory points past the end of the file")?;
-    let start = (offset_cd + concat) as usize;
+    let concat = end_of_cd as i64 - (size_cd + offset_cd) as i64;
+    if concat < 0 && (!lost_ok || (size_cd as i64) > end_of_cd as i64) {
+        return Err("central directory points past the end of the file".into());
+    }
+    let start = (offset_cd as i64 + concat) as usize;
     let end = start + size_cd as usize;
     if end > data.len() {
         return Err("central directory is truncated".into());
@@ -192,7 +196,7 @@ pub fn read_central_directory(data: &[u8]) -> Result<Vec<Entry>, String> {
             crc: u32le(data, p + 16),
             csize,
             size,
-            data_offset: header + concat, // the local header for now; plan() moves it to the data
+            data_offset: (header as i64 + concat).max(0) as u64, // the local header for now; plan() moves it to the data
             dos_time: u16le(data, p + 12),
             dos_date: u16le(data, p + 14),
             route: Route::Cpu,

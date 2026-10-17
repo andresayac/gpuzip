@@ -11,15 +11,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 pub const UNKNOWN: u8 = 0;
 pub const EXACT: u8 = 1;
 pub const SUSPECT: u8 = 2;
+pub const INFERRED: u8 = 3;
 
 #[repr(C)]
 struct Options {
     size: u32,
     fill: u8,
+    no_infer: u8,
 }
 
 #[repr(C)]
@@ -59,6 +61,9 @@ pub struct Stats {
     pub header_damaged: i32,
     /// byte after the last decoded block (a ZIP's data descriptor follows it)
     pub input_end: u64,
+    /// bytes that copied from data lost with a damaged block, their values inferred
+    pub inferred_bytes: u64,
+    pub ascii_undone: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -181,7 +186,7 @@ impl Rescue {
     }
 
     fn run(&self, input: &[u8], raw: Option<(Option<u64>, Option<u32>)>, fill: u8, mut sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
-        let opt = Options { size: std::mem::size_of::<Options>() as u32, fill };
+        let opt = Options { size: std::mem::size_of::<Options>() as u32, fill, no_infer: 0 };
         let mut f: SinkFn = &mut sink;
         let user = &mut f as *mut SinkFn as *mut c_void;
         let mut res: *mut c_void = std::ptr::null_mut();
@@ -242,14 +247,62 @@ impl Rescue {
     }
 }
 
+// ---------------------------------------------------------------- ASCII-mode transfers
+
+/// LF bytes, and how many have a CR right before them
+pub fn crlf_counts(data: &[u8]) -> (usize, usize) {
+    let mut lf = 0;
+    let mut crlf = 0;
+    for (i, &b) in data.iter().enumerate() {
+        if b == b'\n' {
+            lf += 1;
+            if i > 0 && data[i - 1] == b'\r' {
+                crlf += 1;
+            }
+        }
+    }
+    (lf, crlf)
+}
+
+/// When nearly every LF has a CR before it (an ASCII-mode transfer from Unix to Windows; in
+/// compressed data one LF in 256 does by chance), the data with one CR removed before each LF.
+pub fn undo_lf_to_crlf(data: &[u8]) -> Option<Vec<u8>> {
+    let (lf, crlf) = crlf_counts(data);
+    if lf < 16 || (crlf as f64) < 0.98 * lf as f64 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() - crlf);
+    for (i, &b) in data.iter().enumerate() {
+        if b == b'\r' && data.get(i + 1) == Some(&b'\n') {
+            continue;
+        }
+        out.push(b);
+    }
+    Some(out)
+}
+
+static ASCII_UNDONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the file being rescued had its ASCII-mode conversion undone (for the reports)
+pub fn set_ascii_note(v: bool) {
+    ASCII_UNDONE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn ascii_undone() -> bool {
+    ASCII_UNDONE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------- tar, with damage
 
 #[derive(Default)]
 pub struct TarOutcome {
     pub intact: u64,
     /// files whose bytes all lie in exact or damaged-but-flagged blocks (right, or wrong from
-    /// some point inside the block)
+    /// some point inside the block), or that the next header does not follow where it should
     pub suspect: Vec<String>,
+    /// files complete, but with bytes inferred (copies of data lost with a damaged block): likely
+    /// right, not certain
+    pub inferred: Vec<String>,
     /// files with unknown bytes (written as the fill byte) or cut short
     pub partial: Vec<String>,
     /// regions with no readable tar header: (offset, bytes)
@@ -303,6 +356,8 @@ pub fn untar(data: &[u8], mask: &[u8], root: Option<&Path>, mtime_from_header: b
     let mut pax_path: Option<String> = None;
     let mut pax_size: Option<u64> = None;
     let mut last_valid: Option<[u8; 512]> = None;
+    // the last regular file: its name, status and where the header after it must be
+    let mut prev_file: Option<(String, u8, usize)> = None;
     while pos + 512 <= n {
         let raw = &data[pos..pos + 512];
         let hmask = &mask[pos..pos + 512];
@@ -334,6 +389,7 @@ pub fn untar(data: &[u8], mask: &[u8], root: Option<&Path>, mtime_from_header: b
                 o.repaired += 1;
             }
             let typeflag = h[156];
+            prev_file = None;
             let size = pax_size.take().or_else(|| octal(&h[124..136])).unwrap_or(0);
             let data_start = pos + 512;
             let data_end = data_start.saturating_add(size as usize).min(n);
@@ -381,6 +437,8 @@ pub fn untar(data: &[u8], mask: &[u8], root: Option<&Path>, mtime_from_header: b
                         2
                     } else if repaired || bmask.iter().any(|&m| m == SUSPECT) {
                         1
+                    } else if bmask.iter().any(|&m| m == INFERRED) {
+                        3
                     } else {
                         0
                     };
@@ -408,9 +466,11 @@ pub fn untar(data: &[u8], mask: &[u8], root: Option<&Path>, mtime_from_header: b
                         }
                     }
                     o.bytes += body.len() as u64;
+                    prev_file = Some((name.clone(), status, next));
                     match status {
                         0 => o.intact += 1,
                         1 => o.suspect.push(name),
+                        3 => o.inferred.push(name),
                         _ => o.partial.push(name),
                     }
                 }
@@ -418,6 +478,24 @@ pub fn untar(data: &[u8], mask: &[u8], root: Option<&Path>, mtime_from_header: b
             }
             pos = next;
             continue;
+        }
+        // The header after a file is not where its size says, yet the bytes there are exact: the
+        // decoder went through damage it could not see (a lost byte, after which the Huffman codes
+        // fell back in step), and that file's data most likely has bytes lost or added.
+        if let Some((name, status, at)) = prev_file.take() {
+            if at == pos && hmask.iter().all(|&m| m == EXACT || m == INFERRED) {
+                match status {
+                    0 => {
+                        o.intact -= 1;
+                        o.suspect.push(name);
+                    }
+                    3 => {
+                        o.inferred.retain(|x| *x != name);
+                        o.suspect.push(name);
+                    }
+                    _ => {}
+                }
+            }
         }
         // No header here: find the next one that verifies, with a ustar magic to be sure. Byte
         // by byte, not in steps of 512: when a damaged block's length could only be estimated,

@@ -128,16 +128,20 @@ from gpuinflate, decodes block by block and knows a block went through damage wh
 does not land exactly on the next header, or holds a number of symbols other than the
 encoder's regular one. The damaged block is kept but flagged, decoding restarts at the next
 header, bytes that copied from a damaged block are marked unknown (written as `--fill`), and
-the block's true length comes from the trailer so the offsets after it stay right. For a
-`.tar.gz` the files are then extracted from the recovered stream. Tar headers copy their
+the block's true length comes from the trailer so the offsets after it stay right. A file that
+went through an FTP transfer in ASCII mode (every LF made CR LF) is put back first, for every
+format; the zeros a crash or an unfinished download leaves at the end are not taken for data;
+and a block that decoded through zeros to the end of the file is caught by its symbol count. For
+a `.tar.gz` the files are then extracted from the recovered stream. Tar headers copy their
 repeated fields from the header before them, so after damage their unknown bytes are made whole
 from the previous header, with the checksum as the judge; where a header is beyond repair, the
 extractor finds the next readable one byte by byte and reports the files between as lost.
-Every file is classified: intact (every byte exact), possibly damaged (inside a flagged block or
-behind a repaired header), partial (unknown bytes or cut short). When the checksum fails and no
-block can be blamed (damage inside raw stored data, such as an already compressed file, or a
-flipped bit that kept the decoder in step), no file is called intact: they are all "unverified",
-because any of them may be the one. On a 128 MB tar of source code with a 4 KB stretch zeroed,
+Every file is classified: intact (every byte exact), with inferred bytes (below), possibly
+damaged (inside a flagged block, behind a repaired header, or followed by a header out of place),
+partial (unknown bytes or cut short). When the checksum fails and no block can be blamed (damage
+inside raw stored data, such as an already compressed file, or a flipped bit that kept the
+decoder in step), no file is called intact: they are all "unverified", because any of them may
+be the one. On a 128 MB tar of source code with a 4 KB stretch zeroed,
 7,398 of 7,411 files come back intact (and identical to the originals, checked), 3 possibly
 damaged, 2 partial, 8 lost, where gzip gives the first 42% of the archive and nothing else.
 
@@ -153,10 +157,44 @@ directory zeroed, 3,390 entries intact and 1 cut short; with a 4 KB stretch zero
 intact.
 
 **Office documents.** After the ZIP is recovered, each damaged XML part is made well-formed
-again (garbage, broken tags and undeclared names dropped, open elements closed), the text is
-extracted to `recovered-text.txt`, and a document is rebuilt from the recovered parts
-(`recovered.docx`, `.xlsx` or `.pptx`) that an Office application can open. What was inside the
-damaged stretch of the XML is gone; what came before and after it is kept.
+again (garbage, broken tags, duplicate attributes, undeclared names and stray declarations
+dropped, open elements closed), the text is extracted to `recovered-text.txt`, and a document is
+rebuilt from the recovered parts (`recovered.docx`, `.xlsx` or `.pptx`) that an Office
+application can open: parts with nothing left are left out with every reference to them, a
+damaged worksheet keeps only its valid cells (a well-formed sheet can still hold a cell at
+"1A168" or a number "172.t>", which no spreadsheet opens), and a workbook whose main part was
+lost gets one listing the sheets found. What was inside the damaged stretch of the XML is gone;
+what came before and after it is kept, and the report lists every change.
+
+**Inferred bytes.** After a damaged block the bytes that copied from it are unknown, but every
+copy of one lost byte holds the same value, and it is often copied to many places. gzrescue
+infers such values from the known bytes around every place they appear and the file's own
+statistics, and takes one only when the evidence is overwhelming (99.9% right in the
+measurements; the misses were true ambiguities, `operator.lt` for `operator.le`). They are
+reported as inferred, never as exact; `--no-infer` in gzrescue leaves them unknown.
+
+**Tested on damage as it happens.** [research/recovery](research/recovery) breaks six files (a
+log, a tar.gz, a ZIP, a docx, an xlsx, a pptx) in eleven ways modelled on real failures: an FTP
+transfer in ASCII mode either way, bad sectors read with ddrescue, a lost flash erase block,
+cross-linked clusters, a stalled torrent, a download cut, resumed twice over or past a gap, a
+crash during a copy, bit rot. Some of the 66 results, against what people reach for:
+
+| Damaged file | gzip, tar, 7-Zip, zipfile (best) | gpuzip rescue |
+|---|---|---|
+| tar.gz of Python's library, three bad sectors | 87 of 1,828 files | **1,722** |
+| the same, a download resumed with 64 KB twice | 544 files | **1,748** |
+| the same, sent through FTP in ASCII mode | 0 files | **all 1,828** |
+| a 32 MB log.gz, three bad sectors | 6.9% of the log | **44.1%** (the rest marked unknown) |
+| ZIP of 3,440 files, resumed past a 512 KB gap | 1,729 entries | **3,326** |
+| the same, every CR LF turned into LF | 3 entries | **3,218** |
+| docx, xlsx, pptx, all eleven failures | 2 of 33 still open | **32 rebuilt that open** (the 33rd was erased whole) |
+
+Silent errors (bytes or files called exact that are not) appear only under bit rot, where a
+flipped bit that kept the decoder in step changed a letter while other damage made the checksum
+uncheckable, and in one file of the CR-stripped tar; the report says when the checksum could
+not be checked. "Open" means every XML part parses and openpyxl loads the workbook; Word, Excel
+and PowerPoint themselves were not run. The cases also taught gpuzip most of the handling
+described above.
 
 Exit code 2 says something was damaged or lost.
 
@@ -257,6 +295,7 @@ rust/           the Rust version
   src/inflate.rs    gpuinflate.dll, loaded at run time
   src/rescue.rs     gzrescue.dll, loaded at run time; tar extraction that skips destroyed headers
   src/ziprescue.rs  damaged ZIPs: local-header scan, per-entry recovery; Office XML repair and rebuild
+  src/sheetfix.rs   damaged spreadsheets: sheets rebuilt from their valid cells, a lost workbook remade
   src/main.rs       the command line, reports and doctor
 python/         the Python version (gpuzip.py, pyproject.toml)
 tests/          correctness tests for both versions (ZIP, gzip, tar.gz, damaged files, zip slip)
@@ -269,7 +308,8 @@ research/gpu-zstd/      feasibility study of a GPU compressor writing standard z
                         ratio: match finding by radix sorts and an optimal parse on the GPU,
                         0.3-0.5 GB/s on an RTX 5080, 75x one CPU thread (see its README)
 research/recovery/      gzrescue: recovering damaged .gz files block by block with the finder;
-                        98-99.8% back on ordinary data where gzip gives 30-60% (see its README)
+                        98-99.8% back on ordinary data where gzip gives 30-60%; eleven real-world
+                        ways files break, on six formats, against gzip, tar, 7-Zip (see its README)
 ```
 
 Tests: `python tests\test_gpuzip.py` checks the Python version; with
