@@ -49,7 +49,8 @@ Exit codes: 0 ok · 1 missing file or setup problem · 2 some entries failed.
 | One large stream on the GPU (gpuinflate: .gz, .tar.gz, large ZIP entries) | NVIDIA | NVIDIA | no |
 
 macOS has no CUDA, so there everything is decoded on the CPU, and `gpuzip doctor` says so.
-GitHub Actions builds and tests every push on all three ([ci.yml](.github/workflows/ci.yml)).
+GitHub Actions builds and tests every push to main and every pull request on all three
+([ci.yml](.github/workflows/ci.yml)).
 Its runners have no GPU: CI covers the CPU paths, the 7-Zip hand-off and rescue, and checks that
 gpuinflate compiles for Linux. The GPU paths of the Rust version pass every test in
 `tests/test_gpuzip.py` on an RTX 5080 under Windows 11 and under Linux (Ubuntu 24.04 in WSL2,

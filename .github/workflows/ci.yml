@@ -4,8 +4,10 @@
 # nvCOMP is NVIDIA's proprietary library and is never downloaded here.
 name: CI
 
+# pushes to main, and pull requests (their own trigger: a branch with a PR is not run twice)
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
