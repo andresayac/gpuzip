@@ -22,6 +22,8 @@ extern "C" {
 #else
 #define GI_API __declspec(dllimport)
 #endif
+#elif defined(GI_BUILD) && defined(__GNUC__)
+#define GI_API __attribute__((visibility("default"))) /* the only symbols exported with -fvisibility=hidden */
 #else
 #define GI_API
 #endif

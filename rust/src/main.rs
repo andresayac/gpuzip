@@ -2,6 +2,7 @@
 //! entries go to nvCOMP in batches; gzip streams to gpuinflate, which decodes one stream in
 //! parallel. RAR, 7z and other tar.* archives go to 7-Zip.
 
+mod dylib;
 mod extract;
 mod gpu;
 mod gz;
@@ -124,7 +125,7 @@ pub struct Opts {
     /// Password for encrypted entries (passed to 7-Zip)
     #[arg(long)]
     pub password: Option<String>,
-    /// Path to 7z.exe, if not in the usual place
+    /// Path to 7-Zip (7z.exe, 7z or 7zz), if not in the usual place
     #[arg(long, value_name = "PATH")]
     pub sevenzip: Option<PathBuf>,
     /// Print one JSON report per archive
@@ -760,7 +761,11 @@ fn doctor(opts: &Opts) -> i32 {
     }
     match rescue::get() {
         Ok(r) => println!("rescue: gzrescue loaded from {}", r.path),
-        Err(e) => println!("rescue: not available ({e}); `gpuzip rescue` needs gzrescue.dll next to gpuzip.exe"),
+        Err(e) => println!(
+            "rescue: not available ({e}); `gpuzip rescue` needs {} next to {}",
+            dylib::file_name("gzrescue"),
+            dylib::exe_name()
+        ),
     }
     match inflate::get() {
         Ok(g) => {
@@ -782,7 +787,9 @@ fn doctor(opts: &Opts) -> i32 {
         Err(e) => {
             println!("gzip:   decoded on the CPU ({e})");
             let places: Vec<String> = inflate::candidates().iter().map(|p| p.display().to_string()).collect();
-            println!("        gpuinflate was looked for in: {}", places.join(", "));
+            if !places.is_empty() {
+                println!("        gpuinflate was looked for in: {}", places.join(", "));
+            }
         }
     }
     let api = match extract::gpu_api() {
@@ -790,7 +797,9 @@ fn doctor(opts: &Opts) -> i32 {
         Err(e) => {
             println!("GPU:    not usable ({e}); ZIP files are extracted on the CPU");
             let places: Vec<String> = gpu::nvcomp_candidates().iter().map(|p| p.display().to_string()).collect();
-            println!("        nvCOMP was looked for in: {}", places.join(", "));
+            if !places.is_empty() {
+                println!("        nvCOMP was looked for in: {}", places.join(", "));
+            }
             return 1;
         }
     };

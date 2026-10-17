@@ -1,9 +1,11 @@
-//! One large Deflate stream decoded in parallel on the GPU by gpuinflate.dll (built from
-//! ../gpuinflate), loaded at run time like nvCOMP so the program also runs without it.
+//! One large Deflate stream decoded in parallel on the GPU by gpuinflate (gpuinflate.dll,
+//! libgpuinflate.so; built from ../gpuinflate), loaded at run time like nvCOMP so the program
+//! also runs without it.
 //!
 //! The library decodes the stream in segments and hands the output over in order, from a
 //! thread of its own, while it decodes the next segment.
 
+use crate::dylib;
 use libloading::Library;
 use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
@@ -65,27 +67,19 @@ pub struct Gpu {
 unsafe impl Send for Gpu {}
 unsafe impl Sync for Gpu {}
 
-/// Places gpuinflate.dll is looked for, in order.
-pub fn candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(dir) = std::env::var_os("GPUZIP_INFLATE_DIR") {
-        out.push(PathBuf::from(dir).join("gpuinflate.dll"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.push(dir.join("gpuinflate.dll"));
-        }
-    }
-    out.push(PathBuf::from("gpuinflate.dll")); // the system search path (PATH)
-    out
+/// gpuinflate's file name here: none where there is no CUDA
+fn names() -> Vec<String> {
+    if dylib::CUDA { vec![dylib::file_name("gpuinflate")] } else { Vec::new() }
 }
 
-/// Whether gpuinflate.dll is there to load, without loading it
+/// Places gpuinflate is looked for, in order.
+pub fn candidates() -> Vec<PathBuf> {
+    dylib::candidates("GPUZIP_INFLATE_DIR", &names())
+}
+
+/// Whether gpuinflate is there to load, without loading it
 pub fn available() -> bool {
-    let on_path = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join("gpuinflate.dll").is_file()))
-        .unwrap_or(false);
-    on_path || candidates().iter().any(|p| p.is_file())
+    dylib::present("GPUZIP_INFLATE_DIR", &names())
 }
 
 /// The library and its GPU buffers, set up once per process on first use.
@@ -115,13 +109,16 @@ unsafe extern "C" fn trampoline(user: *mut c_void, data: *const u8, len: usize) 
 impl Gpu {
     fn load() -> Result<Gpu, String> {
         unsafe {
-            let (lib, path) = candidates()
-                .into_iter()
-                .find_map(|p| Library::new(&p).ok().map(|l| (l, p.display().to_string())))
-                .ok_or("gpuinflate.dll not found: put it next to gpuzip.exe or set GPUZIP_INFLATE_DIR")?;
+            if !dylib::CUDA {
+                return Err("no CUDA on this system".into());
+            }
+            let name = dylib::file_name("gpuinflate");
+            let (lib, path) = dylib::load_first(candidates()).ok_or_else(|| {
+                format!("{name} not found: put it next to {} or set GPUZIP_INFLATE_DIR", dylib::exe_name())
+            })?;
             let abi: unsafe extern "C" fn() -> u32 = sym(&lib, b"gi_abi_version\0")?;
             if abi() != ABI_VERSION {
-                return Err(format!("gpuinflate.dll speaks version {} of the interface, this gpuzip {ABI_VERSION}", abi()));
+                return Err(format!("{name} speaks version {} of the interface, this gpuzip {ABI_VERSION}", abi()));
             }
             let create: unsafe extern "C" fn(*const Config, *mut *mut c_void, *mut c_char, usize) -> i32 =
                 sym(&lib, b"gi_create\0")?;

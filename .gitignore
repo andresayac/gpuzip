@@ -20,9 +20,13 @@ build/
 /research/**/target/
 /research/gpu-zstd/zstd.lib
 /research/gpu-zstd/zstd_dir.txt
+/research/recovery/gzrescue
 
-# gpuinflate builds (build.cmd)
+# gpuinflate builds (build.cmd, build.sh)
 /gpuinflate/*.dll
+/gpuinflate/*.so
+/gpuinflate/*.dylib
+/gpuinflate/gi_test
 /gpuinflate/*.exe
 /gpuinflate/*.exp
 /gpuinflate/*.lib

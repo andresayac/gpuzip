@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -54,9 +55,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "cannot open %s\n", argv[1]);
         return 1;
     }
-    fseek(f, 0, SEEK_END);
-    uint64_t size = (uint64_t)_ftelli64(f);
-    fseek(f, 0, SEEK_SET);
+    uint64_t size = (uint64_t)std::filesystem::file_size(argv[1]);  // ftell is 32-bit on Windows
     std::vector<uint8_t> in(size);
     if (size && fread(in.data(), 1, size, f) != size) return 1;
     fclose(f);

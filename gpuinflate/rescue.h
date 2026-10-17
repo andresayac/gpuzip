@@ -27,6 +27,8 @@ extern "C" {
 #else
 #define GR_API __declspec(dllimport)
 #endif
+#elif defined(GR_BUILD) && defined(__GNUC__)
+#define GR_API __attribute__((visibility("default"))) /* the only symbols exported with -fvisibility=hidden */
 #else
 #define GR_API
 #endif

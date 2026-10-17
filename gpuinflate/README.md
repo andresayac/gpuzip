@@ -1,6 +1,6 @@
 # gpuinflate: one Deflate stream, decompressed in parallel on the GPU
 
-A library (`gpuinflate.dll`, C interface in `gpuinflate.h`) that decompresses a single raw
+A library (`gpuinflate.dll`, `libgpuinflate.so`; C interface in `gpuinflate.h`) that decompresses a single raw
 Deflate stream (a gzip member, a large ZIP entry) on an NVIDIA GPU, with no index and no change
 to the format. gpuzip uses it for `.gz`, `.tar.gz` and large ZIP entries. It grew out of the
 prototype in `../research/gpu-inflate`, whose README explains the algorithm and its results.
@@ -63,15 +63,19 @@ CRC checked and the CUDA context made (about 80 ms per process), a 6.4 GB `.gz` 
 
 ## Building
 
-Needs the CUDA toolkit (13.x) and the Visual Studio Build Tools.
+Needs the CUDA toolkit (13.x) and the Visual Studio Build Tools on Windows (`build.cmd`), or
+g++ on Linux (`build.sh`, the same arguments). macOS has no CUDA: there `build.sh` builds only
+gzrescue.
 
 ```
 build.cmd             this machine's GPU only
 build.cmd release     Turing (RTX 20) and newer, plus PTX for GPUs newer than this toolkit
+build.cmd rescue      gzrescue only (CPU; no CUDA toolkit needed)
 ```
 
-The CUDA runtime is linked statically, so the DLL needs only the NVIDIA driver. Put
-`gpuinflate.dll` next to `gpuzip.exe` (or point `GPUZIP_INFLATE_DIR` at its folder).
+The CUDA runtime is linked statically, so the library needs only the NVIDIA driver. Put
+`gpuinflate.dll` (`libgpuinflate.so`) next to gpuzip (or point `GPUZIP_INFLATE_DIR` at its
+folder).
 
 ```
 python make_fuzz_inputs.py %TEMP%\gpuzip-bench\inflate\text.bin %TEMP%\gpuzip-bench\fuzz
