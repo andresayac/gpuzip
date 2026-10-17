@@ -4,6 +4,7 @@
 faster still on an NVIDIA GPU.**
 
 [![CI](https://github.com/andresayac/gpuzip/actions/workflows/ci.yml/badge.svg)](https://github.com/andresayac/gpuzip/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/andresayac/gpuzip?color=2a78d6)](https://github.com/andresayac/gpuzip/releases)
 ![Windows · Linux · macOS](https://img.shields.io/badge/runs_on-Windows_·_Linux_·_macOS-2a78d6)
 ![NVIDIA GPU optional](https://img.shields.io/badge/NVIDIA_GPU-optional-0ca30c)
 ![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT_or_Apache--2.0-52514e)
