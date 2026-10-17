@@ -36,7 +36,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor, wait
 from multiprocessing import shared_memory
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 MiB = 1 << 20
 ALIGN = 16  # nvCOMP wants 4-byte aligned buffers; 16 keeps every copy friendly
 MAX_BATCH_ENTRIES = 65536

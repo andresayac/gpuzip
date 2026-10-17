@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 (2026-10-17)
 
 ### Fixed
 - gpuinflate ran past its input buffer on large streams that compress less than about 2.4:1
