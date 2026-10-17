@@ -11,6 +11,7 @@ mod officefix;
 mod rescue;
 mod sevenzip;
 mod sheetfix;
+mod ui;
 mod zip;
 mod ziprescue;
 
@@ -19,16 +20,17 @@ use extract::{Count, Outcome};
 use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use ui::{BAD, BOLD, DIM, GOOD, INFO, WARN, paint, say};
 use zip::{Entry, Route};
 
 const EPILOG: &str = r"examples:
-  gpuzip x photos.zip               extract into .\photos
-  gpuzip x *.zip -o D:\out          extract each archive into D:\out\<name>
+  gpuzip x photos.zip               extract into ./photos
+  gpuzip x *.zip -o out             extract each archive into out/<name>
   gpuzip x logs.tar.gz              .gz and .tar.gz/.tgz are decoded on the GPU too
   gpuzip x backup.rar               RAR, 7z and other tar.* go to 7-Zip
   gpuzip t backup.zip               check every file's CRC, write nothing
   gpuzip l backup.zip               list entries and where each is decoded
-  gpuzip rescue broken.tar.gz       recover what a damaged .gz or .tar.gz still holds
+  gpuzip rescue broken.tar.gz       recover what a damaged .gz, .tar.gz, .zip or Office file still holds
   gpuzip doctor                     check the GPU, nvCOMP and 7-Zip
 
 exit codes: 0 ok · 1 missing file or setup problem · 2 some entries failed";
@@ -53,7 +55,7 @@ enum Command {
         /// Archive files; wildcards like *.zip work
         #[arg(required = true, value_name = "ARCHIVE")]
         archives: Vec<String>,
-        /// Output folder (default: the archive's name, in the current folder); with several archives, each goes into DIR\<name>
+        /// Output folder (default: the archive's name, in the current folder); with several archives, each goes into DIR/<name>
         #[arg(short, long, value_name = "DIR")]
         output: Option<PathBuf>,
         #[command(flatten)]
@@ -75,7 +77,7 @@ enum Command {
         #[command(flatten)]
         opts: Opts,
     },
-    /// Recover what a damaged .gz or .tar.gz still holds
+    /// Recover what a damaged .gz, .tar.gz, .zip or Office document still holds
     Rescue {
         #[arg(required = true, value_name = "FILE")]
         archives: Vec<String>,
@@ -208,7 +210,7 @@ fn report(cmd: char, archive: &str, fmt: &str, o: &Outcome, opts: &Opts) {
             "gpu": gpu, "retried": o.retried, "failed": failed, "notes": o.notes, "info": o.info,
             "implementation": "rust",
         });
-        println!("{}", ascii_json(&v));
+        say!("{}", ascii_json(&v));
         return;
     }
     if opts.quiet && o.failed.is_empty() {
@@ -227,30 +229,37 @@ fn report(cmd: char, archive: &str, fmt: &str, o: &Outcome, opts: &Opts) {
         } else {
             Path::new(archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
         };
-        println!(
-            "{verb} {what} in {:.2} s · {} decompressed at {rate:.2} GB/s {on} · {} failed",
-            o.seconds,
+        say!(
+            "{} {what} in {} · {} decompressed at {} {on} · {}",
+            paint(BOLD, verb),
+            paint(BOLD, format!("{:.2} s", o.seconds)),
             human(unpacked),
-            o.failed.len()
+            paint(INFO, format!("{rate:.2} GB/s")),
+            ui::failed(o.failed.len())
         );
     } else if fmt != "zip" {
         let name = Path::new(archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        println!("{verb} {name} with 7-Zip on the CPU in {:.2} s · {} failed", o.seconds, o.failed.len());
+        say!("{} {name} with 7-Zip on the CPU in {:.2} s · {}", paint(BOLD, verb), o.seconds, ui::failed(o.failed.len()));
     } else {
-        println!(
-            "{verb} {} files ({}) in {:.2} s · {gbps:.2} GB/s · {} on GPU, {} on CPU, {} with 7-Zip · {} failed",
+        let routes: Vec<String> = [(0, "on the GPU"), (1, "on the CPU"), (2, "with 7-Zip")]
+            .iter()
+            .filter(|(i, _)| o.counts[*i].files > 0)
+            .map(|(i, how)| format!("{} {how}", commas(o.counts[*i].files)))
+            .collect();
+        say!(
+            "{} {} files ({}) in {} · {} · {} · {}",
+            paint(BOLD, verb),
             commas(files),
             human(bytes),
-            o.seconds,
-            commas(o.counts[0].files),
-            commas(o.counts[1].files),
-            commas(o.counts[2].files),
-            o.failed.len()
+            paint(BOLD, format!("{:.2} s", o.seconds)),
+            paint(INFO, format!("{gbps:.2} GB/s")),
+            if routes.is_empty() { "nothing to decode".to_string() } else { routes.join(", ") },
+            ui::failed(o.failed.len())
         );
     }
     if opts.verbose {
         if let Some(g) = o.gpu.as_ref().filter(|g| g.device.is_some()) {
-            println!(
+            say!(
                 "  GPU: {} · {} batches · busy {:.2} s · ready after {:.2} s",
                 g.device.as_deref().unwrap_or(""),
                 g.batches,
@@ -261,20 +270,20 @@ fn report(cmd: char, archive: &str, fmt: &str, o: &Outcome, opts: &Opts) {
     }
     let info: &[String] = if opts.verbose { &o.info } else { &[] };
     for n in o.notes.iter().chain(info) {
-        println!("  Note: {n}");
+        say!("  {}", paint(DIM, format!("Note: {n}")));
     }
     for (name, reason) in o.failed.iter().take(20) {
-        println!("  Failed: {name}: {reason}");
+        say!("  {} {name}: {reason}", paint(BAD, "Failed:"));
     }
     if o.failed.len() > 20 {
-        println!("  ... and {} more failed", o.failed.len() - 20);
+        say!("  ... and {} more failed", o.failed.len() - 20);
     }
 }
 
 fn list_entries(entries: &[Entry], opts: &Opts) {
     let gpu_max = if opts.mode == Mode::Auto { opts.gpu_max_entry_kb * 1024 } else { u64::MAX };
     let mut counts: Vec<(&str, u64)> = Vec::new();
-    println!("{:>9} {:>12} {:>12}  route  name", "method", "size", "packed");
+    say!("{:>9} {:>12} {:>12}  route  name", "method", "size", "packed");
     for e in entries {
         let route = match e.route {
             Route::Deflate if opts.mode == Mode::Cpu || e.size > gpu_max => "cpu",
@@ -289,11 +298,11 @@ fn list_entries(entries: &[Entry], opts: &Opts) {
             Some((_, n)) => *n += 1,
             None => counts.push((route, 1)),
         }
-        println!("{:>9} {:>12} {:>12}  {route:<5}  {}", zip::method_name(e.method), commas(e.size), commas(e.csize), e.name);
+        say!("{:>9} {:>12} {:>12}  {route:<5}  {}", zip::method_name(e.method), commas(e.size), commas(e.csize), e.name);
     }
     counts.sort_by(|a, b| b.1.cmp(&a.1));
     let parts: Vec<String> = counts.iter().map(|(r, n)| format!("{} {r}", commas(*n))).collect();
-    println!("  {}", parts.join(" · "));
+    say!("  {}", parts.join(" · "));
 }
 
 fn archive_stem(path: &str) -> String {
@@ -353,9 +362,9 @@ fn process(cmd: char, path: &str, out_root: Option<PathBuf>, opts: &Opts) -> i32
     if gz::is_gzip(data) {
         let fmt = if gz::is_tar_name(&archive) { "tar.gz" } else { "gz" };
         if cmd == 'l' && fmt == "gz" {
-            println!("{:>14} {:>14}  name", "packed", "size (trailer)");
+            say!("{:>14} {:>14}  name", "packed", "size (trailer)");
             let isize = u32::from_le_bytes(data[data.len().max(4) - 4..].try_into().unwrap_or([0; 4]));
-            println!("{:>14} {:>14}  {}", commas(data.len() as u64), commas(isize as u64), gz::output_name(&archive));
+            say!("{:>14} {:>14}  {}", commas(data.len() as u64), commas(isize as u64), gz::output_name(&archive));
             return 0;
         }
         let outcome = gz::run(cmd, &archive, data, out_root, opts);
@@ -419,7 +428,7 @@ fn run_all(cmd: char, patterns: &[String], output: Option<PathBuf>, opts: &Opts)
             std::path::absolute(&dir).unwrap_or(dir)
         });
         if archives.len() > 1 && !(opts.quiet || opts.json) {
-            println!("{path}:");
+            say!("{path}:");
         }
         rc = rc.max(process(cmd, path, out_root, opts));
     }
@@ -460,9 +469,6 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
     });
     let unconverted = if zip_in_place { None } else { rescue::undo_lf_to_crlf(mapped) };
     let data: &[u8] = unconverted.as_deref().unwrap_or(mapped);
-    if unconverted.is_some() && !(opts.quiet || opts.json) {
-        println!("  Note: the file went through an ASCII-mode transfer (every LF became CR LF); undone before the rescue");
-    }
     rescue::set_ascii_note(unconverted.is_some());
     // the reverse transfer removed CRs: a ZIP's entries are too short to tell on their own
     rescue::set_cr_lost(unconverted.is_none() && rescue::looks_cr_stripped(data));
@@ -561,83 +567,112 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
             "failed": failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
             "implementation": "rust",
         });
-        println!("{}", ascii_json(&v));
+        say!("{}", ascii_json(&v));
         return if failed.is_empty() && clean { 0 } else { 2 };
     }
     if opts.quiet && clean && failed.is_empty() {
         return 0;
     }
     let name = Path::new(&archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let into = target.clone().unwrap_or_else(|| out_root.clone());
+    say!("{} {name} in {:.2} s into {}", paint(BOLD, "Rescued"), secs, ui::shown_path(&into));
+    let share = |x: u64| x as f64 / total;
+    say!(
+        "  {}  {}",
+        ui::bar(&[(share(s.exact_bytes), GOOD, '█'), (share(s.inferred_bytes), INFO, '▓'), (share(s.suspect_bytes), WARN, '▒'), (share(s.unknown_bytes), BAD, '░')], 40),
+        if clean && rescue::ascii_undone() {
+            paint(GOOD, "every byte recovered, the CRC checks")
+        } else if clean {
+            paint(GOOD, "intact: every byte checked")
+        } else if s.crc_check == 0 {
+            paint(WARN, format!("{:.1}% decoded, but the CRC does not match: some of it is wrong", pct(s.exact_bytes)))
+        } else {
+            format!("{} of the data exact", paint(BOLD, format!("{:.1}%", pct(s.exact_bytes))))
+        }
+    );
     if let Some(t) = &tar_out {
-        println!(
-            "Rescued {name} in {secs:.2} s: {} files intact, {} with inferred bytes, {} possibly damaged, {} partial, {} region{} unreadable ({}) · data {:.2}% exact, {:.2}% unknown",
-            commas(t.intact),
-            commas(t.inferred.len() as u64),
-            commas(t.suspect.len() as u64),
-            commas(t.partial.len() as u64),
-            t.skipped.len(),
-            if t.skipped.len() == 1 { "" } else { "s" },
-            human(t.skipped.iter().map(|(_, n)| n).sum()),
-            pct(s.exact_bytes),
-            pct(s.unknown_bytes)
-        );
-        if t.unverified > 0 {
-            println!(
-                "  {} files extracted but unverifiable: the archive's checksum fails and the damage could not be located (it lies in raw stored data, such as an already compressed or random file, or is a flipped bit that kept the decoder in step); any of them may be the damaged one",
-                commas(t.unverified)
-            );
-        }
-        for n in t.partial.iter().take(20) {
-            println!("  Partial: {n}");
-        }
-        if t.partial.len() > 20 {
-            println!("  ... and {} more partial", t.partial.len() - 20);
-        }
-        for n in t.suspect.iter().take(20) {
-            println!("  Possibly damaged: {n}");
-        }
-        if t.suspect.len() > 20 {
-            println!("  ... and {} more possibly damaged", t.suspect.len() - 20);
-        }
-        for n in t.inferred.iter().take(20) {
-            println!("  Inferred bytes (likely right, not certain): {n}");
-        }
-        if t.inferred.len() > 20 {
-            println!("  ... and {} more with inferred bytes", t.inferred.len() - 20);
+        let rows: Vec<(u64, ui::Style, &str, String)> = vec![
+            (t.intact, GOOD, "files intact", String::new()),
+            (t.unverified, WARN, "unverifiable", "the checksum fails and the damage could not be located: any of them may be the damaged one".into()),
+            (t.inferred.len() as u64, INFO, "with inferred bytes", "likely right, not certain".into()),
+            (t.suspect.len() as u64, WARN, "possibly damaged", "inside a damaged block or after a repaired header".into()),
+            (t.partial.len() as u64, BAD, "partial", format!("unknown bytes written as {fill:#04x}")),
+            (t.skipped.len() as u64, BAD, "regions unreadable", format!("{} skipped, the files there lost", human(t.skipped.iter().map(|(_, n)| n).sum()))),
+        ];
+        rescue_rows(&rows);
+        let limit = if opts.verbose { usize::MAX } else { 3 };
+        for (label, style, list) in [("partial", BAD, &t.partial), ("possibly damaged", WARN, &t.suspect), ("inferred bytes", INFO, &t.inferred)] {
+            for n in list.iter().take(limit) {
+                say!("    {} {n}", paint(style, format!("{label}:")));
+            }
+            if list.len() > limit {
+                say!("    {}", paint(DIM, format!("... and {} more {label} (-v lists them)", commas((list.len() - limit) as u64))));
+            }
         }
         if t.repaired > 0 {
-            println!("  Note: {} tar headers had unknown bytes and were made whole from the header before them (checksums confirm)", t.repaired);
+            let note = if t.repaired == 1 {
+                "1 tar header had unknown bytes and was made whole from the one before it (its checksum confirms)".to_string()
+            } else {
+                format!("{} tar headers had unknown bytes and were made whole from the ones before them (their checksums confirm)", t.repaired)
+            };
+            say!("  {}", paint(DIM, format!("Note: {note}")));
         }
-    } else if let Some(t) = &target {
-        println!(
-            "Rescued {} in {secs:.2} s: {} written, {:.2}% exact, {:.2}% inferred, {:.2}% unknown, {:.2}% in {} damaged block{}{}",
-            t.display(),
+    } else {
+        say!(
+            "  {} written: {:.2}% exact, {:.2}% inferred, {:.2}% unknown, {:.2}% in {} damaged block{}",
             human(s.output_size),
             pct(s.exact_bytes),
             pct(s.inferred_bytes),
             pct(s.unknown_bytes),
             pct(s.suspect_bytes),
             s.damaged,
-            if s.damaged == 1 { "" } else { "s" },
-            if clean { " · intact" } else { "" }
+            if s.damaged == 1 { "" } else { "s" }
         );
     }
-    for p in damaged.iter().take(20) {
-        println!("  Damaged block at input byte {} (output offset {}): {}", commas(p.in_byte_start), commas(p.out_offset), p.why);
+    if opts.verbose {
+        for p in &damaged {
+            say!("  {} at input byte {} (output offset {}): {}", paint(WARN, "Damaged block"), commas(p.in_byte_start), commas(p.out_offset), p.why);
+        }
     }
-    if damaged.len() > 20 {
-        println!("  ... and {} more damaged blocks", damaged.len() - 20);
+    if rescue::ascii_undone() {
+        say!("  {}", paint(INFO, "The file had gone through an ASCII-mode transfer (every LF made CR LF): undone"));
     }
     if s.crc_check == 0 {
-        println!("  Note: the CRC does not match: an error the decoder could not place remains somewhere");
+        say!("  {}", paint(WARN, "The CRC does not match: an error the decoder could not place remains somewhere"));
+    } else if s.crc_check < 0 && s.damaged > 0 {
+        say!("  {}", paint(DIM, "With damaged blocks the checksum cannot be checked: \"exact\" and \"intact\" mean every byte decoded cleanly"));
+    } else if s.crc_check < 0 && s.truncated != 0 {
+        say!("  {}", paint(WARN, "The file ends inside the compressed data, so the checksum cannot be checked: \"exact\" means every byte decoded cleanly, not that it is right"));
     }
-    for n in &report.notes {
-        println!("  Note: {n}");
+    if opts.verbose {
+        for n in &report.notes {
+            say!("  {}", paint(DIM, format!("Note: {n}")));
+        }
     }
     for (n, reason) in failed.iter().take(20) {
-        println!("  Failed: {n}: {reason}");
+        say!("  {} {n}: {reason}", paint(BAD, "Failed:"));
+    }
+    if !clean && !opts.verbose {
+        say!("  {}", paint(DIM, format!("-v adds every file, damaged block and note ({}); --json gives the whole report", report.notes.len())));
     }
     if failed.is_empty() && clean { 0 } else { 2 }
+}
+
+/// A rescue's counts, one per line, the number right-aligned; empty ones left out but the first
+fn rescue_rows(rows: &[(u64, ui::Style, &str, String)]) {
+    let width = rows.iter().map(|r| commas(r.0).len()).max().unwrap_or(1);
+    let label_width = rows.iter().filter(|r| r.0 > 0).map(|r| r.2.len()).max().unwrap_or(0);
+    for (i, (n, style, label, detail)) in rows.iter().enumerate() {
+        if *n == 0 && i > 0 {
+            continue;
+        }
+        let shown = if *n == 0 { paint(DIM, format!("{:>width$}", 0)) } else { paint(*style, format!("{:>width$}", commas(*n))) };
+        if detail.is_empty() {
+            say!("  {shown} {label}");
+        } else {
+            say!("  {shown} {label:<label_width$}  {}", paint(DIM, detail));
+        }
+    }
 }
 
 /// `gpuzip rescue` on a ZIP or an Office document
@@ -680,53 +715,84 @@ fn rescue_zip_file(archive: &str, data: &[u8], lib: &rescue::Rescue, out_root: P
             "notes": o.notes, "ascii_transfer_undone": rescue::ascii_undone(), "crs_restored": o.crs_restored, "failed": o.failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
             "seconds": (secs * 1e4).round() / 1e4, "implementation": "rust",
         });
-        println!("{}", ascii_json(&v));
+        say!("{}", ascii_json(&v));
         return if clean { 0 } else { 2 };
     }
     if opts.quiet && clean {
         return 0;
     }
-    println!(
-        "Rescued {name} in {secs:.2} s: {} files intact, {} partial, {} unverified, {} lost, {} not readable here · directory {}",
-        commas(intact),
-        commas(partial),
-        commas(unverified),
-        commas(lost),
-        commas(unsupported),
-        if o.cd_ok {
-            format!("read{}", if from_scan > 0 { format!(", plus {from_scan} entries it did not list") } else { String::new() })
+    say!("{} {name} in {:.2} s into {}", paint(BOLD, "Rescued"), secs, ui::shown_path(&out_root));
+    let total = (o.entries.len() as f64).max(1.0);
+    say!(
+        "  {}  {}",
+        ui::bar(&[(intact as f64 / total, GOOD, '█'), (unverified as f64 / total, WARN, '▒'), (partial as f64 / total, BAD, '░')], 40),
+        if clean && (o.notes.is_empty() && o.crs_restored == 0 && !rescue::ascii_undone()) {
+            paint(GOOD, "intact: every entry's CRC checked")
+        } else if clean {
+            paint(GOOD, "every entry recovered, each CRC checks")
         } else {
-            format!("lost: {} entries found by scanning", o.scanned_headers)
+            format!("{} of {} entries intact", paint(BOLD, commas(intact)), commas(o.entries.len() as u64))
         }
     );
-    for (label, status) in [("Partial", Status::Partial), ("Unverified", Status::Unverified), ("Lost", Status::Lost), ("Not readable here", Status::Unsupported)] {
+    let rows: Vec<(u64, ui::Style, &str, String)> = vec![
+        (intact, GOOD, "intact", String::new()),
+        (unverified, WARN, "unverified", "no CRC to check them against".into()),
+        (partial, BAD, "partial", format!("unknown bytes written as {fill:#04x}")),
+        (lost, BAD, "lost", String::new()),
+        (unsupported, WARN, "not readable here", "a method gpuzip rescue does not decode".into()),
+    ];
+    rescue_rows(&rows);
+    say!(
+        "  {}",
+        paint(
+            DIM,
+            if o.cd_ok {
+                format!("directory read{}", if from_scan > 0 { format!(", plus {from_scan} entries it did not list") } else { String::new() })
+            } else {
+                format!("directory lost: {} entries found by scanning the file", commas(o.scanned_headers as u64))
+            }
+        )
+    );
+    let limit = if opts.verbose { usize::MAX } else { 3 };
+    for (label, style, status) in [("partial", BAD, Status::Partial), ("unverified", WARN, Status::Unverified), ("lost", BAD, Status::Lost), ("not readable here", WARN, Status::Unsupported)] {
         let list: Vec<&ziprescue::Recovered> = o.entries.iter().filter(|e| e.status == status).collect();
-        for e in list.iter().take(10) {
-            println!("  {label}: {}{}", e.name, if e.detail.is_empty() { String::new() } else { format!(" ({})", e.detail) });
+        for e in list.iter().take(limit) {
+            say!("    {} {}{}", paint(style, format!("{label}:")), e.name, if e.detail.is_empty() { String::new() } else { format!(" ({})", e.detail) });
         }
-        if list.len() > 10 {
-            println!("  ... and {} more {}", list.len() - 10, label.to_lowercase());
+        if list.len() > limit {
+            say!("    {}", paint(DIM, format!("... and {} more {label} (-v lists them)", commas((list.len() - limit) as u64))));
         }
     }
     if let Some(f) = &o.office {
-        if !f.repaired_parts.is_empty() {
-            println!("  Office: {} damaged XML part{} made well-formed again: {}", f.repaired_parts.len(), if f.repaired_parts.len() == 1 { "" } else { "s" }, f.repaired_parts.join(", "));
+        if let Some(r) = &f.rebuilt {
+            say!("  {} {}", paint(GOOD, "Rebuilt document:"), ui::shown_path(r));
         }
         if let Some(t) = &f.text_file {
-            println!("  Office: text recovered to {} ({} characters)", t.display(), commas(f.text_chars as u64));
+            say!("  {} {} ({} characters)", paint(INFO, "Text recovered:"), ui::shown_path(t), commas(f.text_chars as u64));
         }
-        if let Some(r) = &f.rebuilt {
-            println!("  Office: document rebuilt from the recovered parts: {}", r.display());
+        if !f.repaired_parts.is_empty() {
+            say!("  {}", paint(DIM, format!("{} damaged XML part{} made well-formed again: {}", f.repaired_parts.len(), if f.repaired_parts.len() == 1 { "" } else { "s" }, f.repaired_parts.join(", "))));
         }
         for fx in &f.package_fixes {
-            println!("  Office: {fx}");
+            say!("  {}", paint(DIM, fx));
         }
     }
-    for n in &o.notes {
-        println!("  Note: {n}");
+    if rescue::ascii_undone() {
+        say!("  {}", paint(INFO, "The file had gone through an ASCII-mode transfer (every LF made CR LF): undone"));
+    }
+    if o.crs_restored > 0 {
+        say!("  {}", paint(INFO, format!("{} CRs lost to an ASCII-mode transfer put back, each entry's CRC confirming them", commas(o.crs_restored as u64))));
+    }
+    if opts.verbose {
+        for n in &o.notes {
+            say!("  {}", paint(DIM, format!("Note: {n}")));
+        }
     }
     for (n, reason) in o.failed.iter().take(20) {
-        println!("  Failed: {n}: {reason}");
+        say!("  {} {n}: {reason}", paint(BAD, "Failed:"));
+    }
+    if !opts.verbose && !o.notes.is_empty() {
+        say!("  {}", paint(DIM, format!("-v adds every entry and note ({}); --json gives the whole report", o.notes.len())));
     }
     if clean { 0 } else { 2 }
 }
@@ -746,7 +812,7 @@ fn run_rescue(patterns: &[String], output: Option<PathBuf>, fill: u8, opts: &Opt
         };
         let dir = std::path::absolute(&dir).unwrap_or(dir);
         if archives.len() > 1 && !(opts.quiet || opts.json) {
-            println!("{path}:");
+            say!("{path}:");
         }
         rc = rc.max(rescue_one(path, dir, fill, opts));
     }
@@ -754,14 +820,14 @@ fn run_rescue(patterns: &[String], output: Option<PathBuf>, fill: u8, opts: &Opt
 }
 
 fn doctor(opts: &Opts) -> i32 {
-    println!("gpuzip {} (Rust) · {} CPU threads · libdeflate", env!("CARGO_PKG_VERSION"), cpu_threads());
+    say!("gpuzip {} (Rust) · {} CPU threads · libdeflate", env!("CARGO_PKG_VERSION"), cpu_threads());
     match sevenzip::find(opts.sevenzip.as_deref()) {
-        Some(exe) => println!("7-Zip:  {} at {}", sevenzip::version(&exe), exe.display()),
-        None => println!("7-Zip:  not found; needed for RAR, 7z, tar.* and encrypted entries (https://www.7-zip.org)"),
+        Some(exe) => say!("7-Zip:  {} at {}", sevenzip::version(&exe), exe.display()),
+        None => say!("7-Zip:  not found; needed for RAR, 7z, tar.* and encrypted entries (https://www.7-zip.org)"),
     }
     match rescue::get() {
-        Ok(r) => println!("rescue: gzrescue loaded from {}", r.path),
-        Err(e) => println!(
+        Ok(r) => say!("rescue: gzrescue loaded from {}", r.path),
+        Err(e) => say!(
             "rescue: not available ({e}); `gpuzip rescue` needs {} next to {}",
             dylib::file_name("gzrescue"),
             dylib::exe_name()
@@ -781,24 +847,24 @@ fn doctor(opts: &Opts) -> i32 {
                 })
                 .is_ok()
                 && out == data;
-            println!("gzip:   {} · gpuinflate test decode {}", g.device, if good { "ok" } else { "WRONG OUTPUT" });
-            println!("        gpuinflate loaded from {}", g.path);
+            say!("gzip:   {} · gpuinflate test decode {}", g.device, if good { "ok" } else { "WRONG OUTPUT" });
+            say!("        gpuinflate loaded from {}", g.path);
         }
         Err(e) => {
-            println!("gzip:   decoded on the CPU ({e})");
+            say!("gzip:   decoded on the CPU ({e})");
             let places: Vec<String> = inflate::candidates().iter().map(|p| p.display().to_string()).collect();
             if !places.is_empty() {
-                println!("        gpuinflate was looked for in: {}", places.join(", "));
+                say!("        gpuinflate was looked for in: {}", places.join(", "));
             }
         }
     }
     let api = match extract::gpu_api() {
         Ok(a) => a,
         Err(e) => {
-            println!("GPU:    not usable ({e}); ZIP files are extracted on the CPU");
+            say!("GPU:    not usable ({e}); ZIP files are extracted on the CPU");
             let places: Vec<String> = gpu::nvcomp_candidates().iter().map(|p| p.display().to_string()).collect();
             if !places.is_empty() {
-                println!("        nvCOMP was looked for in: {}", places.join(", "));
+                say!("        nvCOMP was looked for in: {}", places.join(", "));
             }
             return 1;
         }
@@ -814,17 +880,17 @@ fn doctor(opts: &Opts) -> i32 {
     });
     match result {
         Ok(good) => {
-            println!(
+            say!(
                 "GPU:    {} · nvCOMP {} · test decode {}",
                 api.device,
                 api.nvcomp_version,
                 if good { "ok" } else { "WRONG OUTPUT" }
             );
-            println!("        nvCOMP loaded from {}", api.nvcomp_path);
+            say!("        nvCOMP loaded from {}", api.nvcomp_path);
             if good { 0 } else { 1 }
         }
         Err(e) => {
-            println!("GPU:    {} found, but the test decode failed: {e}", api.device);
+            say!("GPU:    {} found, but the test decode failed: {e}", api.device);
             1
         }
     }
