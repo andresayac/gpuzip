@@ -58,6 +58,19 @@ What this shows:
   | 4 | medium | 0.64 s | **0.55 s** | yes |
   | 4 | mixed | 0.35 s | 0.35 s | no (with it: 0.31-0.41 s) |
 
+- Large entries go to gpuinflate when it would finish them before a CPU thread, counting its
+  speed by how well each entry compresses and the CPU threads' turns. A 5.8 GB Android ROM ZIP
+  (54 entries; nine parts of about 750 MB, compressed only to 0.77-0.91 of their size, which
+  gpuinflate decodes at 1.1-1.7 GB/s) and the 8 large files, test, median of 5-7:
+
+  | Archive | CPU threads | `--mode cpu` | `auto` | gpuinflate in `auto` |
+  |---|---|---|---|---|
+  | ROM, 7.4 GB | 16 | 2.80 s | **2.48 s** | 2 entries |
+  | | 4 | 4.47 s | **3.31 s** | 3 entries |
+  | | 2 | 6.95 s | **4.29 s** | 4 entries |
+  | 8 large files | 16 | 0.29 s | 0.29 s | none |
+  | | 2 | 0.81 s | **0.49 s** | 4 entries |
+
 - `--mode gpu` gives every entry of 1 MB or more to gpuinflate, one at a time, and the rest to
   nvCOMP: 0.48 s for the 8 files of 128 MB (nvCOMP alone gives a large entry to one GPU thread:
   43 s in the Python version, which has no gpuinflate), but 2.36 s for 2,000 files of up to

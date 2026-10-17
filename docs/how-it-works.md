@@ -3,8 +3,9 @@
 Every entry in a ZIP file is compressed on its own, so nvCOMP decodes thousands of them at once
 on the GPU. It gives one large entry, though, to a single GPU thread, at about 30 MB/s. One
 large stream needs another approach: gpuinflate finds the block starts of a single Deflate
-stream, decodes from all of them at once and stitches the pieces, at 3-5 GB/s (how, in
-[research/gpu-inflate](../research/gpu-inflate)). So:
+stream, decodes from all of them at once and stitches the pieces, at 3-5 GB/s on text
+and 1-2 GB/s on data that hardly compresses (how, in [research/gpu-inflate](../research/gpu-inflate)).
+So:
 
 | Data | Where it is decoded |
 |---|---|
@@ -23,10 +24,17 @@ The GPU joins only if it and the CPU threads together would finish sooner than t
 alone, counting its start-up (about 0.15 s), its speed on small entries (about 2.5 GB/s on an
 RTX 5080) and the 0.05 s a loaded CUDA driver adds at exit. 16 Zen 5 threads decode the
 benchmark archives at 6-8 GB/s and are done in about 0.2 s, so the GPU stays off; with 2 or 4
-threads it is started and saves a third of the time. gpuinflate takes, one at a time, the largest entries that it would finish
-before a CPU thread could (it runs at about 4 GB/s on one stream after starting in about
-0.15 s, a CPU thread at about 1 GB/s): one 2 GB entry goes to it, eight entries of 128 MB stay
-with the 16 CPU threads. In `gpu` mode it takes every entry of 1 MB or more.
+threads it is started and saves a third of the time.
+
+gpuinflate takes, one at a time, the largest entries that it would finish before a CPU thread
+could. It starts in about 0.15 s and decodes one stream of text at about 3.5 GB/s, but streams
+that hardly compress (ROM images, data compressed before) only at about 1 GB/s, so its speed is
+taken from each entry's compression ratio. A CPU thread decodes a large entry at about 0.6 GB/s
+and takes one entry at a time, so with more large entries than threads the later ones wait
+their turn. One 2 GB entry goes to gpuinflate; eight entries of 128 MB stay with 16 CPU threads,
+but with 2 threads gpuinflate takes four of them. In `gpu` mode it takes every entry of 1 MB or
+more. If gpuinflate reports a GPU error, the CPU threads take that entry and every large entry
+after it at once, and gpuinflate is not used again in that run.
 
 gzip files are read member by member: header checks, the Deflate stream, then the trailer's
 CRC32 and size. A `.tar.gz` is extracted by the [tar](https://crates.io/crates/tar) crate while

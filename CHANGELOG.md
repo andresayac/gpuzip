@@ -6,6 +6,13 @@
 - `auto` starts nvCOMP only when the CPU threads, timed on the archive's first entries, would
   be slower alone than with the GPU, start-up included: on a strong CPU it is as fast as
   `--mode cpu`, on a weak one the GPU still takes the small entries.
+- Large ZIP entries go to gpuinflate by its speed on each entry's compression ratio (about
+  3.5 GB/s on text, 1 GB/s on streams that hardly compress) and by when a CPU thread would be
+  free for them: a ROM ZIP of nine 750 MB parts tests in 2.48 s instead of 2.93 s, and with
+  2 CPU threads in 4.29 s instead of 4.81 s.
+- After a GPU error from gpuinflate, the entry and every large entry after it go to the CPU
+  threads at once, and gpuinflate is not used again in that run. The note says what failed,
+  instead of counting it among the GPU results that failed the CRC check.
 
 ## 0.1.1 (2026-10-17)
 
