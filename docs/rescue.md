@@ -27,7 +27,11 @@ the block's true length comes from the trailer so the offsets after it stay righ
 went through an FTP transfer in ASCII mode (every LF made CR LF) is put back first, for every
 format, and in a ZIP whose transfer went the other way (every CR LF made LF) the lost CRs are put
 back entry by entry, where each entry's CRC confirms them; the zeros a crash or an unfinished download leaves at the end are not taken for data;
-and a block that decoded through zeros to the end of the file is caught by its symbol count. For
+and a block that decoded through zeros to the end of the file is caught by its symbol count.
+Zeros (or the 0xFF of erased flash) inside a damaged block mark where its damage begins: the
+block is split there, exact before them, flagged after; a stream whose CRC fails though every
+block decoded in step gets the block holding them flagged. That is what saves a small file, or
+repetitive data, that Deflate packed into one block, with no next header to land on. For
 a `.tar.gz` the files are then extracted from the recovered stream. Tar headers copy their
 repeated fields from the header before them, so after damage their unknown bytes are made whole
 from the previous header, with the checksum as the judge; where a header is beyond repair, the
