@@ -34,7 +34,7 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 ROOT = os.path.dirname(os.path.dirname(HERE))
-GPUZIP = os.path.join(ROOT, "rust", "target", "release", "gpuzip.exe")
+GPUZIP = os.environ.get("GPUZIP_BIN") or os.path.join(ROOT, "rust", "target", "release", "gpuzip.exe")  # as tests/test_gpuzip.py
 GZRESCUE = os.path.join(HERE, "gzrescue.exe")
 SEVENZIP = r"C:\Program Files\7-Zip\7z.exe"
 GZIP = r"C:\Program Files\Git\usr\bin\gzip.exe"

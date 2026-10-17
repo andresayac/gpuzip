@@ -31,7 +31,7 @@ extern "C" {
 #define GR_API
 #endif
 
-#define GR_ABI_VERSION 2
+#define GR_ABI_VERSION 3
 
 enum { GR_OK = 0, GR_ERR_NO_DEFLATE = 1, GR_ERR_ABORTED = 2, GR_ERR_ARG = 3, GR_ERR_MEMORY = 4 };
 /* GR_INFERRED: a byte that copied from data lost with a damaged block, its value inferred from
@@ -42,6 +42,10 @@ typedef struct {
     uint32_t size;    /* sizeof(gr_options) */
     uint8_t fill;     /* written where a byte is unknown */
     uint8_t no_infer; /* 1: leave the bytes copied from lost data unknown, do not infer them */
+    uint8_t cr_lost;  /* a Windows-to-Unix ASCII transfer removed the CR of every CR LF: 0 tell from the
+                       * data, 1 it did (a ZIP entry, too short to tell, of a file that did), 2 never */
+    uint8_t crs_expected; /* with cr_lost 1, a raw stream: how many CRs it lost, when the caller knows
+                           * (a ZIP entry's size against the room it has): 1-8; 255 none; 0 unknown */
 } gr_options;
 
 typedef struct {
@@ -65,6 +69,7 @@ typedef struct {
     uint64_t input_end; /* byte after the last decoded block of the first member (a ZIP's data descriptor follows it) */
     uint64_t inferred_bytes;
     int32_t ascii_undone; /* the input had gone through an ASCII-mode transfer (LF to CR LF), undone */
+    uint32_t cr_restored; /* CRs put back where a CR LF to LF transfer had removed them */
 } gr_stats;
 
 /* Receives the output in order. Return nonzero to stop. */

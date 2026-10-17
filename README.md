@@ -130,7 +130,8 @@ encoder's regular one. The damaged block is kept but flagged, decoding restarts 
 header, bytes that copied from a damaged block are marked unknown (written as `--fill`), and
 the block's true length comes from the trailer so the offsets after it stay right. A file that
 went through an FTP transfer in ASCII mode (every LF made CR LF) is put back first, for every
-format; the zeros a crash or an unfinished download leaves at the end are not taken for data;
+format, and in a ZIP whose transfer went the other way (every CR LF made LF) the lost CRs are put
+back entry by entry, where each entry's CRC confirms them; the zeros a crash or an unfinished download leaves at the end are not taken for data;
 and a block that decoded through zeros to the end of the file is caught by its symbol count. For
 a `.tar.gz` the files are then extracted from the recovered stream. Tar headers copy their
 repeated fields from the header before them, so after damage their unknown bytes are made whole
@@ -163,8 +164,12 @@ rebuilt from the recovered parts (`recovered.docx`, `.xlsx` or `.pptx`) that an 
 application can open: parts with nothing left are left out with every reference to them, a
 damaged worksheet keeps only its valid cells (a well-formed sheet can still hold a cell at
 "1A168" or a number "172.t>", which no spreadsheet opens), and a workbook whose main part was
-lost gets one listing the sheets found. What was inside the damaged stretch of the XML is gone;
-what came before and after it is kept, and the report lists every change.
+lost gets one listing the sheets found. Word refuses a story that is well formed but not
+WordprocessingML (a paragraph inside a run's text, text loose in the body), so a damaged one is
+rebuilt from the elements that keep to Word's structure, the text of the others kept as plain
+paragraphs; a presentation that lost its slide master, layout, theme or the presentation part
+itself gets them made, plainly. What was inside the damaged stretch of the XML is gone; what
+came before and after it is kept, and the report lists every change.
 
 **Inferred bytes.** After a damaged block the bytes that copied from it are unknown, but every
 copy of one lost byte holds the same value, and it is often copied to many places. gzrescue
@@ -186,14 +191,14 @@ crash during a copy, bit rot. Some of the 66 results, against what people reach 
 | the same, sent through FTP in ASCII mode | 0 files | **all 1,828** |
 | a 32 MB log.gz, three bad sectors | 6.9% of the log | **44.1%** (the rest marked unknown) |
 | ZIP of 3,440 files, resumed past a 512 KB gap | 1,729 entries | **3,326** |
-| the same, every CR LF turned into LF | 3 entries | **3,218** |
-| docx, xlsx, pptx, all eleven failures | 2 of 33 still open | **32 rebuilt that open** (the 33rd was erased whole) |
+| the same, every CR LF turned into LF | 3 entries | **3,429** (233 CRs put back) |
+| docx, xlsx, pptx, all eleven failures | 1 of 33 still opens | **32 rebuilt that open clean in Word, Excel, PowerPoint** (the 33rd lost its document whole) |
 
 Silent errors (bytes or files called exact that are not) appear only under bit rot, where a
 flipped bit that kept the decoder in step changed a letter while other damage made the checksum
 uncheckable, and in one file of the CR-stripped tar; the report says when the checksum could
-not be checked. "Open" means every XML part parses and openpyxl loads the workbook; Word, Excel
-and PowerPoint themselves were not run. The cases also taught gpuzip most of the handling
+not be checked. Every rebuilt document was opened in Word, Excel and PowerPoint (through COM,
+read only), and none needed their repair. The cases also taught gpuzip most of the handling
 described above.
 
 Exit code 2 says something was damaged or lost.
@@ -296,6 +301,7 @@ rust/           the Rust version
   src/rescue.rs     gzrescue.dll, loaded at run time; tar extraction that skips destroyed headers
   src/ziprescue.rs  damaged ZIPs: local-header scan, per-entry recovery; Office XML repair and rebuild
   src/sheetfix.rs   damaged spreadsheets: sheets rebuilt from their valid cells, a lost workbook remade
+  src/officefix.rs  damaged Word stories rebuilt, a presentation's lost master, layout and theme remade
   src/main.rs       the command line, reports and doctor
 python/         the Python version (gpuzip.py, pyproject.toml)
 tests/          correctness tests for both versions (ZIP, gzip, tar.gz, damaged files, zip slip)

@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 pub const UNKNOWN: u8 = 0;
 pub const EXACT: u8 = 1;
 pub const SUSPECT: u8 = 2;
@@ -22,6 +22,8 @@ struct Options {
     size: u32,
     fill: u8,
     no_infer: u8,
+    cr_lost: u8,
+    crs_expected: u8,
 }
 
 #[repr(C)]
@@ -64,6 +66,8 @@ pub struct Stats {
     /// bytes that copied from data lost with a damaged block, their values inferred
     pub inferred_bytes: u64,
     pub ascii_undone: i32,
+    /// CRs put back where a CR LF to LF transfer had removed them (judged by the CRC)
+    pub cr_restored: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -176,17 +180,20 @@ impl Rescue {
     /// Recover the gzip data in `input`, passing the output in order to `sink` with its mask
     /// (EXACT, SUSPECT or UNKNOWN per byte); `sink` returns false to stop.
     pub fn rescue(&self, input: &[u8], fill: u8, sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
-        self.run(input, None, fill, sink)
+        self.run(input, None, fill, 0, sink)
     }
 
     /// The same for a raw Deflate stream (a ZIP entry) that starts at `input[0]`; `expected`:
-    /// the original's size and, if known, its CRC-32, standing in for the gzip trailer.
-    pub fn rescue_raw(&self, input: &[u8], expected: (Option<u64>, Option<u32>), fill: u8, sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
-        self.run(input, Some(expected), fill, sink)
+    /// the original's size and, if known, its CRC-32, standing in for the gzip trailer. `crs`:
+    /// when the file lost its CRs to an ASCII transfer, how many this entry lost if known (its
+    /// stored size against the room it has): 1-8, 255 none, 0 unknown.
+    pub fn rescue_raw(&self, input: &[u8], expected: (Option<u64>, Option<u32>), fill: u8, crs: u8, sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
+        self.run(input, Some(expected), fill, crs, sink)
     }
 
-    fn run(&self, input: &[u8], raw: Option<(Option<u64>, Option<u32>)>, fill: u8, mut sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
-        let opt = Options { size: std::mem::size_of::<Options>() as u32, fill, no_infer: 0 };
+    fn run(&self, input: &[u8], raw: Option<(Option<u64>, Option<u32>)>, fill: u8, crs_expected: u8, mut sink: impl FnMut(&[u8], &[u8]) -> bool) -> Result<Report, String> {
+        let cr_lost = if CR_LOST.load(std::sync::atomic::Ordering::Relaxed) { 1 } else { 0 };
+        let opt = Options { size: std::mem::size_of::<Options>() as u32, fill, no_infer: 0, cr_lost, crs_expected };
         let mut f: SinkFn = &mut sink;
         let user = &mut f as *mut SinkFn as *mut c_void;
         let mut res: *mut c_void = std::ptr::null_mut();
@@ -279,6 +286,24 @@ pub fn undo_lf_to_crlf(data: &[u8]) -> Option<Vec<u8>> {
         out.push(b);
     }
     Some(out)
+}
+
+/// The other way, Windows to Unix, every CR LF became LF. Compressed data is close to random,
+/// so CR LF occurs about once in 65,536 positions, and a file with none may have gone through
+/// such a transfer. Weak evidence for a small file, but it only starts a search for the CRs a
+/// damaged ZIP entry wants back, and the entry's CRC judges every one: intact entries never
+/// enter it.
+pub fn looks_cr_stripped(data: &[u8]) -> bool {
+    let (lf, pairs) = crlf_counts(data);
+    pairs == 0 && lf >= 16
+}
+
+/// Whether the file being rescued lost its CRs that way: its ZIP entries, too short to tell on
+/// their own, are then searched for the CRs their CRC wants back
+static CR_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_cr_lost(v: bool) {
+    CR_LOST.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 static ASCII_UNDONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

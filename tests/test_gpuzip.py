@@ -352,6 +352,35 @@ def main():
             print(f"{'ok  ' if ok else 'FAIL'} rescue of {label}: {intact} of 4 entries intact, "
                   f"ASCII transfer undone {rep.get('ascii_transfer_undone')}, exit {r.returncode}")
 
+        # the reverse transfer (every CR LF made LF) removed bytes from compressed entries: the CRs
+        # are put back where each entry's CRC says, and no entry called intact may differ
+        import random
+        rnd = random.Random(7)
+        texts = {f"t{k}.txt": "".join(rnd.choice("abcdefghij klmnop,.\r\n") for _ in range(16000)).encode() for k in range(120)}
+        z_path = os.path.join(work, "deflated.zip")
+        with zipfile.ZipFile(z_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for n, t in texts.items():
+                z.writestr(n, t)
+        raw = open(z_path, "rb").read()
+        lost = raw.count(b"\r\n")
+        bad = os.path.join(work, "stripped.zip")
+        open(bad, "wb").write(raw.replace(b"\r\n", b"\n"))
+        out = os.path.join(work, "rescued_stripped")
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        status = {e["name"]: e["status"] for e in rep.get("entries", [])}
+        back = {n for n, t in texts.items() if os.path.exists(os.path.join(out, n)) and open(os.path.join(out, n), "rb").read() == t}
+        intact_wrong = [n for n in texts if status.get(n) == "intact" and n not in back]
+        ok = not intact_wrong and len(back) >= len(texts) - 2 and rep.get("crs_restored", 0) >= 1
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of a ZIP whose CR LF pairs became LF ({lost} lost): {len(back)} of {len(texts)} "
+              f"identical, {rep.get('crs_restored')} CRs put back, exit {r.returncode}"
+              + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
+
     # zip slip: an entry that tries to write outside the output folder must be refused
     evil = os.path.join(work, "zipslip.zip")
     with zipfile.ZipFile(evil, "w") as z:

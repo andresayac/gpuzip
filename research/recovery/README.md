@@ -153,7 +153,9 @@ The cases above are damage chosen to stress the method. `realistic.py` breaks fi
 break in the world instead, eleven ways, on six originals made from data already on this
 machine: a 32 MB Windows CBS log (`gzip -6`), a 32 MB tar.gz of Python's standard library, the
 same library as a 17 MB ZIP, and a docx (2,000 paragraphs, styles, two images), an xlsx (six
-sheets written by openpyxl: text, numbers, formulas) and a pptx (12 slides with images).
+sheets written by openpyxl: text, numbers, formulas) and a pptx (12 slides, four with a
+picture, on a slide master, layout and theme as PowerPoint writes them, those last in the ZIP;
+the first pptx had none of the three, and PowerPoint repaired it even undamaged).
 
 | Failure | How it happens | What it does to the file |
 |---|---|---|
@@ -175,8 +177,8 @@ sheets written by openpyxl: text, numbers, formulas) and a pptx (12 slides with 
 gpuzip's silent errors: bytes it marks exact, or files and entries it calls intact, that are
 wrong. Inferred bytes (next section) are counted apart. For the Office documents also the share of
 the document's text units (paragraphs, cells, slide texts) found in the recovered XML, and
-whether the result opens (every XML part parses, and openpyxl loads the workbook; neither Word
-nor Excel was run).
+whether the result opens (every XML part parses, and openpyxl loads the workbook). Whether Word,
+Excel and PowerPoint open the rebuilt documents is `office_check.py`'s to say, further below.
 
 **logs.txt.gz**, the share of the 32 MB log given back right:
 
@@ -215,7 +217,7 @@ nor Excel was run).
 | Failure | 7-Zip | zipfile | gpuzip rescue | silent errors |
 |---|---|---|---|---|
 | ftp_ascii | 0 | 0 | **3440** | 0 |
-| ascii_strip | 3 | 0 | **3218** | 0 |
+| ascii_strip | 3 | 0 | **3429** | 0 |
 | bad_sectors | 3436 | 3436 | **3436** | 0 |
 | flash_ff | 3401 | 3400 | **3401** | 0 |
 | crosslinked | 3438 | 3438 | **3438** | 0 |
@@ -231,9 +233,9 @@ nor Excel was run).
 | Failure | 7-Zip | zipfile | gpuzip rescue | silent errors | text: 7-Zip | text: gpuzip | damaged file opens | rebuilt opens |
 |---|---|---|---|---|---|---|---|---|
 | ftp_ascii | 0 | 0 | **10** | 0 | 0% | **100%** | no | yes |
-| ascii_strip | 2 | 2 | **8** | 0 | 38% | **38%** | no | yes |
+| ascii_strip | 2 | 2 | **10** | 0 | 38% | **100%** | no | yes |
 | bad_sectors | 8 | 8 | **8** | 0 | 4% | **4%** | no | yes |
-| flash_ff | 7 | 7 | **7** | 0 | 0% | **0%** | no | yes |
+| flash_ff | 7 | 7 | **7** | 0 | 0% | **0%** | no | none written |
 | crosslinked | 9 | 9 | **9** | 0 | 62% | **62%** | no | yes |
 | torrent_holes | 4 | 4 | **4** | 0 | 83% | **83%** | no | yes |
 | cut | 2 | 0 | **2** | 0 | 99% | **99%** | no | yes |
@@ -247,7 +249,7 @@ nor Excel was run).
 | Failure | 7-Zip | zipfile | gpuzip rescue | silent errors | text: 7-Zip | text: gpuzip | damaged file opens | rebuilt opens |
 |---|---|---|---|---|---|---|---|---|
 | ftp_ascii | 1 | 0 | **14** | 0 | 0% | **100%** | no | yes |
-| ascii_strip | 4 | 6 | **11** | 0 | 17% | **67%** | no | yes |
+| ascii_strip | 4 | 6 | **14** | 0 | 17% | **100%** | no | yes |
 | bad_sectors | 11 | 11 | **11** | 0 | 67% | **67%** | no | yes |
 | flash_ff | 10 | 10 | **10** | 0 | 83% | **83%** | no | yes |
 | crosslinked | 11 | 11 | **11** | 0 | 67% | **67%** | no | yes |
@@ -258,36 +260,50 @@ nor Excel was run).
 | crash_tail | 7 | 0 | **7** | 0 | 82% | **82%** | no | yes |
 | bitrot | 10 | 10 | **10** | 0 | 63% | **63%** | no | yes |
 
-**slides.pptx** (of 22 parts):
+**slides.pptx** (of 39 parts):
 
 | Failure | 7-Zip | zipfile | gpuzip rescue | silent errors | text: 7-Zip | text: gpuzip | damaged file opens | rebuilt opens |
 |---|---|---|---|---|---|---|---|---|
-| ftp_ascii | 0 | 0 | **22** | 0 | 0% | **100%** | no | yes |
-| ascii_strip | 22 | 22 | **22** | 0 | 100% | **100%** | yes | yes |
-| bad_sectors | 16 | 16 | **16** | 0 | 58% | **58%** | no | yes |
-| flash_ff | 0 | 0 | **0** | 0 | 0% | **0%** | no | no |
-| crosslinked | 16 | 16 | **16** | 0 | 58% | **58%** | no | yes |
-| torrent_holes | 22 | 22 | **22** | 0 | 100% | **100%** | yes | yes |
-| cut | 18 | 0 | **18** | 0 | 87% | **85%** | no | yes |
-| resume_dup | 13 | 10 | **22** | 0 | 58% | **100%** | no | yes |
-| resume_gap | 13 | 6 | **19** | 0 | 58% | **83%** | no | yes |
-| crash_tail | 18 | 0 | **18** | 0 | 83% | **83%** | no | yes |
-| bitrot | 16 | 16 | **17** | 0 | 76% | **84%** | no | yes |
+| ftp_ascii | 0 | 0 | **39** | 0 | 0% | **100%** | no | yes |
+| ascii_strip | 39 | 39 | **39** | 0 | 100% | **100%** | yes | yes |
+| bad_sectors | 19 | 19 | **19** | 0 | 25% | **25%** | no | yes |
+| flash_ff | 12 | 12 | **12** | 0 | 17% | **17%** | no | yes |
+| crosslinked | 25 | 25 | **25** | 0 | 58% | **58%** | no | yes |
+| torrent_holes | 12 | 12 | **12** | 0 | 17% | **17%** | no | yes |
+| cut | 34 | 0 | **34** | 0 | 100% | **100%** | no | yes |
+| resume_dup | 23 | 20 | **39** | 0 | 67% | **100%** | no | yes |
+| resume_gap | 21 | 12 | **33** | 0 | 61% | **78%** | no | yes |
+| crash_tail | 32 | 0 | **32** | 0 | 100% | **100%** | no | yes |
+| bitrot | 32 | 32 | **33** | 0 | 92% | **92%** | no | yes |
 
-Another tool gives back more than gpuzip in ten of the 66 cases, by under 0.1 points in nine of
-them and by 1.8 points of text in a cut pptx: wherever a stream ends early, its last symbol may
-have been read from bits past the end, so gpuzip does not trust what that symbol wrote (up to
-258 bytes); the others keep it, and here it happened to be right. The flash-damaged pptx is
-16 KB, and the erase block covered all of it. Silent errors: the bitrot cases and one file of the
-CR-stripped tar, below; inferred bytes that were wrong: none.
+Another tool gives back more than gpuzip in nine of the 66 cases, by at most 0.12 points:
+wherever a stream ends early, its last symbol may have been read from bits past the end, so
+gpuzip does not trust what that symbol wrote (up to 258 bytes); the others keep it, and here it
+happened to be right. The pptx is 25 KB: a 16 KB erase block or torrent piece takes most of it.
+Silent errors: the bitrot cases and one file of the CR-stripped tar, below; inferred bytes that
+were wrong: none.
 
 What the cases taught, each a fix now in the code:
 
 - **An ASCII-mode transfer** (every LF to CR LF) defeats every other tool completely. It is
   undone exactly when at least 98% of the file's LFs follow a CR (in compressed data about one in
-  256 does): everything comes back, in all six formats. The reverse transfer removed bytes that
-  nothing marks; the blocks with none in them decode, the rest are flagged. Putting the CRs
-  back by trying them where a decode breaks is not done.
+  256 does): everything comes back, in all six formats.
+- **The reverse transfer** (every CR LF to LF) removed bytes that nothing marks, but each one
+  stood right before an LF. In a ZIP every entry has its own CRC to judge a repair: a damaged
+  entry gets a CR put back before each of its LFs in turn, then before pairs of them (the second
+  after where the decode with the first breaks), until its size and CRC come out right. How many
+  it lost is known from its stored size against the room it has, so an entry that lost more
+  than two is not searched. The decode with the CRs before a candidate goes on from a snapshot,
+  so each trial decodes only the rest of the entry. `lib.zip` went from 3,218 entries to 3,429
+  of 3,440 (233 CRs put back, 53 s), the docx and the xlsx came back whole; what is left lost
+  three CRs or more, or two in an entry too big for the search's budget (1 GB decoded). A gzip
+  stream cannot be repaired this way: its one CRC covers the whole file, and nothing finer tells
+  a right CR from a wrong one. A wrong CR makes a block land on the next header with the
+  regular symbol count almost as often as the right one (the Huffman codes fall back in step
+  either way: measured, 9 of 12 such repairs were wrong), and the text decoded after either is
+  equally plausible ("nefiles-extend-apis" against "mecos-offlinefiles-core": both copy real
+  text). gpuzip says what happened instead: no CR LF pair is left where chance would put dozens,
+  and a copy transferred in binary mode is whole.
 - **A crash leaves zeros where the data should be.** gzip decodes them as data, and so did the
   first version (6 million bytes marked exact that were not). Sixty-four or more zero bytes at
   the end are not gzip's: the input now ends where they begin. gzip's own output is right 131
@@ -340,6 +356,66 @@ The limits that remain:
 - **LZ77 taint** on repetitive data: with bad sectors the log keeps 44% where gzip gives 7%, and
   the rest is marked unknown, not guessed.
 
+**Opened in Word, Excel and PowerPoint** (`office_check.py`). XML that parses is not yet a
+document Office opens. Each rebuilt document went to its application through COM: hidden,
+alerts off, read only, one fresh instance per file. A document opens *clean*, only through the
+application's own repair (*repaired*), or not at all (*refused*). The method was checked first on
+documents with known faults: Excel with alerts off does not refuse a damaged workbook but
+repairs it unasked, which only the repair log it leaves in TEMP shows; Word and PowerPoint
+refuse with an error; a Word document that opens with alerts off opens with them on without a
+prompt. Office 16, 2026-10-17:
+
+| Failure | Word: report.docx | Excel: budget.xlsx | PowerPoint: slides.pptx |
+|---|---|---|---|
+| (undamaged original) | clean | clean | clean |
+| ftp_ascii | clean | clean | clean |
+| ascii_strip | clean | clean | clean |
+| bad_sectors | clean | clean | clean |
+| flash_ff | no document: `document.xml` lost | clean | clean |
+| crosslinked | clean | clean | clean |
+| torrent_holes | clean | clean | clean |
+| cut | clean | clean | clean |
+| resume_dup | clean | clean | clean |
+| resume_gap | clean | clean | clean |
+| crash_tail | clean | clean | clean |
+| bitrot | clean | clean | clean |
+
+Before the fixes below, none of whose faults the XML check sees: Excel opened all 11 clean,
+Word 4 (it refused the other 7), PowerPoint 4 (5 repaired, 2 refused). The CR-stripped docx came
+back through the CR search above, not through these. Every text unit in a repaired story or slide
+is still in the rebuilt document. What Office refused, each a fix now in the code (`officefix.rs`):
+
+- **Word refuses a story that is well formed but not WordprocessingML.** Garbage decoded after
+  damage, once `repair_xml` closes it, puts a paragraph inside a run's text, text loose in the
+  body, run properties loose in a run (`w:b` outside `w:rPr`), tags with no namespace, numbers
+  that are not (`w:after="12ce"`). A damaged `document.xml` (or header, footer) is rebuilt: each
+  block that keeps to the structure, checked against what the schema lets a paragraph, run, their
+  properties and table parts hold, goes in as it was; a broken paragraph keeps its sound
+  properties and runs, the rest of its text as plain runs; anything else becomes plain
+  paragraphs of its text. Word itself ignores an unknown element between paragraphs, properties
+  after their run, and a picture whose relationship is gone.
+- **No main part, no document.** A docx without `document.xml` is one Word refuses; none is
+  written now, and the report says why. A workbook or presentation part is made instead when
+  sheets or slides survive.
+- **PowerPoint needs the chain slide, layout, master, theme**, and writes those last: a cut or
+  crashed copy loses them. Every slide is put on a layout, every layout on a master the
+  presentation lists, every master given a theme; what is lost is made plain (a blank layout, a
+  master, Office's theme), and a damaged master, layout or theme is replaced, a flipped bit in
+  one being enough (`a:effecte`, `xmlns:t` for `xmlns:r`). Slides whose presentation part was lost
+  (flash_ff, torrent_holes: two of twelve survive) get a new one, in their numbers' order.
+- **A part made under a lost one's name** brings back the relationships that named it: they are
+  used, not doubled. A master with two themes is one PowerPoint repairs.
+- **A part with no content type**, another file's that cross-linked clusters brought in (Python
+  sources inside the pptx), makes PowerPoint repair the file: such parts are left out.
+- **A bit flipped in a name's case** (`ppt/Slides/_rels/slide2.xml.rels`): part names are one
+  whatever their case, so Office finds the part, but this code, looking names up as written,
+  made a second of the same name, which PowerPoint repairs. Folders are spelled as most parts
+  spell them now.
+- **A bit flipped inside a damaged slide** (`a:masorlSlrMapping`, `x="45720O"`): the slide keeps
+  its sound shapes; the others become text boxes of their text. A name counts as sound when the
+  package's intact slides, layouts and masters use it (or it is a common one). PowerPoint itself
+  shows a picture of zeros or one whose relationship is gone without complaint.
+
 ## Inferring the lost window
 
 After a damaged block the bytes that copy from the lost window are unknown, but not free: every
@@ -387,13 +463,20 @@ method; decoding whole runs jointly would be the next step.
 - Fixed-Huffman and stored blocks after damage are restarted at the next dynamic header only;
   a probe-based restart inside a fixed block exists for the case where no header follows.
 - The whole recovered stream is held in memory for a tar.gz (twice: bytes and mask).
-- CR re-insertion for a file that went through a Windows-to-Unix ASCII transfer.
+- CR re-insertion in a gzip stream (no check finer than the whole file's CRC), and for ZIP
+  entries that lost three CRs or more.
 - Trusting the output of a cut stream to the last whole symbol instead of distrusting its last
   258 bytes: the decoder would have to say where its last symbol began (it is shared with the
   GPU kernel, so not changed for this).
 - Joint inference of runs of lost window bytes.
-- Opening the rebuilt documents in Word, Excel and PowerPoint themselves; the check here is that
-  every XML part parses and openpyxl loads the workbook.
+- Rebuilding the damaged parts of a Word document other than its stories (styles, numbering,
+  footnotes, comments) or of a presentation other than its slides, masters, layouts and themes:
+  they go in as `repair_xml` left them. None of the realistic cases needed it.
+- A damaged slide's attribute values are checked only where they are numbers: a bit flipped in
+  an enumeration (`prst="recu"`) passes, and PowerPoint would repair the file.
+- Word's own repair, run through automation, recovered none of the calibration documents it
+  refused, so for Word "refused" may also be a document Word repairs when a person answers its
+  prompt.
 - Real damaged files from the world: the damage here is modelled on how files break, but made
   here.
 
@@ -410,8 +493,9 @@ python repro_test.py <work-dir> [0.4]                           (the test suite'
 python make_zip_cases.py <dir> [48]                             (a ZIP of Python's library and a docx, six damaged copies)
 gpuzip rescue <dir>\lib.nocd.zip -o <out> --json > r.json
 python check_zip.py <dir>\lib.zip <out> r.json                  (every entry called intact must be identical; the docx checks)
-python realistic.py <dir>                                       (six originals, eleven real-world failures each: 66 files; needs openpyxl, Pillow)
+python realistic.py <dir> [--only slides.pptx]                 (six originals, eleven real-world failures each: 66 files; needs openpyxl, Pillow)
 python evaluate.py <dir> [--only lib.zip] [--failures cut]      (gpuzip against gzip, tar, 7-Zip, zipfile: results.md; needs numpy, openpyxl)
+python office_check.py <dir> [--only slides.pptx] [--failures cut]  (the rebuilt documents opened in Word, Excel, PowerPoint: office.md; Windows, Office)
 infer_sweep.ps1 [-SoloAgainst "6:2"] [-Margins "14:60"]         (inference accuracy and coverage by setting)
 python infer_debug.py <dir> <damaged.gz> <original> [14] [60]   (wrong inference decisions, with their contexts)
 python var_check.py <dir> <damaged.gz> <original>               (every byte of one variable must share one true value)

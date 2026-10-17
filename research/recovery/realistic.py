@@ -1,6 +1,6 @@
 """Damaged files the way real ones get damaged, for testing `gpuzip rescue`.
 
-    python realistic.py <out-dir>
+    python realistic.py <out-dir> [--only slides.pptx]   (--only: remake just those Office files)
 
 Originals (made here, from data already on this machine, nothing personal):
   logs.txt.gz     32 MB of a Windows CBS log, gzip -6
@@ -226,7 +226,43 @@ def make_xlsx(out):
     return path, units
 
 
+PML = ('xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+       'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+       'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"')
+REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+GROUP = '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>'
+# a theme with what PowerPoint requires of one: colours, fonts, and three of each format style
+THEME = (XML_HEAD + '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office"><a:themeElements>'
+         '<a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>'
+         '<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2>'
+         '<a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>'
+         + "".join(f'<a:accent{i + 1}><a:srgbClr val="{c}"/></a:accent{i + 1}>'
+                   for i, c in enumerate(("4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47")))
+         + '<a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme>'
+         '<a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>'
+         '<a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme>'
+         '<a:fmtScheme name="Office"><a:fillStyleLst>' + '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>' * 3 + '</a:fillStyleLst>'
+         '<a:lnStyleLst>' + '<a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>' * 3 + '</a:lnStyleLst>'
+         '<a:effectStyleLst>' + '<a:effectStyle><a:effectLst/></a:effectStyle>' * 3 + '</a:effectStyleLst>'
+         '<a:bgFillStyleLst>' + '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>' * 3 + '</a:bgFillStyleLst>'
+         '</a:fmtScheme></a:themeElements><a:objectDefaults/><a:extraClrSchemeLst/></a:theme>')
+
+
+def rels_xml(*rels):
+    return (XML_HEAD + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            + "".join(f'<Relationship Id="{i}" Type="{REL}/{t}" Target="{target}"/>' for i, t, target in rels) + '</Relationships>')
+
+
+def text_box(sid, name, x, y, cx, cy, paras):
+    return (f'<p:sp><p:nvSpPr><p:cNvPr id="{sid}" name="{name}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>'
+            f'<p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>'
+            f'<p:txBody><a:bodyPr wrap="square"/><a:lstStyle/>{paras}</p:txBody></p:sp>')
+
+
 def make_pptx(out):
+    """A presentation as PowerPoint writes one: master, layout and theme, every slide on the
+    layout, and the images placed on the slides that hold them"""
     rng = random.Random(13)
     units = []
     slides = []
@@ -234,32 +270,43 @@ def make_pptx(out):
         title = f"Slide {s + 1}: {sentence(rng, 2, 5)}"
         points = [f"Point {s + 1}.{k + 1}: {sentence(rng, 5, 14)}" for k in range(8)]
         units += [title] + points
-        paras = "".join(f"<a:p><a:r><a:t>{esc(p)}</a:t></a:r></a:p>" for p in points)
-        slides.append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-                      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
-                      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
-                      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree>'
-                      '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>'
-                      f'<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>{esc(title)}</a:t></a:r></a:p></p:txBody></p:sp>'
-                      f'<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/>{paras}</p:txBody></p:sp>'
-                      '</p:spTree></p:cSld></p:sld>')
-    ct = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        has_image = s % 3 == 0
+        body_w = 6858000 if has_image else 11277600
+        paras = "".join(f'<a:p><a:r><a:rPr lang="en-US" sz="1400"/><a:t>{esc(p)}</a:t></a:r></a:p>' for p in points)
+        pic = ('<p:pic><p:nvPicPr><p:cNvPr id="4" name="Chart"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>'
+               '<p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>'
+               '<p:spPr><a:xfrm><a:off x="7543800" y="1600200"/><a:ext cx="4191000" cy="2357438"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
+               if has_image else '')
+        slides.append(XML_HEAD + f'<p:sld {PML}><p:cSld><p:spTree>{GROUP}'
+                      + text_box(2, "Title", 457200, 274638, 11277600, 1143000,
+                                 f'<a:p><a:r><a:rPr lang="en-US" sz="3200" b="1"/><a:t>{esc(title)}</a:t></a:r></a:p>')
+                      + text_box(3, "Body", 457200, 1600200, body_w, 4525963, paras)
+                      + pic + '</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>')
+    pml_ct = "application/vnd.openxmlformats-officedocument.presentationml"
+    ct = (XML_HEAD + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
           '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
           '<Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>'
-          '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
-          + "".join(f'<Override PartName="/ppt/slides/slide{i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(12))
-          + '</Types>')
-    pres = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
-            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
-            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst>'
+          f'<Override PartName="/ppt/presentation.xml" ContentType="{pml_ct}.presentation.main+xml"/>'
+          f'<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="{pml_ct}.slideMaster+xml"/>'
+          f'<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="{pml_ct}.slideLayout+xml"/>'
+          '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>'
+          + "".join(f'<Override PartName="/ppt/slides/slide{i + 1}.xml" ContentType="{pml_ct}.slide+xml"/>' for i in range(12))
+          + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+          '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+          '</Types>')
+    pres = (XML_HEAD + f'<p:presentation {PML} saveSubsetFonts="1">'
+            '<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId13"/></p:sldMasterIdLst><p:sldIdLst>'
             + "".join(f'<p:sldId id="{256 + i}" r:id="rId{i + 1}"/>' for i in range(12))
-            + '</p:sldIdLst><p:sldSz cx="12192000" cy="6858000"/></p:presentation>')
-    pres_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-                 '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                 + "".join(f'<Relationship Id="rId{i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{i + 1}.xml"/>' for i in range(12))
-                 + '</Relationships>')
+            + '</p:sldIdLst><p:sldSz cx="12192000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>')
+    pres_rels = rels_xml(*[(f"rId{i + 1}", "slide", f"slides/slide{i + 1}.xml") for i in range(12)],
+                         ("rId13", "slideMaster", "slideMasters/slideMaster1.xml"), ("rId14", "theme", "theme/theme1.xml"))
+    master = (XML_HEAD + f'<p:sldMaster {PML}><p:cSld><p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"/></p:bgRef></p:bg>'
+              f'<p:spTree>{GROUP}</p:spTree></p:cSld>'
+              '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" '
+              'accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>'
+              '<p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst></p:sldMaster>')
+    layout = (XML_HEAD + f'<p:sldLayout {PML} type="blank" preserve="1"><p:cSld name="Blank"><p:spTree>{GROUP}</p:spTree></p:cSld>'
+              '<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>')
     path = os.path.join(out, "slides.pptx")
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", ct)
@@ -268,8 +315,17 @@ def make_pptx(out):
         z.writestr("ppt/_rels/presentation.xml.rels", pres_rels)
         for i, x in enumerate(slides):
             z.writestr(f"ppt/slides/slide{i + 1}.xml", x)
+            rels = [("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml")]
             if i % 3 == 0:
+                rels.append(("rId2", "image", f"../media/image{i + 1}.png"))
                 z.writestr(f"ppt/media/image{i + 1}.png", image_bytes("PNG", 100 + i, 960, 540))
+            z.writestr(f"ppt/slides/_rels/slide{i + 1}.xml.rels", rels_xml(*rels))
+        z.writestr("ppt/slideMasters/slideMaster1.xml", master)
+        z.writestr("ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                   rels_xml(("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"), ("rId2", "theme", "../theme/theme1.xml")))
+        z.writestr("ppt/slideLayouts/slideLayout1.xml", layout)
+        z.writestr("ppt/slideLayouts/_rels/slideLayout1.xml.rels", rels_xml(("rId1", "slideMaster", "../slideMasters/slideMaster1.xml")))
+        z.writestr("ppt/theme/theme1.xml", THEME)
         z.writestr("docProps/core.xml", CORE.replace("{title}", "Planning"))
         z.writestr("docProps/app.xml", APP)
     return path, units
@@ -359,17 +415,30 @@ FAILURES = {f.__name__: f for f in (ftp_ascii, ascii_strip, bad_sectors, flash_f
 
 def main():
     out = sys.argv[1]
+    # --only report.docx,slides.pptx: remake those Office originals and their damaged copies, keep
+    # the rest of an earlier run (the log and the library it was made from change over time)
+    only = set(sys.argv[sys.argv.index("--only") + 1].split(",")) if "--only" in sys.argv else None
     os.makedirs(out, exist_ok=True)
-    print("making the originals...", flush=True)
-    originals = {"logs.txt.gz": {"kind": "gz", "path": make_log_gz(out), "plain": os.path.join(out, "logs.txt")},
-                 "code.tar.gz": {"kind": "tgz", "path": make_code_tgz(out), "tar": os.path.join(out, "code.tar")},
-                 "lib.zip": {"kind": "zip", "path": make_lib_zip(out)}}
-    for name, maker in (("report.docx", make_docx), ("budget.xlsx", make_xlsx), ("slides.pptx", make_pptx)):
+    makers = (("report.docx", make_docx), ("budget.xlsx", make_xlsx), ("slides.pptx", make_pptx))
+    if only:
+        earlier = json.load(open(os.path.join(out, "manifest.json")))
+        originals = earlier["originals"]
+        kept = [c for c in earlier["cases"] if c["original"] not in only]
+        makers = tuple((n, m) for n, m in makers if n in only)
+    else:
+        print("making the originals...", flush=True)
+        originals = {"logs.txt.gz": {"kind": "gz", "path": make_log_gz(out), "plain": os.path.join(out, "logs.txt")},
+                     "code.tar.gz": {"kind": "tgz", "path": make_code_tgz(out), "tar": os.path.join(out, "code.tar")},
+                     "lib.zip": {"kind": "zip", "path": make_lib_zip(out)}}
+        kept = []
+    for name, maker in makers:
         path, units = maker(out)
         originals[name] = {"kind": "office", "path": path, "units": units}
     other = open(originals["lib.zip"]["path"], "rb").read()  # the "other file" of cross-linked clusters
     cases = []
     for name, o in originals.items():
+        if only and name not in only:
+            continue
         data = open(o["path"], "rb").read()
         o["size"] = len(data)
         stem, ext = name.rsplit(".", 1) if not name.endswith(".tar.gz") else ("code", "tar.gz")
@@ -382,6 +451,8 @@ def main():
             open(p, "wb").write(damaged)
             cases.append({"original": name, "failure": fname, "path": p, "what": what})
         print(f"  {name}: {len(data):,} bytes, {len(FAILURES)} damaged copies", flush=True)
+    order = list(originals)
+    cases = sorted(kept + cases, key=lambda c: order.index(c["original"]))  # stable: failures stay in order
     json.dump({"originals": originals, "cases": cases}, open(os.path.join(out, "manifest.json"), "w"), indent=1)
     print(f"{len(cases)} damaged files in {out}")
 

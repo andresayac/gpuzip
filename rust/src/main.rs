@@ -6,6 +6,7 @@ mod extract;
 mod gpu;
 mod gz;
 mod inflate;
+mod officefix;
 mod rescue;
 mod sevenzip;
 mod sheetfix;
@@ -462,6 +463,8 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         println!("  Note: the file went through an ASCII-mode transfer (every LF became CR LF); undone before the rescue");
     }
     rescue::set_ascii_note(unconverted.is_some());
+    // the reverse transfer removed CRs: a ZIP's entries are too short to tell on their own
+    rescue::set_cr_lost(unconverted.is_none() && rescue::looks_cr_stripped(data));
     if ziprescue::is_office_name(&archive) || (!gz::is_gzip(data) && ziprescue::looks_like_zip(data)) {
         return rescue_zip_file(&archive, data, lib, out_root, fill, opts);
     }
@@ -540,7 +543,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         let v = json!({
             "archive": archive, "command": "rescue", "format": if tar { "tar.gz" } else { "gz" },
             "input_bytes": s.input_size, "output_bytes": s.output_size,
-            "exact_bytes": s.exact_bytes, "inferred_bytes": s.inferred_bytes, "suspect_bytes": s.suspect_bytes, "unknown_bytes": s.unknown_bytes,
+            "exact_bytes": s.exact_bytes, "inferred_bytes": s.inferred_bytes, "crs_restored": s.cr_restored, "suspect_bytes": s.suspect_bytes, "unknown_bytes": s.unknown_bytes,
             "block_headers": s.headers, "damaged_blocks": s.damaged, "crc_check": s.crc_check, "length_off": s.length_off,
             "truncated": s.truncated != 0, "header_damaged": s.header_damaged != 0, "clean": clean,
             "seconds": (secs * 1e4).round() / 1e4,
@@ -673,7 +676,7 @@ fn rescue_zip_file(archive: &str, data: &[u8], lib: &rescue::Rescue, out_root: P
                 "text_chars": f.text_chars, "rebuilt": f.rebuilt.as_ref().map(|p| p.display().to_string()),
                 "package_fixes": f.package_fixes,
             })),
-            "notes": o.notes, "ascii_transfer_undone": rescue::ascii_undone(), "failed": o.failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
+            "notes": o.notes, "ascii_transfer_undone": rescue::ascii_undone(), "crs_restored": o.crs_restored, "failed": o.failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
             "seconds": (secs * 1e4).round() / 1e4, "implementation": "rust",
         });
         println!("{}", ascii_json(&v));

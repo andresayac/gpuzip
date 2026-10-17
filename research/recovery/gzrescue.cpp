@@ -37,7 +37,7 @@ static int sink(void* user, const uint8_t* data, const uint8_t* mask, size_t len
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: gzrescue <damaged.gz> <out> [--report out.json] [--mask out.mask] [--fill 0]\n");
+        fprintf(stderr, "usage: gzrescue <damaged.gz> <out> [--report out.json] [--mask out.mask] [--fill 0] [--no-infer]\n");
         return 2;
     }
     std::string report_path, mask_path;

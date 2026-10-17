@@ -14,11 +14,11 @@
 //    from a damaged block, and whatever copies from those, are unknown.
 // 5. The damaged block's true length comes from the trailer when there is one such block.
 // 6. The unknown bytes are inferred: each is a copy of one byte of the window that was lost, and
-//    every copy of it appears somewhere in the output with bytes around it. A trigram model of
-//    the file's exact bytes scores each possible value over all those places; the values it is
-//    sure of are kept, marked inferred, and serve as context for the next round.
-// 7. Transfers in ASCII mode are undone: LF to CR LF exactly; CR LF to LF by putting a CR back
-//    before the LFs where that makes a damaged block decode in step again.
+//    every copy of it appears somewhere in the output with bytes around it. A model of the file's
+//    exact bytes (contexts of 1 to 5 bytes) scores each possible value over all those places; the
+//    values it is sure of are kept, marked inferred, and serve as context for the next round.
+// 7. Transfers in ASCII mode are undone: LF to CR LF exactly; CR LF to LF, in a stream with its
+//    own CRC (a ZIP entry), by putting a CR back before the LFs where that makes the CRC right.
 #ifndef GR_BUILD
 #define GR_STATIC
 #endif
@@ -780,8 +780,6 @@ uint64_t infer_window(std::vector<Piece>& pieces, std::string& note) {
 
 // ---------------------------------------------------------------- ASCII-mode transfers
 
-// When nearly every LF has a CR before it (Unix to Windows in ASCII mode; in compressed data one
-// LF in 256 does by chance), the input with one CR removed before each LF
 // A file that ends in a long run of zeros (a crash while it was written, a preallocated file, a
 // download that stopped) ends where the zeros begin: Deflate never writes 64 zero bytes in a
 // row, and decoding them yields plausible garbage. Returns the bytes cut.
@@ -794,6 +792,8 @@ uint64_t cut_zero_tail(uint64_t& size, const std::vector<uint8_t>& in) {
     return cut;
 }
 
+// When nearly every LF has a CR before it (Unix to Windows in ASCII mode; in compressed data one
+// LF in 256 does by chance), the input with one CR removed before each LF
 bool undo_lf_to_crlf(std::vector<uint8_t>& in, uint64_t& size) {
     uint64_t lf = 0, crlf = 0;
     for (uint64_t i = 0; i < size; i++)
@@ -810,6 +810,181 @@ bool undo_lf_to_crlf(std::vector<uint8_t>& in, uint64_t& size) {
     std::fill(in.begin() + o, in.end(), 0);
     size = o;
     return true;
+}
+
+// The other way, Windows to Unix, every CR LF became LF: bytes were removed and nothing marks
+// where. Compressed data is close to random, so CR LF occurs about once in 65,536 positions; a
+// file with none of them where chance would put several dozen went through such a transfer.
+bool looks_cr_stripped(const uint8_t* in, uint64_t size) {
+    uint64_t lf = 0, cr = 0, pairs = 0;
+    for (uint64_t i = 0; i < size; i++) {
+        if (in[i] == '\n') {
+            lf++;
+            pairs += i > 0 && in[i - 1] == '\r';
+        } else if (in[i] == '\r') {
+            cr++;
+        }
+    }
+    return size && pairs == 0 && (double)lf * (double)cr / (double)size >= 8.0;
+}
+
+// Putting the CRs back. Every removed CR stood right before an LF byte of the input, so the
+// candidates are the LF bytes, and a stream with its own CRC says when the right ones are back:
+// a ZIP entry. A gzip stream has one CRC for the whole file, and nothing finer: a wrong CR makes
+// a block land on the next header with the regular symbol count almost as often as the right
+// one (the Huffman codes fall back in step either way; measured, 9 of 12 such repairs were
+// wrong), and the text decoded after either is equally plausible (it copies other real text).
+struct CrSearch {
+    Rescuer& rs;
+    const uint8_t* in;
+    uint64_t size, expected_size;
+    uint32_t expected_crc;
+    std::vector<uint8_t> base, with, bytes;  // the input with some CRs; with one more; the output
+    uint64_t spent = 0;                       // input bytes decoded so far
+
+    // where a decode can go on from: a symbol boundary, and the output by then
+    struct Snap {
+        gi::Start at;
+        size_t out;
+        bool first;
+    };
+
+    // in with a CR before each input position in ins (sorted), zero padded; returns its length
+    uint64_t build(std::vector<uint8_t>& b, const std::vector<uint64_t>& ins) const {
+        b.clear();
+        uint64_t p = 0;
+        for (uint64_t j : ins) {
+            b.insert(b.end(), in + p, in + j);
+            b.push_back('\r');
+            p = j;
+        }
+        b.insert(b.end(), in + p, in + size);
+        uint64_t len = b.size();
+        b.resize(len + 64, 0);
+        return len;
+    }
+
+    // Decodes buffer b from snapshot s (bytes holds the output up to it) to stop_bit, or the
+    // end. False: a reference before the stream's start, or more output than the stream has.
+    bool go(const std::vector<uint8_t>& b, const Snap& s, uint64_t stop_bit, gi::Result& r) {
+        bytes.resize(s.out);
+        gi::Start st = s.at;
+        bool first = s.first;
+        for (;;) {
+            r = rs.dec.run(b.data(), b.size() - 64, st, nullptr, 0, rs.scratch.data(), (uint32_t)rs.scratch.size(), first, stop_bit);
+            first = false;
+            spent += (r.end_bit > st.bit ? r.end_bit - st.bit : 0) / 8;
+            size_t at = bytes.size();
+            bytes.resize(at + r.out_len);
+            for (uint32_t i = 0; i < r.out_len; i++) {
+                uint16_t v = rs.scratch[i];
+                size_t q = at + i;
+                if (v <= gi::REF) {
+                    bytes[q] = (uint8_t)v;
+                } else if ((size_t)(v - gi::REF) <= q) {
+                    bytes[q] = bytes[q - (v - gi::REF)];
+                } else {
+                    return false;
+                }
+            }
+            if (bytes.size() > expected_size) return false;
+            if (r.status == gi::ERR_OVERFLOW) {
+                st = r.resume;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    bool right(const gi::Result& r) const {
+        return r.status == gi::OK && bytes.size() == expected_size && crc32(bytes.data(), bytes.size()) == expected_crc;
+    }
+
+    // For each candidate c (sorted, each after every position in fixed): is the stream right
+    // with the CRs of fixed and one before c? f(c, right, where it broke, as an input byte).
+    // The decode with fixed alone goes on from candidate to candidate, and each trial starts
+    // from where it stood just before c: only the rest of the stream is decoded again.
+    template <class F>
+    void each(const std::vector<uint64_t>& fixed, const std::vector<uint64_t>& cands, uint64_t budget, F f) {
+        build(base, fixed);
+        Snap cur{{0, 0, gi::AT_BLOCK, -1}, 0, true};
+        bytes.clear();
+        std::vector<uint64_t> ins = fixed;
+        ins.push_back(0);
+        for (uint64_t c : cands) {
+            if (spent > budget) return;
+            uint64_t cb = c + fixed.size();  // c in the buffer
+            gi::Result r;
+            if (cb * 8 > cur.at.bit + 64) {
+                if (!go(base, cur, cb * 8 - 64, r)) return;  // already wrong before c: so is every later trial
+                // where it stopped, unless that is past c (the stop fell in a block header) or it
+                // broke first (the lost CR was in the header itself): then from the one before
+                if (r.status == gi::STOPPED && r.resume.bit <= cb * 8) cur = {r.resume, bytes.size(), false};
+            }
+            ins.back() = c;
+            build(with, ins);
+            bool ok = go(with, cur, UINT64_MAX, r) && right(r);
+            uint64_t end = r.end_bit / 8;
+            f(c, ok, r.status == gi::OK ? size : end > ins.size() ? end - ins.size() : 0);
+            if (ok) return;
+        }
+    }
+};
+
+// The CRs a raw stream with a known size and CRC needs back: one before an LF, or two, the
+// first before the point where the decode breaks and the second before where it breaks then.
+// `count`: how many it lost, when the caller knows (0: unknown). Empty when the stream is right
+// as it is, or no such repair is found within the budget: two CRs in a stream that never
+// breaks cost a decode for every pair of LFs.
+std::vector<uint64_t> find_lost_crs(const std::vector<uint8_t>& in, uint64_t size, uint64_t expected_size, uint32_t expected_crc,
+                                    int count) {
+    constexpr uint64_t BUDGET = 1ull << 30;  // input bytes decoded in the search, at most
+    if (count > 2) return {};
+    Rescuer rs(in.data(), size);
+    CrSearch cs{rs, in.data(), size, expected_size, expected_crc, {}, {}, {}, 0};
+    // as it is: right already, or where it breaks
+    gi::Result r0;
+    cs.build(cs.base, {});
+    bool decoded = cs.go(cs.base, {{0, 0, gi::AT_BLOCK, -1}, 0, true}, UINT64_MAX, r0);
+    if (decoded && cs.right(r0)) return {};
+    uint64_t err0 = r0.status == gi::OK || !decoded ? size : std::min<uint64_t>(size, r0.end_bit / 8);
+    std::vector<uint64_t> lfs;
+    for (uint64_t j = 0; j < size; j++)
+        if (in[j] == '\n' && j <= err0) lfs.push_back(j);
+    std::vector<uint64_t> found;
+    std::vector<uint64_t> broke(lfs.size(), size);
+    size_t at = 0;
+    cs.each({}, lfs, BUDGET, [&](uint64_t c, bool ok, uint64_t err) {
+        if (ok) found = {c};
+        while (at < lfs.size() && lfs[at] != c) at++;
+        if (at < lfs.size()) broke[at] = err;
+    });
+    if (!found.empty() || count == 1) return found;
+    for (size_t x = 0; x < lfs.size() && found.empty() && cs.spent <= BUDGET; x++) {
+        std::vector<uint64_t> second;
+        for (uint64_t j = lfs[x] + 1; j <= std::min(broke[x], size - 1); j++)
+            if (in[j] == '\n') second.push_back(j);
+        cs.each({lfs[x]}, second, BUDGET, [&](uint64_t c, bool ok, uint64_t) {
+            if (ok) found = {lfs[x], c};
+        });
+    }
+    return found;
+}
+
+// The input with a CR put back before each position in crs
+void put_back_crs(std::vector<uint8_t>& in, uint64_t& size, const std::vector<uint64_t>& crs) {
+    std::vector<uint8_t> out;
+    out.reserve(size + crs.size() + 64);
+    uint64_t p = 0;
+    for (uint64_t j : crs) {
+        out.insert(out.end(), in.begin() + p, in.begin() + j);
+        out.push_back('\r');
+        p = j;
+    }
+    out.insert(out.end(), in.begin() + p, in.begin() + size);
+    size = out.size();
+    out.resize(size + 64, 0);
+    in.swap(out);
 }
 
 }  // namespace
@@ -836,6 +1011,16 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         if (size) memcpy(in.data(), in_, size);
         bool ascii_undone = undo_lf_to_crlf(in, size);
         uint64_t zero_tail = cut_zero_tail(size, in);
+        // a Windows-to-Unix ASCII transfer: CRs put back where they make damaged blocks whole
+        uint8_t cr_hint = opt && opt->size >= 7 ? opt->cr_lost : 0;
+        uint8_t crs_expected = opt && opt->size >= 8 ? opt->crs_expected : 0;
+        bool cr_stripped = !ascii_undone && (cr_hint == 1 || (cr_hint == 0 && looks_cr_stripped(in.data(), size)));
+        uint64_t crs_restored = 0;
+        if (cr_stripped && !gzip && has_crc && expected_size != UINT64_MAX && crs_expected != 255) {
+            std::vector<uint64_t> crs = find_lost_crs(in, size, expected_size, expected_crc, crs_expected);
+            crs_restored = crs.size();
+            if (!crs.empty()) put_back_crs(in, size, crs);
+        }
         Rescuer rs(in.data(), size);
         uint64_t hlen = gzip ? gzip_header(in.data(), size, 0) : 0;
         std::vector<gi::Start> headers = rs.find_headers(gzip ? (hlen ? hlen * 8 : 80) : 1);
@@ -852,6 +1037,13 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         }
         rs.suspect_overfull_tail(o, regular);
         if (ascii_undone) o.notes.push_back("the file had gone through an ASCII-mode transfer (every LF became CR LF): undone");
+        if (crs_restored)
+            o.notes.push_back(std::to_string(crs_restored) + " CR" + (crs_restored == 1 ? "" : "s") +
+                              " put back that an ASCII-mode transfer had removed; the CRC confirms it");
+        else if (cr_stripped && gzip)
+            o.notes.push_back("the file went through an ASCII-mode transfer that removed the CR of every CR LF (it has no CR LF "
+                              "pair where chance would put dozens): the blocks it broke are flagged; the CRs cannot be put back "
+                              "here, with one CRC for the whole file to judge them. A copy transferred in binary mode is whole");
         if (zero_tail)
             o.notes.push_back("the file ends in " + std::to_string(zero_tail) +
                               " zero bytes (written by a crash or an unfinished download, not by gzip): the data ends where they begin");
@@ -872,6 +1064,7 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         res->stats.input_end = o.input_end;
         res->stats.inferred_bytes = inferred;
         res->stats.ascii_undone = ascii_undone;
+        res->stats.cr_restored = (uint32_t)crs_restored;
 
         // The true length of each suspect piece: the trailer's size minus what is certain, spread
         // over the suspect pieces by their compressed size when there are several. ISIZE counts

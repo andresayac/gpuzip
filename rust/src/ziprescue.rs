@@ -51,6 +51,9 @@ pub struct Outcome {
     pub office: Option<OfficeOutcome>,
     /// directory entries whose local header was found elsewhere than the directory says
     pub moved: usize,
+    /// CRs put back that an ASCII-mode transfer had removed, and in how many entries
+    pub crs_restored: u64,
+    pub cr_entries: usize,
 }
 
 #[derive(Default)]
@@ -337,7 +340,11 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
         let mut best: Option<(Status, Vec<u8>, String)> = None;
         for start in starts {
             let limit = next_header_after(start);
-            let (status, bytes, detail) = recover_entry(data, lib, &t, start, limit, fill);
+            let (status, bytes, detail, crs) = recover_entry(data, lib, &t, start, limit, fill);
+            if status == Status::Intact && crs > 0 {
+                o.crs_restored += crs as u64;
+                o.cr_entries += 1;
+            }
             let better = match &best {
                 None => true,
                 Some((s, _, _)) => (status as u8) < (*s as u8),
@@ -366,16 +373,41 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
         }
         o.entries.push(rec);
     }
+    if o.crs_restored > 0 {
+        o.notes.push(format!(
+            "the file went through an ASCII-mode transfer that removed the CR of every CR LF: {} CRs put back in {} entries, each entry's CRC confirming them",
+            o.crs_restored, o.cr_entries
+        ));
+    }
     if office {
         o.office = Some(office_repair(&mut o.entries, root, fill));
     }
     o
 }
 
-/// One entry's data from `start`, bounded by `limit`: (status, bytes, detail)
-fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize, fill: u8) -> (Status, Vec<u8>, String) {
+/// How many bytes an entry's data lost, when that can be told: its stored compressed size against
+/// the room it has up to the next header (a local one, or the directory's): 1-8, 254 for more,
+/// 255 when it fits exactly, 0 when it cannot be told. For an ASCII transfer that removed CRs: how many.
+fn lost_bytes(data: &[u8], t: &Task, start: usize, limit: usize) -> u8 {
+    let Some(csize) = t.csize else { return 0 };
+    let dir = data[start..limit.min(data.len())].windows(4).position(|w| w == b"PK\x01\x02").map(|k| start + k);
+    let room = dir.unwrap_or(limit).min(limit).saturating_sub(start) as u64;
+    // a bit-3 entry has a data descriptor after its data, 16 bytes with its signature or 12 without
+    let rooms: &[u64] = if t.flags & 8 != 0 { &[16, 12] } else { &[0] };
+    let fits: Vec<u64> = rooms.iter().filter_map(|&d| room.checked_sub(d)).filter(|&r| r <= csize && csize - r <= 8).map(|r| csize - r).collect();
+    match fits.as_slice() {
+        [0] => 255,
+        [k] => *k as u8,
+        // more lost than any search here puts back: room short by more than 8 bytes
+        [] if rooms.iter().all(|&d| room.saturating_sub(d) + 8 < csize) => 254,
+        _ => 0,
+    }
+}
+
+/// One entry's data from `start`, bounded by `limit`: (status, bytes, detail, CRs put back)
+fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize, fill: u8) -> (Status, Vec<u8>, String, u32) {
     if start >= data.len() {
-        return (Status::Lost, Vec::new(), "data lies beyond the end of the file".into());
+        return (Status::Lost, Vec::new(), "data lies beyond the end of the file".into(), 0);
     }
     if t.method == STORED {
         let size = t.size.or(t.csize);
@@ -397,12 +429,12 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
         }
         if cut {
             let n = bytes.len();
-            return (Status::Partial, bytes, format!("cut short: {n} of {} bytes", size.unwrap_or(0)));
+            return (Status::Partial, bytes, format!("cut short: {n} of {} bytes", size.unwrap_or(0)), 0);
         }
         match crc {
-            Some(c) if crc32fast::hash(&bytes) == c => (Status::Intact, bytes, String::new()),
-            Some(_) => (Status::Unverified, bytes, "stored data, CRC mismatch: damaged somewhere inside".into()),
-            None => (Status::Unverified, bytes, "no CRC known".into()),
+            Some(c) if crc32fast::hash(&bytes) == c => (Status::Intact, bytes, String::new(), 0),
+            Some(_) => (Status::Unverified, bytes, "stored data, CRC mismatch: damaged somewhere inside".into(), 0),
+            None => (Status::Unverified, bytes, "no CRC known".into(), 0),
         }
     } else {
         let end = match t.csize {
@@ -418,14 +450,14 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
                 let mut out = vec![0u8; size as usize];
                 if let Ok(n) = libdeflater::Decompressor::new().deflate_decompress(slice, &mut out) {
                     if n as u64 == size && crc32fast::hash(&out) == crc {
-                        return (Status::Intact, out, String::new());
+                        return (Status::Intact, out, String::new(), 0);
                     }
                 }
             }
         }
         let mut out = Vec::with_capacity(t.size.unwrap_or(slice.len() as u64 * 3) as usize);
         let (mut unknown, mut inferred) = (0u64, 0u64);
-        let report = lib.rescue_raw(slice, (t.size, t.crc), fill, |d, m| {
+        let report = lib.rescue_raw(slice, (t.size, t.crc), fill, lost_bytes(data, t, start, limit), |d, m| {
             out.extend_from_slice(d);
             unknown += m.iter().filter(|&&x| x == UNKNOWN).count() as u64;
             inferred += m.iter().filter(|&&x| x == INFERRED).count() as u64;
@@ -433,9 +465,10 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
         });
         let report = match report {
             Ok(r) => r,
-            Err(e) => return (Status::Lost, Vec::new(), e),
+            Err(e) => return (Status::Lost, Vec::new(), e, 0),
         };
         let s = &report.stats;
+        let crs = s.cr_restored;
         let cut = t.csize.map_or(false, |c| ((end - start) as u64) < c) || s.truncated != 0;
         if s.damaged > 0 || unknown > 0 || inferred > 0 || cut {
             let mut d = Vec::new();
@@ -451,7 +484,7 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
             if cut {
                 d.push("cut short".into());
             }
-            return (Status::Partial, out, d.join(", "));
+            return (Status::Partial, out, d.join(", "), 0);
         }
         // in step throughout: the CRC decides
         let crc = t.crc.or_else(|| {
@@ -459,9 +492,12 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
             data_descriptor(data, start + s.input_end as usize).map(|(c, _, _)| c)
         });
         match crc {
-            Some(c) if crc32fast::hash(&out) == c && t.size.map_or(true, |z| z == out.len() as u64) => (Status::Intact, out, String::new()),
-            Some(_) => (Status::Unverified, out, "decodes in step but the CRC does not match: damage the decoder could not see".into()),
-            None => (Status::Unverified, out, "no CRC known".into()),
+            Some(c) if crc32fast::hash(&out) == c && t.size.map_or(true, |z| z == out.len() as u64) => {
+                let d = if crs > 0 { format!("{crs} CR{} put back that an ASCII transfer had removed; the CRC confirms", if crs == 1 { "" } else { "s" }) } else { String::new() };
+                (Status::Intact, out, d, crs)
+            }
+            Some(_) => (Status::Unverified, out, "decodes in step but the CRC does not match: damage the decoder could not see".into(), 0),
+            None => (Status::Unverified, out, "no CRC known".into(), 0),
         }
     }
 }
@@ -813,12 +849,24 @@ fn office_repair(entries: &mut [Recovered], root: Option<&Path>, _fill: u8) -> O
             parts.remove(&n);
             fixes.push(format!("{n}: nothing of it survived, left out"));
         }
-        if of.kind == "xlsx" {
-            fixes.extend(fix_spreadsheet(&mut parts, &damaged));
+        fixes.extend(crate::officefix::canonical_case(&mut parts));
+        fixes.extend(crate::officefix::replace_damaged_themes(&mut parts, &damaged));
+        match of.kind.as_str() {
+            "xlsx" => fixes.extend(fix_spreadsheet(&mut parts, &damaged)),
+            "docx" => fixes.extend(crate::officefix::fix_word(&mut parts, &damaged)),
+            "pptx" => fixes.extend(crate::officefix::fix_presentation(&mut parts, &damaged)),
+            _ => {}
         }
         fixes.extend(make_openable(&mut parts, &of.kind));
+        // without its main part (and nothing found to make one from) a package is no document:
+        // Word and PowerPoint refuse it
+        let main = main_part(&of.kind);
+        let whole = main.is_empty() || parts.contains_key(main);
+        if !whole {
+            fixes.push(format!("{main} was lost and nothing found could stand in for it: no document rebuilt"));
+        }
         of.package_fixes = fixes;
-        if !parts.is_empty() {
+        if whole && !parts.is_empty() {
             let zipped = stored_zip(&parts);
             let p = r.join(format!("recovered.{}", of.kind));
             if std::fs::write(&p, &zipped).is_ok() {
@@ -913,7 +961,7 @@ fn stored_zip(parts: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
 }
 
 /// The value of attribute `name` in an element's text
-fn attr(elem: &str, name: &str) -> Option<String> {
+pub(crate) fn attr(elem: &str, name: &str) -> Option<String> {
     let mut rest = elem;
     loop {
         let k = rest.find(name)?;
@@ -935,7 +983,7 @@ fn attr(elem: &str, name: &str) -> Option<String> {
 
 /// The XML with the elements named `tag` for which `keep` says false removed (self-closing or
 /// with content); returns it and how many went
-fn filter_elements(xml: &str, tag: &str, mut keep: impl FnMut(&str) -> bool) -> (String, usize) {
+pub(crate) fn filter_elements(xml: &str, tag: &str, mut keep: impl FnMut(&str) -> bool) -> (String, usize) {
     let mut out = String::with_capacity(xml.len());
     let mut removed = 0;
     let open = format!("<{tag}");
@@ -970,7 +1018,7 @@ fn filter_elements(xml: &str, tag: &str, mut keep: impl FnMut(&str) -> bool) -> 
 }
 
 /// The part a relationship's target names, from the folder of the part that owns the .rels
-fn resolve_target(rels_name: &str, target: &str) -> String {
+pub(crate) fn resolve_target(rels_name: &str, target: &str) -> String {
     if let Some(abs) = target.strip_prefix('/') {
         return abs.to_string();
     }
@@ -1036,7 +1084,32 @@ fn content_type_for(name: &str) -> Option<&'static str> {
     if name == "docProps/app.xml" {
         return ct("application/vnd.openxmlformats-officedocument.extended-properties+xml");
     }
-    None
+    // the other parts Office writes often, by folder and name
+    let numbered = |prefix: &str| name.strip_prefix(prefix).and_then(|r| r.strip_suffix(".xml")).map_or(false, |k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()));
+    match () {
+        _ if numbered("word/header") => ct("application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"),
+        _ if numbered("word/footer") => ct("application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"),
+        _ if name == "word/numbering.xml" => ct("application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"),
+        _ if name == "word/fontTable.xml" => ct("application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"),
+        _ if name == "word/webSettings.xml" => ct("application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"),
+        _ if name == "word/footnotes.xml" => ct("application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"),
+        _ if name == "word/endnotes.xml" => ct("application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"),
+        _ if name == "word/comments.xml" => ct("application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"),
+        _ if numbered("ppt/slideMasters/slideMaster") => ct("application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"),
+        _ if numbered("ppt/slideLayouts/slideLayout") => ct("application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"),
+        _ if numbered("ppt/notesSlides/notesSlide") => ct("application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"),
+        _ if numbered("ppt/notesMasters/notesMaster") => ct("application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"),
+        _ if numbered("ppt/handoutMasters/handoutMaster") => ct("application/vnd.openxmlformats-officedocument.presentationml.handoutMaster+xml"),
+        _ if name == "ppt/presProps.xml" => ct("application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"),
+        _ if name == "ppt/viewProps.xml" => ct("application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml"),
+        _ if name == "ppt/tableStyles.xml" => ct("application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"),
+        _ if name == "xl/calcChain.xml" => ct("application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"),
+        _ if numbered("xl/tables/table") => ct("application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"),
+        _ if numbered("xl/drawings/drawing") => ct("application/vnd.openxmlformats-officedocument.drawing+xml"),
+        _ if numbered("xl/charts/chart") || numbered("word/charts/chart") || numbered("ppt/charts/chart") => ct("application/vnd.openxmlformats-officedocument.drawingml.chart+xml"),
+        _ if name == "docProps/custom.xml" => ct("application/vnd.openxmlformats-officedocument.custom-properties+xml"),
+        _ => None,
+    }
 }
 
 /// Make the recovered parts a package an Office application opens: no references to parts that
@@ -1051,7 +1124,13 @@ fn make_openable(parts: &mut BTreeMap<String, Vec<u8>>, kind: &str) -> Vec<Strin
         let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">");
         for (ext, t) in [("rels", "application/vnd.openxmlformats-package.relationships+xml"), ("xml", "application/xml"), ("png", "image/png"),
                          ("jpeg", "image/jpeg"), ("jpg", "image/jpeg"), ("gif", "image/gif"), ("emf", "image/x-emf"), ("wmf", "image/x-wmf"),
-                         ("bin", "application/vnd.openxmlformats-officedocument.oleObject")] {
+                         ("bin", "application/vnd.openxmlformats-officedocument.oleObject"), ("bmp", "image/bmp"), ("tif", "image/tiff"), ("tiff", "image/tiff"),
+                         ("svg", "image/svg+xml"), ("wdp", "image/vnd.ms-photo"), ("vml", "application/vnd.openxmlformats-officedocument.vmlDrawing"),
+                         ("odttf", "application/vnd.openxmlformats-officedocument.obfuscatedFont"), ("fntdata", "application/x-fontdata"),
+                         ("mp4", "video/mp4"), ("wav", "audio/wav"), ("mp3", "audio/mpeg"), ("m4a", "audio/mp4"),
+                         ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                         ("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                         ("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation")] {
             x.push_str(&format!("<Default Extension=\"{ext}\" ContentType=\"{t}\"/>"));
         }
         for name in parts.keys() {
@@ -1070,6 +1149,37 @@ fn make_openable(parts: &mut BTreeMap<String, Vec<u8>>, kind: &str) -> Vec<Strin
             parts.insert("[Content_Types].xml".into(), x.into_bytes());
             fixes.push(format!("{n} content types of lost parts removed"));
         }
+        // a part made here, or one whose override was lost, would pass for plain XML: Office
+        // then does not know it for what it is
+        let ct = String::from_utf8_lossy(&parts["[Content_Types].xml"]).into_owned();
+        let missing: Vec<String> = parts
+            .keys()
+            .filter_map(|name| content_type_for(name).filter(|_| !ct.contains(&format!("PartName=\"/{name}\""))).map(|t| format!("<Override PartName=\"/{name}\" ContentType=\"{t}\"/>")))
+            .collect();
+        if !missing.is_empty() && ct.contains("</Types>") {
+            parts.insert("[Content_Types].xml".into(), ct.replacen("</Types>", &format!("{}</Types>", missing.concat()), 1).into_bytes());
+            fixes.push(format!("{} content types added for parts that had none", missing.len()));
+        }
+    }
+    // a part with no content type makes the package one Office repairs: such parts are another
+    // file's (cross-linked clusters hold their headers), not this document's
+    let ct = String::from_utf8_lossy(&parts["[Content_Types].xml"]).to_lowercase();
+    let untyped: Vec<String> = parts
+        .keys()
+        .filter(|n| *n != "[Content_Types].xml")
+        .filter(|n| {
+            let l = n.to_lowercase();
+            let ext = l.rsplit_once('.').map(|(_, e)| e).filter(|e| !e.contains('/'));
+            !ct.contains(&format!("partname=\"/{l}\"")) && ext.map_or(true, |e| !ct.contains(&format!("extension=\"{e}\"")))
+        })
+        .cloned()
+        .collect();
+    if !untyped.is_empty() {
+        for n in &untyped {
+            parts.remove(n);
+        }
+        let shown: Vec<&str> = untyped.iter().take(3).map(|s| s.as_str()).collect();
+        fixes.push(format!("{} parts with no content type left out, not this document's ({}{})", untyped.len(), shown.join(", "), if untyped.len() > 3 { ", ..." } else { "" }));
     }
     // _rels/.rels
     let main = main_part(kind);
@@ -1155,5 +1265,44 @@ mod tests {
     #[test]
     fn duplicate_attributes_and_text_outside_the_root_are_dropped() {
         assert_eq!(fix("junk<a><b r=\"1\" r=\"2\">x</b><c/></a>"), "<a>x<c/></a>");
+    }
+
+    #[test]
+    fn parts_without_a_content_type_get_one() {
+        let mut parts: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let ct = "<Types xmlns=\"t\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"rels\" ContentType=\"r\"/><Default Extension=\"PNG\" ContentType=\"image/png\"/>\
+<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/></Types>";
+        parts.insert("[Content_Types].xml".into(), ct.as_bytes().to_vec());
+        for n in ["_rels/.rels", "ppt/presentation.xml", "ppt/slideMasters/slideMaster1.xml", "ppt/slideMasters/_rels/slideMaster1.xml.rels", "ppt/media/image1.png",
+                  "idlelib/pyparse.py", "idlelib/README"] {
+            parts.insert(n.into(), b"<x/>".to_vec());
+        }
+        let fixes = make_openable(&mut parts, "pptx");
+        let x = String::from_utf8(parts["[Content_Types].xml"].clone()).unwrap();
+        assert!(x.contains("<Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/></Types>"), "{x}");
+        assert_eq!(x.matches("PartName=\"/ppt/presentation.xml\"").count(), 1);
+        assert!(fixes.iter().any(|f| f == "1 content types added for parts that had none"), "{fixes:?}");
+        // parts of another file, with no content type, are left out; the image (by extension) stays
+        assert!(!parts.contains_key("idlelib/pyparse.py") && !parts.contains_key("idlelib/README") && parts.contains_key("ppt/media/image1.png"));
+        assert!(fixes.iter().any(|f| f.starts_with("2 parts with no content type left out")), "{fixes:?}");
+    }
+
+    #[test]
+    fn no_document_without_its_main_part() {
+        let dir = std::env::temp_dir().join(format!("gpuzip-office-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = |name: &str, status: Status, xml: &str| Recovered {
+            name: name.into(), status, detail: String::new(), size: xml.len() as u64, from_scan: false, office_part: Some(xml.as_bytes().to_vec()),
+        };
+        // a Word document whose document.xml was lost: its styles alone are no document
+        let mut entries = vec![entry("word/styles.xml", Status::Intact, "<w:styles xmlns:w=\"u\"/>"), entry("word/document.xml", Status::Lost, "")];
+        let of = office_repair(&mut entries, Some(&dir), 0);
+        assert!(of.rebuilt.is_none());
+        assert!(of.package_fixes.iter().any(|f| f.starts_with("word/document.xml was lost")), "{:?}", of.package_fixes);
+        // with it, there is one
+        let mut entries = vec![entry("word/document.xml", Status::Intact, "<w:document xmlns:w=\"u\"><w:body/></w:document>")];
+        let of = office_repair(&mut entries, Some(&dir), 0);
+        assert!(of.rebuilt.is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
