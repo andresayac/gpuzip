@@ -1,0 +1,197 @@
+# Builds the packages people download: gpuzip with its libraries, for Windows x64, Linux x64 and
+# macOS (universal: Apple silicon and Intel). A tag v<version> (the version in rust/Cargo.toml)
+# publishes them as a draft release, to be read over and published by hand; a pull request that
+# touches the packaging, or a manual run, only builds them and keeps them as workflow artifacts.
+#
+# Linux is built on Ubuntu 22.04 so the binaries run on older glibc too. gpuinflate is compiled
+# for every NVIDIA GPU from Turing (RTX 20) on. nvCOMP is NVIDIA's and is not shipped: GPU.md in
+# each package says how to add it.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - gpuinflate/build.sh
+      - gpuinflate/build.cmd
+      - rust/Cargo.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CUDA_VERSION: "13.3.1"
+  CUDA_SERIES: "13.3"
+
+jobs:
+  package:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2022, target: windows-x64 }
+          - { os: ubuntu-22.04, target: linux-x64 }
+          - { os: macos-latest, target: macos-universal }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match rust/Cargo.toml's version $version" >&2
+            exit 1
+          fi
+          echo "PKG=gpuzip-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update && rustup default stable
+          if [ "${{ runner.os }}" = macOS ]; then rustup target add x86_64-apple-darwin aarch64-apple-darwin; fi
+
+      - name: CUDA compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -q
+          series=${CUDA_SERIES/./-}
+          sudo apt-get install -y -q --no-install-recommends cuda-nvcc-$series cuda-cudart-dev-$series
+          echo "NVCC=/usr/local/cuda-$CUDA_SERIES/bin/nvcc" >> "$GITHUB_ENV"
+
+      - name: CUDA compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = $env:CUDA_VERSION; $s = $env:CUDA_SERIES
+          Invoke-WebRequest "https://developer.download.nvidia.com/compute/cuda/$v/network_installers/cuda_${v}_windows_network.exe" -OutFile cuda.exe
+          $parts = "nvcc", "cudart", "crt", "nvvm", "nvptxcompiler" | ForEach-Object { "${_}_$s" }
+          Start-Process .\cuda.exe -ArgumentList (@("-s") + $parts) -Wait -NoNewWindow
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$s"
+          if (-not (Test-Path "$cuda\bin\nvcc.exe")) { throw "nvcc was not installed" }
+          "CUDA_PATH=$cuda" >> $env:GITHUB_ENV
+
+      - name: Libraries (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: gpuinflate\build.cmd release
+      - name: Libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sh gpuinflate/build.sh release
+      - name: Libraries (macOS)
+        if: runner.os == 'macOS'
+        run: CXXFLAGS="-arch arm64 -arch x86_64" sh gpuinflate/build.sh rescue
+
+      - name: gpuzip
+        working-directory: rust
+        run: |
+          if [ "${{ runner.os }}" = macOS ]; then
+            cargo build --release --target aarch64-apple-darwin
+            cargo build --release --target x86_64-apple-darwin
+            mkdir -p target/release
+            lipo -create -output target/release/gpuzip target/aarch64-apple-darwin/release/gpuzip target/x86_64-apple-darwin/release/gpuzip
+          else
+            cargo build --release
+          fi
+
+      - name: Package
+        run: |
+          mkdir -p "$PKG"
+          case "${{ runner.os }}" in
+            Windows) cp rust/target/release/gpuzip.exe gpuinflate/gzrescue.dll gpuinflate/gpuinflate.dll "$PKG/" ;;
+            Linux)   cp rust/target/release/gpuzip gpuinflate/libgzrescue.so gpuinflate/libgpuinflate.so "$PKG/" ;;
+            macOS)   cp rust/target/release/gpuzip gpuinflate/libgzrescue.dylib "$PKG/" ;;
+          esac
+          cp README.md CHANGELOG.md "$PKG/"
+          cp LICENSE-MIT LICENSE-APACHE "$PKG/"
+          # the README's links and images point into the repository: make them absolute so they
+          # still work from the package
+          cat > abs_links.py <<'EOF'
+          import re, sys
+          path, repo, ref = sys.argv[1:4]
+          blob, raw = f"https://github.com/{repo}/blob/{ref}/", f"https://raw.githubusercontent.com/{repo}/{ref}/"
+          text = open(path, encoding="utf-8").read()
+          text = re.sub(r'((?:src|srcset)=")(?!https?:)', lambda m: m.group(1) + raw, text)
+          text = re.sub(r'\]\((?!https?:|#)', "](" + blob, text)
+          open(path, "w", encoding="utf-8", newline="\n").write(text)
+          EOF
+          python3 abs_links.py "$PKG/README.md" "$GITHUB_REPOSITORY" "$GITHUB_SHA" 2>/dev/null || python abs_links.py "$PKG/README.md" "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+          cat > "$PKG/GPU.md" <<'EOF'
+          # The GPU paths
+
+          gpuzip runs everywhere on the CPU. On an NVIDIA GPU (Windows, Linux) it also uses:
+
+          - gpuinflate, included here (gpuinflate.dll, libgpuinflate.so): one large .gz or
+            .tar.gz decoded in parallel on the GPU. It needs only the NVIDIA driver.
+          - NVIDIA's nvCOMP 6, not included (it is NVIDIA's library): small ZIP entries in batches
+            on the GPU. `pip install nvidia-libnvcomp-cu13`, then copy nvcomp64_6.dll (Windows,
+            from site-packages/nvidia/libnvcomp/bin) or libnvcomp.so.6 (Linux, from
+            site-packages/nvidia/libnvcomp/lib64) next to gpuzip, or point GPUZIP_NVCOMP_DIR at
+            its folder.
+
+          `gpuzip doctor` shows what was found and where it looked.
+          EOF
+
+      - name: Check the package
+        run: |
+          exe="$PKG/gpuzip"; [ "${{ runner.os }}" = Windows ] && exe="$PKG/gpuzip.exe"
+          "$exe" --version
+          "$exe" doctor | tee doctor.txt || true
+          grep -q "rescue: gzrescue loaded from" doctor.txt
+          if [ "${{ runner.os }}" = macOS ]; then lipo -archs "$exe"; fi
+          # 2 MB of text in many Deflate blocks, with a bad 4 KB sector in the middle
+          cat > make_check.py <<'EOF'
+          import gzip, random
+          r = random.Random(1)
+          words = ["".join(r.choice("abcdefghijklmnop") for _ in range(r.randint(2, 9))) for _ in range(3000)]
+          d = gzip.compress(" ".join(r.choice(words) for _ in range(300000)).encode())
+          open("check.gz", "wb").write(d[:len(d) // 2] + bytes(4096) + d[len(d) // 2 + 4096:])
+          EOF
+          python3 make_check.py 2>/dev/null || python make_check.py
+          set +e; "$exe" rescue check.gz -o rescued; rc=$?; set -e
+          [ "$rc" = 2 ] && [ -s rescued/check ]
+
+      - name: Archive
+        run: |
+          if [ "${{ runner.os }}" = Windows ]; then
+            7z a -tzip "$PKG.zip" "$PKG" > /dev/null
+            echo "ASSET=$PKG.zip" >> "$GITHUB_ENV"
+          else
+            tar -czf "$PKG.tar.gz" "$PKG"
+            echo "ASSET=$PKG.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  publish:
+    name: Draft release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --generate-notes \
+            --title "gpuzip $GITHUB_REF_NAME" *

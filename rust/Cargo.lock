@@ -253,6 +253,8 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "gpuzip"
 version = "0.1.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "chrono",
  "clap",
  "crc32fast",

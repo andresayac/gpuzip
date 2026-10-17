@@ -2,8 +2,17 @@
 name = "gpuzip"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Recover what damaged .gz, .tar.gz, .zip and Office files still hold, and extract archives fast on the CPU or an NVIDIA GPU"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/andresayac/gpuzip"
+readme = "../README.md"
+keywords = ["zip", "gzip", "recovery", "gpu", "cuda"]
+categories = ["command-line-utilities", "compression"]
 
 [dependencies]
+anstream = "1"
+anstyle = "1"
 chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
 crc32fast = "1.5.2"

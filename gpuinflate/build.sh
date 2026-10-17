@@ -7,8 +7,9 @@
 #   ./build.sh release    gpuinflate for every GPU from Turing (RTX 20) on, plus PTX for newer ones
 #   ./build.sh rescue     libgzrescue only
 # The CUDA runtime is linked statically: libgpuinflate.so needs only the NVIDIA driver.
-# CXX picks the C++ compiler (default c++), NVCC the CUDA compiler (default nvcc on PATH, then
-# $CUDA_PATH/bin/nvcc, then /usr/local/cuda/bin/nvcc).
+# CXX picks the C++ compiler (default c++) and CXXFLAGS adds to its flags (for a universal macOS
+# library: CXXFLAGS="-arch arm64 -arch x86_64"); NVCC picks the CUDA compiler (default nvcc on
+# PATH, then $CUDA_PATH/bin/nvcc, then /usr/local/cuda/bin/nvcc).
 set -e
 cd "$(dirname "$0")"
 CXX=${CXX:-c++}
@@ -20,7 +21,7 @@ else
     rescue_lib=libgzrescue.so
     shared=-shared
 fi
-"$CXX" -O2 -std=c++20 -fPIC -fvisibility=hidden $shared -DGR_BUILD rescue.cpp -o "$rescue_lib"
+"$CXX" -O2 -std=c++20 -fPIC -fvisibility=hidden $shared $CXXFLAGS -DGR_BUILD rescue.cpp -o "$rescue_lib"
 echo "built $rescue_lib"
 
 [ "$1" = rescue ] && exit 0
