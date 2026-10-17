@@ -1,9 +1,11 @@
 //! Decoding batches of raw Deflate streams on an NVIDIA GPU with nvCOMP.
 //!
-//! The NVIDIA driver (nvcuda.dll) and nvCOMP (nvcomp64_6.dll) are loaded at run time, so the
-//! program starts and runs on the CPU on machines without them. nvCOMP links the CUDA runtime
-//! statically and works on the driver's primary context, which this module makes current.
+//! The NVIDIA driver (nvcuda.dll, libcuda.so.1) and nvCOMP (nvcomp64_6.dll, libnvcomp.so.6) are
+//! loaded at run time, so the program starts and runs on the CPU on machines without them (and
+//! on macOS, which has no CUDA). nvCOMP links the CUDA runtime statically and works on the
+//! driver's primary context, which this module makes current.
 
+use crate::dylib;
 use libloading::Library;
 use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
@@ -68,19 +70,32 @@ pub struct Api {
 unsafe impl Send for Api {}
 unsafe impl Sync for Api {}
 
-/// Places nvcomp64_6.dll is looked for, in order.
+/// The nvCOMP major version these bindings were written for: its interface changes between them
+const NVCOMP_MAJOR: u32 = 6;
+
+/// The NVIDIA driver's library, loaded from the system's own place (none on macOS)
+const CUDA_DRIVER: Option<&str> = if cfg!(windows) {
+    Some("nvcuda.dll")
+} else if dylib::CUDA {
+    Some("libcuda.so.1")
+} else {
+    None
+};
+
+/// nvCOMP's file names here, in order of preference
+fn nvcomp_names() -> Vec<String> {
+    if !dylib::CUDA {
+        Vec::new()
+    } else if cfg!(windows) {
+        vec![format!("nvcomp64_{NVCOMP_MAJOR}.dll")]
+    } else {
+        vec![format!("libnvcomp.so.{NVCOMP_MAJOR}"), "libnvcomp.so".into()]
+    }
+}
+
+/// Places nvCOMP is looked for, in order.
 pub fn nvcomp_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(dir) = std::env::var_os("GPUZIP_NVCOMP_DIR") {
-        out.push(PathBuf::from(dir).join("nvcomp64_6.dll"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.push(dir.join("nvcomp64_6.dll"));
-        }
-    }
-    out.push(PathBuf::from("nvcomp64_6.dll")); // the system search path (PATH)
-    out
+    dylib::candidates("GPUZIP_NVCOMP_DIR", &nvcomp_names())
 }
 
 unsafe fn sym<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
@@ -95,11 +110,15 @@ impl Api {
     /// Load the driver and nvCOMP, and make device 0's primary context ready.
     pub fn load() -> Result<Api, String> {
         unsafe {
-            let cuda = Library::new("nvcuda.dll").map_err(|_| "NVIDIA driver not found (nvcuda.dll)".to_string())?;
-            let (nvcomp, nvcomp_path) = nvcomp_candidates()
-                .into_iter()
-                .find_map(|p| Library::new(&p).ok().map(|l| (l, p.display().to_string())))
-                .ok_or("nvCOMP not found (nvcomp64_6.dll): put it next to gpuzip.exe or set GPUZIP_NVCOMP_DIR")?;
+            let driver = CUDA_DRIVER.ok_or("no CUDA on this system")?;
+            let cuda = Library::new(driver).map_err(|_| format!("NVIDIA driver not found ({driver})"))?;
+            let (nvcomp, nvcomp_path) = dylib::load_first(nvcomp_candidates()).ok_or_else(|| {
+                format!(
+                    "nvCOMP not found ({}): put it next to {} or set GPUZIP_NVCOMP_DIR",
+                    nvcomp_names().join(", "),
+                    dylib::exe_name()
+                )
+            })?;
 
             let cu_init: unsafe extern "C" fn(u32) -> CuResult = sym(&cuda, b"cuInit\0")?;
             let cu_device_get: unsafe extern "C" fn(*mut CuDevice, i32) -> CuResult = sym(&cuda, b"cuDeviceGet\0")?;
@@ -144,6 +163,9 @@ impl Api {
             if nv_props(&mut props) == 0 {
                 let v = props.version;
                 api.nvcomp_version = format!("{}.{}.{}", v / 1000, (v % 1000) / 100, v % 100);
+                if v / 1000 != NVCOMP_MAJOR {
+                    return Err(format!("nvCOMP {} at {} is not version {NVCOMP_MAJOR}", api.nvcomp_version, api.nvcomp_path));
+                }
             }
             Ok(api)
         }

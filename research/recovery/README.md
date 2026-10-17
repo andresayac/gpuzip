@@ -94,7 +94,7 @@ for large files.
 
 ## In gpuzip
 
-The method lives in `gpuinflate/rescue.cpp` (C API in `rescue.h`, built as `gzrescue.dll`, CPU
+The method lives in `gpuinflate/rescue.cpp` (C API in `rescue.h`, built as `gzrescue.dll`, `libgzrescue.so` or `libgzrescue.dylib`, CPU
 only); `gzrescue.cpp` here is a command line over it, used by `measure.py`. `gpuzip rescue`
 (Rust, `rust/src/rescue.rs`) adds the tar side: the files are extracted from the recovered
 stream and classified as intact, possibly damaged or partial. Two things make that work on a
@@ -484,10 +484,11 @@ method; decoding whole runs jointly would be the next step.
 
 ```
 build.cmd                                                       (cl; CPU only: gzrescue.exe over ..\..\gpuinflate\rescue.cpp)
+sh build.sh                                                     (the same on Linux and macOS, with c++)
 python damage.py <original> <dir>                               (a .gz and six damaged copies)
 gzrescue <damaged.gz> <out> [--report r.json] [--mask m.mask] [--fill 0]
 python measure.py <dir>                                         (needs numpy)
-gpuzip rescue <damaged.tar.gz> -o <dir> --json > r.json         (the Rust build, with gzrescue.dll next to it)
+gpuzip rescue <damaged.tar.gz> -o <dir> --json > r.json         (the Rust build, with gzrescue next to it)
 python check_extract.py <original.tar> <dir> r.json             (every file called intact must be identical)
 python repro_test.py <work-dir> [0.4]                           (the test suite's damaged tar.gz, with the report and every differing file)
 python make_zip_cases.py <dir> [48]                             (a ZIP of Python's library and a docx, six damaged copies)

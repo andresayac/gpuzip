@@ -8,7 +8,7 @@ are handed to 7-Zip. Prototype.
 
 Two implementations with the same commands, options and JSON reports:
 
-- **Rust** (`rust/`): the faster one. One `.exe`, starts in milliseconds, decodes 13-20x faster
+- **Rust** (`rust/`): the faster one. One binary, starts in milliseconds, decodes 13-20x faster
   than 7-Zip. Loads the NVIDIA driver, nvCOMP and gpuinflate at run time, so it also runs
   without them. Reads `.gz` and `.tar.gz` itself.
 - **Python** (`python/`): the first version, kept as the reference the Rust one is tested
@@ -39,31 +39,59 @@ gpuzip doctor                     check the GPU, nvCOMP and 7-Zip
 
 Exit codes: 0 ok · 1 missing file or setup problem · 2 some entries failed.
 
+## Platforms
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| ZIP, gzip and tar.gz on the CPU; RAR, 7z and the rest through 7-Zip | yes | yes | yes |
+| `gpuzip rescue`: damaged .gz, .tar.gz, .zip and Office files (CPU) | yes | yes | yes |
+| Small ZIP entries on the GPU (nvCOMP) | NVIDIA | NVIDIA | no |
+| One large stream on the GPU (gpuinflate: .gz, .tar.gz, large ZIP entries) | NVIDIA | NVIDIA | no |
+
+macOS has no CUDA, so there everything is decoded on the CPU, and `gpuzip doctor` says so.
+GitHub Actions builds and tests every push on all three ([ci.yml](.github/workflows/ci.yml)).
+Its runners have no GPU: CI covers the CPU paths, the 7-Zip hand-off and rescue, and checks that
+gpuinflate compiles for Linux. The GPU paths of the Rust version pass every test in
+`tests/test_gpuzip.py` on an RTX 5080 under Windows 11 and under Linux (Ubuntu 24.04 in WSL2,
+same card). The Python version runs on the CPU everywhere; its GPU path (CuPy and nvCOMP's
+Python package) has been tested on Windows only.
+
 ## Install
 
-Both need [7-Zip](https://www.7-zip.org) for RAR, 7z, tar.* and encrypted entries. The GPU path
-needs an NVIDIA GPU and driver; without them every entry is decoded on the CPU.
+Both need [7-Zip](https://www.7-zip.org) for RAR, 7z, tar.* and encrypted entries: `7zz`, `7z`
+or `7za` on the PATH, or the usual place on Windows. Use 7-Zip 24 or later (on Linux, 7-Zip's
+own `7zz`; on macOS, `brew install sevenzip`): older ones cannot read Zstandard ZIP entries.
+The GPU path needs an NVIDIA GPU and driver; without them every entry is decoded on the CPU.
 
 ### Rust
 
-Needs [Rust](https://rustup.rs) and the Visual Studio Build Tools (C++). From this folder:
+Needs [Rust](https://rustup.rs) and a C compiler (the Visual Studio Build Tools on Windows). From
+this folder:
 
 ```
-cargo build --release --manifest-path rust\Cargo.toml
+cargo build --release --manifest-path rust/Cargo.toml
 ```
 
-The program is `rust\target\release\gpuzip.exe`. The GPU paths need two DLLs next to it, each
-optional (without one, that work goes to the CPU):
+The program is `rust/target/release/gpuzip` (`gpuzip.exe` on Windows). It loads three
+libraries at run time, each optional: without one, that work goes to the CPU (or, for gzrescue,
+`gpuzip rescue` is not available). Each is looked for in the folder its variable names, next to
+the program, then on the system's search path (PATH on Windows, LD_LIBRARY_PATH and the linker
+cache on Linux):
 
-- `nvcomp64_6.dll`, for small ZIP entries (or point `GPUZIP_NVCOMP_DIR` at its folder). It
-  comes with `pip install nvidia-libnvcomp-cu13` (in `site-packages\nvidia\libnvcomp\bin`) or
-  NVIDIA's nvCOMP download.
-- `gpuinflate.dll`, for `.gz`, `.tar.gz` and large ZIP entries (or point `GPUZIP_INFLATE_DIR`
-  at its folder). Build it with `gpuinflate\build.cmd release`, which needs the CUDA toolkit
-  (see [gpuinflate/README.md](gpuinflate/README.md)).
+| Library | Windows | Linux | macOS | Variable | For |
+|---|---|---|---|---|---|
+| nvCOMP | `nvcomp64_6.dll` | `libnvcomp.so.6` | | `GPUZIP_NVCOMP_DIR` | small ZIP entries on the GPU |
+| gpuinflate | `gpuinflate.dll` | `libgpuinflate.so` | | `GPUZIP_INFLATE_DIR` | `.gz`, `.tar.gz` and large ZIP entries on the GPU |
+| gzrescue | `gzrescue.dll` | `libgzrescue.so` | `libgzrescue.dylib` | `GPUZIP_RESCUE_DIR` | `gpuzip rescue` |
 
-- `gzrescue.dll`, for `gpuzip rescue` (or point `GPUZIP_RESCUE_DIR` at its folder). CPU only;
-  `gpuinflate\build.cmd` builds it too, and it needs only the Visual Studio C++ compiler.
+- nvCOMP is NVIDIA's own library, not in this repository. It comes with
+  `pip install nvidia-libnvcomp-cu13` (in `site-packages/nvidia/libnvcomp`, under `bin` on
+  Windows and `lib64` on Linux) or NVIDIA's nvCOMP download. gpuzip needs version 6.
+- gpuinflate: `gpuinflate\build.cmd release` on Windows, `gpuinflate/build.sh release` on Linux.
+  Both need the CUDA toolkit (see [gpuinflate/README.md](gpuinflate/README.md)).
+- gzrescue is CPU only: `gpuinflate\build.cmd rescue` builds it with the Visual Studio C++
+  compiler, `gpuinflate/build.sh rescue` with any C++20 compiler (g++, clang++). Without
+  `rescue`, both scripts build it first and then gpuinflate.
 
 Running needs no CUDA toolkit: the NVIDIA driver is enough. `gpuzip doctor` shows what was found.
 
@@ -213,8 +241,9 @@ Implementation notes learned the hard way:
   memory, so both versions copy through pinned buffers.
 - nvCOMP's raw Deflate decoder reads output from 7-Zip, zlib, Python and .NET correctly
   (`tests/test_gpuzip.py` checks this, against both versions).
-- The Rust version calls the NVIDIA driver API (`nvcuda.dll`) directly: nvCOMP links the CUDA
-  runtime statically and works on the driver's primary context, so no CUDA runtime DLL is needed.
+- The Rust version calls the NVIDIA driver API (`nvcuda.dll`, `libcuda.so.1`) directly: nvCOMP
+  links the CUDA runtime statically and works on the driver's primary context, so no CUDA
+  runtime library is needed.
 
 ## Benchmark
 
@@ -293,12 +322,13 @@ What this shows:
 ```
 rust/           the Rust version
   src/zip.rs        reads the archive's central directory and routes each entry
+  src/dylib.rs      the libraries loaded at run time: their names on each system, where they are looked for
   src/gpu.rs        the NVIDIA driver and nvCOMP, loaded at run time
   src/extract.rs    shares the work between GPU, CPU threads and 7-Zip; writes the files
   src/sevenzip.rs   hands entries and whole archives to 7-Zip
   src/gz.rs         gzip members, trailers, tar extraction from a pipe
-  src/inflate.rs    gpuinflate.dll, loaded at run time
-  src/rescue.rs     gzrescue.dll, loaded at run time; tar extraction that skips destroyed headers
+  src/inflate.rs    gpuinflate, loaded at run time
+  src/rescue.rs     gzrescue, loaded at run time; tar extraction that skips destroyed headers
   src/ziprescue.rs  damaged ZIPs: local-header scan, per-entry recovery; Office XML repair and rebuild
   src/sheetfix.rs   damaged spreadsheets: sheets rebuilt from their valid cells, a lost workbook remade
   src/officefix.rs  damaged Word stories rebuilt, a presentation's lost master, layout and theme remade
@@ -306,7 +336,8 @@ rust/           the Rust version
 python/         the Python version (gpuzip.py, pyproject.toml)
 tests/          correctness tests for both versions (ZIP, gzip, tar.gz, damaged files, zip slip)
 gpuinflate/     the library that decodes one Deflate stream on the GPU, in segments (C/CUDA),
-                with its tests and fuzzer; rescue.cpp, the recovery of damaged gzip files (CPU)
+                with its tests and fuzzer; rescue.cpp, the recovery of damaged gzip files (CPU);
+                build.cmd (Windows) and build.sh (Linux, macOS) build both
 bench/          the benchmarks and their latest results (results*.md, results*.json)
 research/gpu-inflate/   the experiment gpuinflate grew from: the algorithm, measurements and
                         dead ends, 4-18x faster than rapidgzip on 16 threads (see its README)
@@ -318,6 +349,8 @@ research/recovery/      gzrescue: recovering damaged .gz files block by block wi
                         ways files break, on six formats, against gzip, tar, 7-Zip (see its README)
 ```
 
-Tests: `python tests\test_gpuzip.py` checks the Python version; with
-`set GPUZIP_BIN=rust\target\release\gpuzip.exe` first, it checks the Rust build. They pack a
-folder with 7-Zip, Python and PowerShell, extract it in every mode and compare every file.
+Tests: `python tests/test_gpuzip.py` checks the Python version; with `GPUZIP_BIN` pointing at
+the Rust build (`rust\target\release\gpuzip.exe`, `rust/target/release/gpuzip`), it checks
+that. They pack a folder with 7-Zip, Python and the system's own tool (PowerShell on Windows,
+Info-ZIP's zip elsewhere), extract it in every mode and compare every file; without a GPU the
+gpu modes are skipped. `cd rust && cargo test --release` runs the unit tests.

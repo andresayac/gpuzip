@@ -84,9 +84,15 @@ fn cp437() -> &'static [char] {
     })
 }
 
-fn decode_name(raw: &[u8], utf8: bool) -> String {
+/// An entry's name. Without the UTF-8 flag the bytes are in the creating system's code page:
+/// CP437 from DOS and Windows tools, but Unix and macOS tools (Info-ZIP's zip among them) store
+/// a UTF-8 system's names as they are, without the flag, so a valid UTF-8 name from those is
+/// read as UTF-8. Info-ZIP's Unicode Path field, when its CRC matches the name, wins over both.
+fn decode_name(raw: &[u8], utf8: bool, made_on_unix: bool, unicode_path: Option<String>) -> String {
     let raw = raw.split(|&b| b == 0).next().unwrap_or(raw);
-    let name = if utf8 {
+    let name = if let Some(name) = unicode_path {
+        name
+    } else if utf8 || (made_on_unix && std::str::from_utf8(raw).is_ok()) {
         String::from_utf8_lossy(raw).into_owned()
     } else {
         let table = cp437();
@@ -173,9 +179,16 @@ pub fn read_central_directory(data: &[u8], lost_ok: bool) -> Result<Vec<Entry>, 
         }
         let raw_name = &data[p + 46..p + 46 + nlen];
         let extra = &data[p + 46 + nlen..p + 46 + nlen + xlen];
+        let mut unicode_path = None;
         let mut x = 0;
         while x + 4 <= extra.len() {
             let (id, len) = (u16le(extra, x), u16le(extra, x + 2) as usize);
+            if id == 0x7075 && len >= 5 && x + 4 + len <= extra.len() && extra[x + 4] == 1
+                && u32le(extra, x + 5) == crc32fast::hash(raw_name)
+            {
+                // Info-ZIP's Unicode Path: version 1, the CRC-32 of the name it replaces, the UTF-8 name
+                unicode_path = std::str::from_utf8(&extra[x + 9..x + 4 + len]).ok().map(str::to_string);
+            }
             if id == 0x0001 && x + 4 + len <= extra.len() {
                 // Zip64: the 64-bit values of the fields that overflowed, in this order
                 let mut q = x + 4;
@@ -189,7 +202,8 @@ pub fn read_central_directory(data: &[u8], lost_ok: bool) -> Result<Vec<Entry>, 
             x += 4 + len;
         }
         entries.push(Entry {
-            name: decode_name(raw_name, flags & 0x800 != 0),
+            // the high byte of "version made by": 3 Unix, 19 macOS
+            name: decode_name(raw_name, flags & 0x800 != 0, matches!(data[p + 5], 3 | 19), unicode_path),
             path: None,
             method,
             flags,
@@ -236,11 +250,30 @@ fn plan(data: &[u8], entries: &mut [Entry]) -> Result<(), String> {
         }
         if matches!(e.route, Route::Deflate | Route::Cpu | Route::SevenZip) {
             let path = e.path.as_ref().unwrap().to_string_lossy();
-            let key = if cfg!(windows) { path.to_lowercase() } else { path.into_owned() };
+            // Windows and macOS file names ignore case: two entries that differ only in case are one file
+            let key = if cfg!(any(windows, target_os = "macos")) { path.to_lowercase() } else { path.into_owned() };
             if let Some(prev) = by_path.insert(key, i) {
                 entries[prev].route = Route::Dup;
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_name;
+
+    #[test]
+    fn names_without_the_utf8_flag() {
+        let raw = "año 2026/naïve.txt".as_bytes();
+        // Info-ZIP on Linux or macOS: UTF-8 bytes, no flag
+        assert_eq!(decode_name(raw, false, true, None), "año 2026/naïve.txt");
+        // the same bytes from a DOS or Windows tool are CP437
+        assert_eq!(decode_name(raw, false, false, None), "a├▒o 2026/na├»ve.txt");
+        // not UTF-8, even from Unix: CP437
+        assert_eq!(decode_name(b"caf\x82.txt", false, true, None), "café.txt");
+        assert_eq!(decode_name(b"x\\y.txt", true, false, None), "x/y.txt");
+        assert_eq!(decode_name(b"a.txt", false, false, Some("ä.txt".into())), "ä.txt");
+    }
 }

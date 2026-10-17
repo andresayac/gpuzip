@@ -74,9 +74,22 @@ def gpu_libs_missing():
 
 
 def find_7z(explicit=None):
-    candidates = [explicit, shutil.which("7z"), shutil.which("7za"),
+    # 7zz: 7-Zip's own Linux and macOS builds (current); 7z: Windows, Debian's 7zip, the old p7zip; 7za: standalone
+    candidates = [explicit, shutil.which("7zz"), shutil.which("7z"), shutil.which("7za"),
                   r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"]
     return next((c for c in candidates if c and os.path.isfile(c)), None)
+
+
+def entry_name(info):
+    """The entry's name. zipfile reads names without the UTF-8 flag as CP437, but Unix and macOS
+    tools (Info-ZIP's zip among them) store a UTF-8 system's names as they are, without the flag:
+    a name from those that is valid UTF-8 is read as UTF-8."""
+    if info.flag_bits & 0x800 or info.create_system not in (3, 19) or info.filename.isascii():
+        return info.filename
+    try:
+        return info.filename.encode("cp437").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):  # not CP437 bytes (Unicode Path field), or not UTF-8
+        return info.filename
 
 
 def safe_relpath(name):
@@ -118,7 +131,7 @@ def plan(zf, mm):
     entries, by_path = [], {}
     for info in zf.infolist():
         e = Entry(info)
-        e.path = safe_relpath(info.filename)
+        e.path = safe_relpath(entry_name(info))
         if e.path is None:
             e.route = "unsafe"
         elif info.is_dir():
@@ -133,7 +146,8 @@ def plan(zf, mm):
             name_len, extra_len = struct.unpack_from("<HH", mm, h + 26)
             e.offset = h + 30 + name_len + extra_len
         if e.route in ("deflate", "cpu", "7z"):
-            key = e.path.lower() if os.name == "nt" else e.path
+            # Windows and macOS file names ignore case: two entries that differ only in case are one file
+            key = e.path.lower() if os.name == "nt" or sys.platform == "darwin" else e.path
             if key in by_path:
                 by_path[key].route = "dup"
             by_path[key] = e
@@ -634,7 +648,7 @@ def build_parser():
     o.add_argument("--gpu-max-entry-kb", type=int, default=1024, help="auto: larger entries stay on the CPU (1024)")
     o.add_argument("--gpu-min-mb", type=int, default=64, help="auto: skip the GPU below this much small-entry data (64)")
     o.add_argument("--password", help="password for encrypted entries (passed to 7-Zip)")
-    o.add_argument("--sevenzip", metavar="PATH", help="path to 7z.exe, if not in the usual place")
+    o.add_argument("--sevenzip", metavar="PATH", help="path to 7-Zip (7z.exe, 7z or 7zz), if not in the usual place")
     o.add_argument("--json", action="store_true", help="print one JSON report per archive")
     o.add_argument("-v", "--verbose", action="store_true", help="also show GPU details and why work went where")
     o.add_argument("-q", "--quiet", action="store_true", help="print only failures")

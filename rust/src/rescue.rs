@@ -1,9 +1,9 @@
-//! Recovering damaged gzip files: gzrescue.dll (built from gpuinflate/rescue.cpp, CPU only)
-//! decodes a damaged .gz block by block and says, byte by byte, what is exact, what lies in a
+//! Recovering damaged gzip files: gzrescue (gzrescue.dll, libgzrescue.so, libgzrescue.dylib;
+//! built from gpuinflate/rescue.cpp, CPU only) decodes a damaged .gz block by block and says, byte by byte, what is exact, what lies in a
 //! damaged block and what cannot be known; this module loads it, and extracts what a damaged
 //! .tar.gz still holds, skipping to the next valid tar header after a destroyed region.
 
-use crate::zip;
+use crate::{dylib, zip};
 use libloading::Library;
 use std::ffi::{CStr, c_char, c_void};
 use std::fs::File;
@@ -115,19 +115,9 @@ pub struct Rescue {
 unsafe impl Send for Rescue {}
 unsafe impl Sync for Rescue {}
 
-/// Places gzrescue.dll is looked for, in order.
+/// Places gzrescue is looked for, in order.
 pub fn candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(dir) = std::env::var_os("GPUZIP_RESCUE_DIR") {
-        out.push(PathBuf::from(dir).join("gzrescue.dll"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.push(dir.join("gzrescue.dll"));
-        }
-    }
-    out.push(PathBuf::from("gzrescue.dll")); // the system search path (PATH)
-    out
+    dylib::candidates("GPUZIP_RESCUE_DIR", &[dylib::file_name("gzrescue")])
 }
 
 /// The library, loaded once per process on first use.
@@ -156,13 +146,13 @@ unsafe extern "C" fn trampoline(user: *mut c_void, data: *const u8, mask: *const
 impl Rescue {
     fn load() -> Result<Rescue, String> {
         unsafe {
-            let (lib, path) = candidates()
-                .into_iter()
-                .find_map(|p| Library::new(&p).ok().map(|l| (l, p.display().to_string())))
-                .ok_or("gzrescue.dll not found: put it next to gpuzip.exe or set GPUZIP_RESCUE_DIR")?;
+            let name = dylib::file_name("gzrescue");
+            let (lib, path) = dylib::load_first(candidates()).ok_or_else(|| {
+                format!("{name} not found: put it next to {} or set GPUZIP_RESCUE_DIR", dylib::exe_name())
+            })?;
             let abi: unsafe extern "C" fn() -> u32 = sym(&lib, b"gr_abi_version\0")?;
             if abi() != ABI_VERSION {
-                return Err(format!("gzrescue.dll speaks version {} of the interface, this gpuzip {ABI_VERSION}", abi()));
+                return Err(format!("{name} speaks version {} of the interface, this gpuzip {ABI_VERSION}", abi()));
             }
             Ok(Rescue {
                 rescue: sym(&lib, b"gr_rescue\0")?,

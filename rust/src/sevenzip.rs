@@ -8,16 +8,23 @@ use std::process::{Command, Stdio};
 pub const TAR_SUFFIXES: [&str; 10] =
     [".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar.lz", ".tar.lzma"];
 
+/// 7-Zip's command names, best first: 7zz (7-Zip's own Linux and macOS builds, Homebrew's
+/// sevenzip: always current), 7z (Windows, Debian's 7zip, the old p7zip), 7za (standalone, fewer formats)
+const NAMES: [&str; 3] = ["7zz", "7z", "7za"];
+
 pub fn find(explicit: Option<&Path>) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = explicit.map(Path::to_path_buf).into_iter().collect();
     if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            candidates.push(dir.join("7z.exe"));
-            candidates.push(dir.join("7za.exe"));
+        for name in NAMES {
+            for dir in std::env::split_paths(&path) {
+                candidates.push(dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)));
+            }
         }
     }
-    candidates.push(PathBuf::from(r"C:\Program Files\7-Zip\7z.exe"));
-    candidates.push(PathBuf::from(r"C:\Program Files (x86)\7-Zip\7z.exe"));
+    if cfg!(windows) {
+        candidates.push(PathBuf::from(r"C:\Program Files\7-Zip\7z.exe"));
+        candidates.push(PathBuf::from(r"C:\Program Files (x86)\7-Zip\7z.exe"));
+    }
     candidates.into_iter().find(|p| p.is_file())
 }
 

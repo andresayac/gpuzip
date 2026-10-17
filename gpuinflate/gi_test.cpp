@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -28,9 +29,7 @@ static std::vector<uint8_t> read_file(const char* path) {
         fprintf(stderr, "cannot open %s\n", path);
         exit(1);
     }
-    fseek(f, 0, SEEK_END);
-    size_t n = (size_t)_ftelli64(f);
-    fseek(f, 0, SEEK_SET);
+    size_t n = (size_t)std::filesystem::file_size(path);  // ftell is 32-bit on Windows
     std::vector<uint8_t> v(n);
     if (n && fread(v.data(), 1, n, f) != n) exit(1);
     fclose(f);

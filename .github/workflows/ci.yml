@@ -1,0 +1,102 @@
+# Builds and tests gpuzip on Linux, macOS and Windows. GitHub's runners have no GPU, so this
+# checks everything that runs on the CPU (extraction, gzip, rescue, the 7-Zip hand-off) and that
+# gpuinflate compiles for Linux; the GPU paths are tested on a machine with an NVIDIA card.
+# nvCOMP is NVIDIA's proprietary library and is never downloaded here.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONIOENCODING: utf-8
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14" # Zstandard ZIP entries need 3.14
+
+      - name: Rust
+        run: rustup update stable --no-self-update && rustup default stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+
+      # 7-Zip 24 or later: older ones (Ubuntu's 23.01) cannot read Zstandard ZIP entries
+      - name: 7-Zip (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o 7z.tar.xz https://github.com/ip7z/7zip/releases/download/25.01/7z2501-linux-x64.tar.xz
+          echo "4ca3b7c6f2f67866b92622818b58233dc70367be2f36b498eb0bdeaaa44b53f4  7z.tar.xz" | sha256sum -c
+          sudo tar -xJf 7z.tar.xz -C /usr/local/bin 7zz
+          rm 7z.tar.xz
+      - name: 7-Zip (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sevenzip
+
+      - name: Build gzrescue (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          sh gpuinflate/build.sh rescue
+          sh research/recovery/build.sh
+      - name: Build gzrescue (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: gpuinflate\build.cmd rescue
+
+      - name: cargo build
+        working-directory: rust
+        run: cargo build --release
+      - name: cargo test
+        working-directory: rust
+        run: cargo test --release
+
+      - name: gpuzip doctor
+        run: |
+          cp gpuinflate/*gzrescue.* rust/target/release/
+          rust/target/release/gpuzip doctor || true # exits 1 without a GPU
+
+      - name: Tests, Rust version
+        env:
+          GPUZIP_BIN: rust/target/release/gpuzip${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: python tests/test_gpuzip.py
+      - name: Tests, Python version
+        run: python tests/test_gpuzip.py
+
+  gpuinflate-linux:
+    name: gpuinflate builds on Linux (nvcc)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: CUDA compiler
+        run: |
+          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends cuda-nvcc-13-3 cuda-cudart-dev-13-3
+      - name: Build libgpuinflate.so and gi_test, for every GPU from Turing on
+        run: NVCC=/usr/local/cuda-13.3/bin/nvcc sh gpuinflate/build.sh release
+      - name: Exported functions
+        run: nm -D --defined-only gpuinflate/libgpuinflate.so | grep ' gi_'

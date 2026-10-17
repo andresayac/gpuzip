@@ -3,12 +3,17 @@ the files they were made from, in every mode.
 
   python tests\\test_gpuzip.py                                                (the Python version)
   set GPUZIP_BIN=rust\\target\\release\\gpuzip.exe & python tests\\test_gpuzip.py   (the Rust build)
+  GPUZIP_BIN=rust/target/release/gpuzip python3 tests/test_gpuzip.py            (Linux, macOS)
 
 Builds a source folder (text, binary, empty files, empty folders, non-ASCII names), packs it
-with 7-Zip, Python's zipfile and Windows PowerShell, then extracts each archive with gpuzip in
-cpu, gpu and auto mode and compares every file's bytes and modification time with the source.
-gzip files (one member, several, from 7-Zip, a tar.gz) are checked the same way, and a damaged
-one must fail in every mode.
+with 7-Zip, Python's zipfile and the system's own tool (PowerShell on Windows, Info-ZIP's zip
+elsewhere), then extracts each archive with gpuzip in cpu, gpu and auto mode and compares every
+file's bytes and modification time with the source. gzip files (one member, several, from
+7-Zip, a tar.gz) are checked the same way, and a damaged one must fail in every mode.
+
+Without a GPU that gpuzip can use (`gpuzip doctor` makes no test decode) the gpu modes are
+skipped: they would only repeat the CPU fallback. GPUZIP_TEST_GPU=1 or 0 overrides the check.
+Archives that need 7-Zip are skipped when it is not installed (7zz, 7z or 7za on PATH).
 """
 
 import gzip
@@ -26,8 +31,18 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 GPUZIP = [os.path.abspath(os.environ["GPUZIP_BIN"])] if os.environ.get("GPUZIP_BIN") else \
     [sys.executable, os.path.join(HERE, "..", "python", "gpuzip.py")]
-SEVENZIP = r"C:\Program Files\7-Zip\7z.exe"
+SEVENZIP = next((p for p in (shutil.which("7zz"), shutil.which("7z"), shutil.which("7za"), r"C:\Program Files\7-Zip\7z.exe")
+                 if p and os.path.isfile(p)), None)
 PASSWORD = "correct horse"
+SKIPPED = []  # what this machine cannot test, said once at the start
+
+
+def has_gpu():
+    """Whether gpuzip finds a GPU it can decode on: its doctor's test decode"""
+    if os.environ.get("GPUZIP_TEST_GPU") in ("0", "1"):
+        return os.environ["GPUZIP_TEST_GPU"] == "1"
+    r = subprocess.run([*GPUZIP, "doctor"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return "test decode ok" in r.stdout
 
 
 def make_source(root):
@@ -97,15 +112,20 @@ def sevenzip(*args, cwd=None):
 
 def build_archives(src, work):
     a = {}
-    for level in (1, 5, 9):
-        a[f"7-Zip deflate -mx{level}"] = p = os.path.join(work, f"7z_mx{level}.zip")
-        sevenzip("a", "-tzip", f"-mx={level}", p, ".", cwd=src)
-    a["7-Zip Deflate64 (7-Zip fallback)"] = p = os.path.join(work, "7z_deflate64.zip")
-    sevenzip("a", "-tzip", "-mm=Deflate64", p, ".", cwd=src)
-    a["7-Zip ZipCrypto password (7-Zip fallback)"] = p = os.path.join(work, "7z_crypto.zip")
-    sevenzip("a", "-tzip", f"-p{PASSWORD}", p, ".", cwd=src)
+    if SEVENZIP:
+        for level in (1, 5, 9):
+            a[f"7-Zip deflate -mx{level}"] = p = os.path.join(work, f"7z_mx{level}.zip")
+            sevenzip("a", "-tzip", f"-mx={level}", p, ".", cwd=src)
+        a["7-Zip Deflate64 (7-Zip fallback)"] = p = os.path.join(work, "7z_deflate64.zip")
+        sevenzip("a", "-tzip", "-mm=Deflate64", p, ".", cwd=src)
+        a["7-Zip ZipCrypto password (7-Zip fallback)"] = p = os.path.join(work, "7z_crypto.zip")
+        sevenzip("a", "-tzip", f"-p{PASSWORD}", p, ".", cwd=src)
+    else:
+        SKIPPED.append("archives made by 7-Zip, and the ones only 7-Zip extracts: 7-Zip not found")
 
-    methods = [zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA, zipfile.ZIP_ZSTANDARD]
+    methods = [zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA]
+    if hasattr(zipfile, "ZIP_ZSTANDARD"):  # Python 3.14+
+        methods.append(zipfile.ZIP_ZSTANDARD)
     for name, level, mixed in (("Python zipfile level 1", 1, False), ("Python zipfile level 9", 9, False),
                                ("Python zipfile mixed methods", 6, True)):
         a[name] = p = os.path.join(work, name.replace(" ", "_") + ".zip")
@@ -120,12 +140,19 @@ def build_archives(src, work):
                             compress_type=methods[i % len(methods)] if mixed else None)
                     i += 1
 
-    a["Windows PowerShell Compress-Archive"] = p = os.path.join(work, "powershell.zip")
-    subprocess.run(["powershell", "-NoProfile", "-Command",
-                    f"Compress-Archive -Path '{src}\\*' -DestinationPath '{p}' -CompressionLevel Optimal"], check=True)
+    if os.name == "nt":
+        a["Windows PowerShell Compress-Archive"] = p = os.path.join(work, "powershell.zip")
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        f"Compress-Archive -Path '{src}\\*' -DestinationPath '{p}' -CompressionLevel Optimal"], check=True)
+    elif shutil.which("zip"):
+        a["Info-ZIP zip -r"] = p = os.path.join(work, "infozip.zip")
+        subprocess.run(["zip", "-r", "-q", p, "."], cwd=src, check=True)
+    else:
+        SKIPPED.append("a ZIP made by the system's own tool: Info-ZIP's zip not found")
 
-    a["7z archive (whole file to 7-Zip)"] = p = os.path.join(work, "archive.7z")
-    sevenzip("a", "-t7z", p, ".", cwd=src)
+    if SEVENZIP:
+        a["7z archive (whole file to 7-Zip)"] = p = os.path.join(work, "archive.7z")
+        sevenzip("a", "-t7z", p, ".", cwd=src)
     a["tar.gz (Python tarfile)"] = p = os.path.join(work, "archive.tar.gz")
     with tarfile.open(p, "w:gz") as t:
         for entry in sorted(os.listdir(src)):
@@ -149,13 +176,14 @@ def build_gzips(src, work):
         for part in logs:
             f.write(gzip.compress(part, 9))
     g["gzip, three members"] = (p, {"three.txt": (digest(b"".join(logs)), 0)})
-    raw = os.path.join(work, "seven.txt")
-    with open(raw, "wb") as f:
-        f.write(one)
-    p = os.path.join(work, "seven.txt.gz")
-    sevenzip("a", "-tgzip", "-mx=7", p, raw)
-    os.remove(raw)
-    g["gzip by 7-Zip -mx7"] = (p, {"seven.txt": (digest(one), 0)})
+    if SEVENZIP:
+        raw = os.path.join(work, "seven.txt")
+        with open(raw, "wb") as f:
+            f.write(one)
+        p = os.path.join(work, "seven.txt.gz")
+        sevenzip("a", "-tgzip", "-mx=7", p, raw)
+        os.remove(raw)
+        g["gzip by 7-Zip -mx7"] = (p, {"seven.txt": (digest(one), 0)})
     return g
 
 def run_gpuzip(*args):
@@ -175,14 +203,21 @@ def main():
     archives = build_archives(src, work)
     gzips = build_gzips(src, work)
     failures = 0
+    gpu = has_gpu()
+    modes = ("cpu", "gpu", "gpu-batches", "auto") if gpu else ("cpu", "auto")
+    if not gpu:
+        SKIPPED.append("gpu modes: no GPU that gpuzip can use (auto mode still runs, on the CPU)")
     print(f"testing: {' '.join(GPUZIP)}")
-    print(f"source: {len(expected)} files and empty folders\n")
+    print(f"source: {len(expected)} files and empty folders")
+    for why in SKIPPED:
+        print(f"skip  {why}")
+    print()
     cases = [(label, path, expected) for label, path in archives.items()]
     cases += [(label, path, exp) for label, (path, exp) in gzips.items()]
     for label, path, exp in cases:
         # .NET Framework stores times its own way; a plain .gz output takes the .gz file's time
         check_times = "PowerShell" not in label and not path.endswith(".txt.gz")
-        for mode in ("cpu", "gpu", "gpu-batches", "auto"):
+        for mode in modes:
             out = os.path.join(work, "out")
             shutil.rmtree(out, ignore_errors=True)
             extra = ["--password", PASSWORD] if "password" in label else []
@@ -209,7 +244,7 @@ def main():
     data[len(data) // 2] ^= 0x55
     bad = os.path.join(work, "damaged.txt.gz")
     open(bad, "wb").write(bytes(data))
-    for mode in ("cpu", "gpu", "auto"):
+    for mode in [m for m in modes if m != "gpu-batches"]:
         rc, rep = run_gpuzip("t", bad, "--mode", mode, "-q")
         ok = rc == 2 and rep.get("failed")
         failures += not ok
