@@ -112,6 +112,18 @@ jobs:
           esac
           cp README.md CHANGELOG.md "$PKG/"
           cp LICENSE-MIT LICENSE-APACHE "$PKG/"
+          # the README's links and images point into the repository: make them absolute so they
+          # still work from the package
+          cat > abs_links.py <<'EOF'
+          import re, sys
+          path, repo, ref = sys.argv[1:4]
+          blob, raw = f"https://github.com/{repo}/blob/{ref}/", f"https://raw.githubusercontent.com/{repo}/{ref}/"
+          text = open(path, encoding="utf-8").read()
+          text = re.sub(r'((?:src|srcset)=")(?!https?:)', lambda m: m.group(1) + raw, text)
+          text = re.sub(r'\]\((?!https?:|#)', "](" + blob, text)
+          open(path, "w", encoding="utf-8", newline="\n").write(text)
+          EOF
+          python3 abs_links.py "$PKG/README.md" "$GITHUB_REPOSITORY" "$GITHUB_SHA" 2>/dev/null || python abs_links.py "$PKG/README.md" "$GITHUB_REPOSITORY" "$GITHUB_SHA"
           cat > "$PKG/GPU.md" <<'EOF'
           # The GPU paths
 
