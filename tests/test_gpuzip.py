@@ -1,9 +1,8 @@
 """Correctness tests for gpuzip: archives made by different tools must extract to exactly
 the files they were made from, in every mode.
 
-  python tests\\test_gpuzip.py                                                (the Python version)
-  set GPUZIP_BIN=rust\\target\\release\\gpuzip.exe & python tests\\test_gpuzip.py   (the Rust build)
-  GPUZIP_BIN=rust/target/release/gpuzip python3 tests/test_gpuzip.py            (Linux, macOS)
+  python tests\\test_gpuzip.py                     (the build in rust\\target\\release)
+  GPUZIP_BIN=path/to/gpuzip python3 tests/test_gpuzip.py   (another build)
 
 Builds a source folder (text, binary, empty files, empty folders, non-ASCII names), packs it
 with 7-Zip, Python's zipfile and the system's own tool (PowerShell on Windows, Info-ZIP's zip
@@ -32,8 +31,8 @@ import zipfile
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GPUZIP = [os.path.abspath(os.environ["GPUZIP_BIN"])] if os.environ.get("GPUZIP_BIN") else \
-    [sys.executable, os.path.join(HERE, "..", "python", "gpuzip.py")]
+GPUZIP = [os.path.abspath(os.environ.get("GPUZIP_BIN") or
+                          os.path.join(HERE, "..", "rust", "target", "release", "gpuzip.exe" if os.name == "nt" else "gpuzip"))]
 SEVENZIP = next((p for p in (shutil.which("7zz"), shutil.which("7z"), shutil.which("7za"), r"C:\Program Files\7-Zip\7z.exe")
                  if p and os.path.isfile(p)), None)
 PASSWORD = "correct horse"
@@ -256,7 +255,7 @@ def main():
     expected = tree(src)
     archives = build_archives(src, work)
     gzips = build_gzips(src, work)
-    habits = habit_archives(work) if os.environ.get("GPUZIP_BIN") else {}
+    habits = habit_archives(work)
     failures = 0
     gpu = has_gpu()
     modes = ("cpu", "gpu", "gpu-batches", "auto") if gpu else ("cpu", "auto")
@@ -296,7 +295,7 @@ def main():
     # a large stream that hardly compresses fills every segment's input (64 MB), so segments start
     # at unaligned bytes: the GPU decoder once ran past its input buffer there and every such file
     # fell back to the CPU. It must decode on the GPU, every byte right (Rust, with a GPU).
-    if gpu and os.environ.get("GPUZIP_BIN"):
+    if gpu:
         rnd = random.Random(5)
         words = b" ".join(rnd.choice([b"block", b"stream", b"segment", b"header"]) for _ in range(300))[:1024]
         raw = b"".join(rnd.randbytes(3072) + words for _ in range(60000))  # 246 MB, compresses to about 0.8
@@ -323,90 +322,87 @@ def main():
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} damaged gzip refused{'':<26} {mode:<5} {(rep.get('failed') or [{}])[0].get('reason', rep)}")
 
-    # rescue (Rust only): a .tar.gz with a zeroed stretch must give back nearly every file, the
+    # rescue: a .tar.gz with a zeroed stretch must give back nearly every file, the
     # damage must be reported, and no file the report calls intact may differ from the source.
     # Two stretches in the random blobs (stored blocks) both decode in step: the CRC fails and
     # cannot say where, so blaming the block with the first one would vouch for the other
-    if os.environ.get("GPUZIP_BIN"):
-        src_tgz = archives["tar.gz (Python tarfile)"]
-        files = {k: v for k, v in expected.items() if v[0] != "dir"}
-        for where in ((0.4,), (0.85,), (0.25, 0.4)):  # the random blobs, then text, then two in the blobs
-            data = bytearray(open(src_tgz, "rb").read())
-            for w in where:
-                p = int(len(data) * w)
-                data[p:p + 2048] = bytes(2048)
-            label = " and ".join(f"{int(w * 100)}%" for w in where)
-            bad = os.path.join(work, f"damaged{int(where[0] * 100)}.tar.gz")
-            open(bad, "wb").write(bytes(data))
-            out = os.path.join(work, f"rescued{int(where[0] * 100)}")
-            shutil.rmtree(out, ignore_errors=True)
-            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
-            try:
-                rep = json.loads(r.stdout.strip().splitlines()[-1])
-            except (json.JSONDecodeError, IndexError):
-                rep = {}
-            got = tree(out)
-            identical = sum(1 for k, v in files.items() if k in got and got[k][0] == v[0])
-            t = rep.get("tar") or {}
-            intact, unverified = t.get("intact", -1), t.get("unverified", 0)
-            # the test's text repeats a small vocabulary, so a damaged block taints what copies from
-            # it for a long way: many files come back partial, and that is the honest answer
-            reported = rep.get("damaged_blocks", 0) >= 1 or rep.get("crc_check") == 0
-            # files called intact: every file not listed otherwise, unless all are unverifiable
-            flagged = set(t.get("inferred", [])) | set(t.get("suspect", [])) | set(t.get("partial", []))
-            intact_wrong = [] if unverified else [k for k, v in files.items() if k in got and got[k][0] != v[0] and k not in flagged]
-            ok = r.returncode == 2 and reported and identical >= 0.5 * len(files) and identical >= intact and not intact_wrong
-            failures += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} rescue of a tar.gz zeroed at {label}: {identical} of {len(files)} files identical, "
-                  f"{intact} called intact, {unverified} unverifiable, {len(t.get('partial', []))} partial, "
-                  f"{rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}"
-                  + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
+    src_tgz = archives["tar.gz (Python tarfile)"]
+    files = {k: v for k, v in expected.items() if v[0] != "dir"}
+    for where in ((0.4,), (0.85,), (0.25, 0.4)):  # the random blobs, then text, then two in the blobs
+        data = bytearray(open(src_tgz, "rb").read())
+        for w in where:
+            p = int(len(data) * w)
+            data[p:p + 2048] = bytes(2048)
+        label = " and ".join(f"{int(w * 100)}%" for w in where)
+        bad = os.path.join(work, f"damaged{int(where[0] * 100)}.tar.gz")
+        open(bad, "wb").write(bytes(data))
+        out = os.path.join(work, f"rescued{int(where[0] * 100)}")
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        got = tree(out)
+        identical = sum(1 for k, v in files.items() if k in got and got[k][0] == v[0])
+        t = rep.get("tar") or {}
+        intact, unverified = t.get("intact", -1), t.get("unverified", 0)
+        # the test's text repeats a small vocabulary, so a damaged block taints what copies from
+        # it for a long way: many files come back partial, and that is the honest answer
+        reported = rep.get("damaged_blocks", 0) >= 1 or rep.get("crc_check") == 0
+        # files called intact: every file not listed otherwise, unless all are unverifiable
+        flagged = set(t.get("inferred", [])) | set(t.get("suspect", [])) | set(t.get("partial", []))
+        intact_wrong = [] if unverified else [k for k, v in files.items() if k in got and got[k][0] != v[0] and k not in flagged]
+        ok = r.returncode == 2 and reported and identical >= 0.5 * len(files) and identical >= intact and not intact_wrong
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of a tar.gz zeroed at {label}: {identical} of {len(files)} files identical, "
+              f"{intact} called intact, {unverified} unverifiable, {len(t.get('partial', []))} partial, "
+              f"{rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}"
+              + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
 
     # The rescue holds the first part of the output in memory and decodes the rest again to write
     # it out (GR_HOLD: how many bytes it holds). Holding none of it, or 64 KB, must give the same
     # files and the same report, inferred bytes and their model included.
-    if os.environ.get("GPUZIP_BIN"):
-        bad = os.path.join(work, "damaged85.tar.gz")
-        runs = {}
-        for hold in (None, "0", "65536"):
-            out = os.path.join(work, f"rescued_hold{hold}")
-            shutil.rmtree(out, ignore_errors=True)
-            env = dict(os.environ)
-            if hold is not None:
-                env["GR_HOLD"] = hold
-            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8", env=env)
-            try:
-                rep = json.loads(r.stdout.strip().splitlines()[-1])
-            except (json.JSONDecodeError, IndexError):
-                rep = {}
-            rep.pop("seconds", None)
-            runs[hold] = (r.returncode, rep, tree(out))
-        for hold in ("0", "65536"):
-            ok = runs[hold] == runs[None] and runs[None][1].get("damaged_blocks", 0) >= 1
-            failures += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} rescue holding {hold} bytes of the output: the same files and report as holding it all")
+    bad = os.path.join(work, "damaged85.tar.gz")
+    runs = {}
+    for hold in (None, "0", "65536"):
+        out = os.path.join(work, f"rescued_hold{hold}")
+        shutil.rmtree(out, ignore_errors=True)
+        env = dict(os.environ)
+        if hold is not None:
+            env["GR_HOLD"] = hold
+        r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8", env=env)
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        rep.pop("seconds", None)
+        runs[hold] = (r.returncode, rep, tree(out))
+    for hold in ("0", "65536"):
+        ok = runs[hold] == runs[None] and runs[None][1].get("damaged_blocks", 0) >= 1
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue holding {hold} bytes of the output: the same files and report as holding it all")
 
     # A decompression bomb: the rescue stops at --max-output, says so and leaves no file; with no
     # limit it gives back every byte
-    if os.environ.get("GPUZIP_BIN"):
-        bomb = os.path.join(work, "zeros.gz")
-        with gzip.open(bomb, "wb", compresslevel=9) as g:
-            for _ in range(64):
-                g.write(bytes(1 << 20))
-        out = os.path.join(work, "rescued_bomb")
-        shutil.rmtree(out, ignore_errors=True)
-        r = subprocess.run([*GPUZIP, "rescue", bomb, "-o", out, "--max-output", "1M"], capture_output=True, text=True, encoding="utf-8")
-        left = os.listdir(out) if os.path.isdir(out) else []
-        ok = r.returncode == 1 and "--max-output" in r.stderr and not left
-        failures += not ok
-        print(f"{'ok  ' if ok else 'FAIL'} rescue of a gzip bomb stopped at --max-output 1M: exit {r.returncode}, {len(left)} files left")
-        r = subprocess.run([*GPUZIP, "rescue", bomb, "-o", out, "--max-output", "0", "--json"], capture_output=True, text=True, encoding="utf-8")
-        got = os.path.join(out, "zeros")
-        ok = r.returncode == 0 and os.path.isfile(got) and os.path.getsize(got) == 64 << 20
-        failures += not ok
-        print(f"{'ok  ' if ok else 'FAIL'} rescue of the same with --max-output 0: exit {r.returncode}, every byte back")
+    bomb = os.path.join(work, "zeros.gz")
+    with gzip.open(bomb, "wb", compresslevel=9) as g:
+        for _ in range(64):
+            g.write(bytes(1 << 20))
+    out = os.path.join(work, "rescued_bomb")
+    shutil.rmtree(out, ignore_errors=True)
+    r = subprocess.run([*GPUZIP, "rescue", bomb, "-o", out, "--max-output", "1M"], capture_output=True, text=True, encoding="utf-8")
+    left = os.listdir(out) if os.path.isdir(out) else []
+    ok = r.returncode == 1 and "--max-output" in r.stderr and not left
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} rescue of a gzip bomb stopped at --max-output 1M: exit {r.returncode}, {len(left)} files left")
+    r = subprocess.run([*GPUZIP, "rescue", bomb, "-o", out, "--max-output", "0", "--json"], capture_output=True, text=True, encoding="utf-8")
+    got = os.path.join(out, "zeros")
+    ok = r.returncode == 0 and os.path.isfile(got) and os.path.getsize(got) == 64 << 20
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} rescue of the same with --max-output 0: exit {r.returncode}, every byte back")
 
-    # rescue of tar.gz files whose blocks follow their encoder's habit (Rust only). Undamaged, each
+    # rescue of tar.gz files whose blocks follow their encoder's habit. Undamaged, each
     # must come back whole with no block flagged: a .gz inside one (its block headers lie in the
     # outer stream's stored blocks), pigz's short blocks at the end of its chunks, GNU gzip's at a
     # multiple of 4096 symbols. Damaged (zeros, flipped bits, every CR LF made LF, zeros inside
@@ -459,233 +455,131 @@ def main():
                   f"{intact} called intact, {unverified} unverifiable, {rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}"
                   + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
 
-    # rescue of gzip files of one Deflate block (Rust only): a small text, and repetitive data that
+    # rescue of gzip files of one Deflate block: a small text, and repetitive data that
     # packs megabytes into one block, with zeros written over the middle. Zeros decode as valid
     # codes: the decoder may fall back in step after them (only the CRC tells), or run on to the
     # end of the file. No byte called exact may differ from the original at its place, and the
     # bytes before the damage must be certified about as far as gzip decodes them right. Exact
     # bytes are told apart from unknown ones by rescuing with two fill bytes, from suspect ones by
     # the damaged list.
-    if os.environ.get("GPUZIP_BIN"):
-        rust_src = os.path.join(HERE, "..", "rust", "src")
-        names = ["ziprescue.rs"] + sorted(n for n in os.listdir(rust_src) if n.endswith(".rs") and n != "ziprescue.rs")
-        code = b"".join(open(os.path.join(rust_src, n), "rb").read() for n in names)
-        repeated = b"gpuzip release check " * 200000
-        cases = []
-        for n in (20000, 60000):
-            for zeros in (512, 64):
-                cases.append((f"{n // 1000} KB of code, {zeros} zero bytes", code[:n], 6, zeros))
-        for level in (6, 9):  # level 6: the decoder falls back in step; level 9: it runs to the end
-            cases.append((f"repetitive 4.2 MB (level {level}), 4096 zero bytes", repeated, level, 4096))
-        for label, plain, level, zeros in cases:
-            data = bytearray(gzip.compress(plain, level, mtime=0))
-            mid = len(data) // 2
-            data[mid:mid + zeros] = bytes(zeros)
-            bad = os.path.join(work, "single_block.gz")
-            open(bad, "wb").write(bytes(data))
+    rust_src = os.path.join(HERE, "..", "rust", "src")
+    names = ["ziprescue.rs"] + sorted(n for n in os.listdir(rust_src) if n.endswith(".rs") and n != "ziprescue.rs")
+    code = b"".join(open(os.path.join(rust_src, n), "rb").read() for n in names)
+    repeated = b"gpuzip release check " * 200000
+    cases = []
+    for n in (20000, 60000):
+        for zeros in (512, 64):
+            cases.append((f"{n // 1000} KB of code, {zeros} zero bytes", code[:n], 6, zeros))
+    for level in (6, 9):  # level 6: the decoder falls back in step; level 9: it runs to the end
+        cases.append((f"repetitive 4.2 MB (level {level}), 4096 zero bytes", repeated, level, 4096))
+    for label, plain, level, zeros in cases:
+        data = bytearray(gzip.compress(plain, level, mtime=0))
+        mid = len(data) // 2
+        data[mid:mid + zeros] = bytes(zeros)
+        bad = os.path.join(work, "single_block.gz")
+        open(bad, "wb").write(bytes(data))
+        d = zlib.decompressobj(31)
+        try:
+            got = d.decompress(bytes(data))
+        except zlib.error:
+            got = bytearray()
             d = zlib.decompressobj(31)
-            try:
-                got = d.decompress(bytes(data))
-            except zlib.error:
-                got = bytearray()
-                d = zlib.decompressobj(31)
-                for i in range(0, len(data), 64):  # what gzip gives before it stops
-                    try:
-                        got += d.decompress(bytes(data[i:i + 64]))
-                    except zlib.error:
-                        break
-            gzip_right = next((i for i in range(min(len(got), len(plain))) if got[i] != plain[i]), min(len(got), len(plain)))
-            runs = []
-            for fill in (0, 255):
-                out = os.path.join(work, f"rescued_single{fill}")
-                shutil.rmtree(out, ignore_errors=True)
-                r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--fill", str(fill), "--json"], capture_output=True, text=True, encoding="utf-8")
+            for i in range(0, len(data), 64):  # what gzip gives before it stops
                 try:
-                    rep = json.loads(r.stdout.strip().splitlines()[-1])
-                    runs.append((open(rep["output"], "rb").read(), rep, r.returncode))
-                except (json.JSONDecodeError, IndexError, KeyError, TypeError, OSError):
-                    runs.append((b"", {}, r.returncode))
-            (a, rep, rc), (b, _, _) = runs
-            flagged = bytearray(len(a))
-            for dmg in rep.get("damaged", []):
-                s = dmg["output_offset"]
-                e = min(len(flagged), s + dmg["length"])
-                flagged[s:e] = b"\1" * max(0, e - s)
-            exact = [i for i in range(min(len(a), len(b))) if not flagged[i] and a[i] == b[i]]
-            wrong = sum(1 for i in exact if i >= len(plain) or a[i] != plain[i])
-            certified = next((k for k, i in enumerate(exact) if i != k or a[i] != plain[i]), len(exact))
-            ok = (rc == 2 and a and wrong == 0 and rep.get("damaged_blocks", 0) >= 1 and rep.get("inferred_bytes") == 0
-                  and rep.get("exact_bytes") == len(exact) and certified >= 0.95 * gzip_right)
-            failures += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} rescue of one block, {label}: {certified:,} bytes certified before the damage "
-                  f"(gzip decodes {gzip_right:,} right), {len(exact):,} called exact, {wrong:,} of them wrong, "
-                  f"{rep.get('damaged_blocks', '?')} damaged block, exit {rc}")
+                    got += d.decompress(bytes(data[i:i + 64]))
+                except zlib.error:
+                    break
+        gzip_right = next((i for i in range(min(len(got), len(plain))) if got[i] != plain[i]), min(len(got), len(plain)))
+        runs = []
+        for fill in (0, 255):
+            out = os.path.join(work, f"rescued_single{fill}")
+            shutil.rmtree(out, ignore_errors=True)
+            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--fill", str(fill), "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+                runs.append((open(rep["output"], "rb").read(), rep, r.returncode))
+            except (json.JSONDecodeError, IndexError, KeyError, TypeError, OSError):
+                runs.append((b"", {}, r.returncode))
+        (a, rep, rc), (b, _, _) = runs
+        flagged = bytearray(len(a))
+        for dmg in rep.get("damaged", []):
+            s = dmg["output_offset"]
+            e = min(len(flagged), s + dmg["length"])
+            flagged[s:e] = b"\1" * max(0, e - s)
+        exact = [i for i in range(min(len(a), len(b))) if not flagged[i] and a[i] == b[i]]
+        wrong = sum(1 for i in exact if i >= len(plain) or a[i] != plain[i])
+        certified = next((k for k, i in enumerate(exact) if i != k or a[i] != plain[i]), len(exact))
+        ok = (rc == 2 and a and wrong == 0 and rep.get("damaged_blocks", 0) >= 1 and rep.get("inferred_bytes") == 0
+              and rep.get("exact_bytes") == len(exact) and certified >= 0.95 * gzip_right)
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of one block, {label}: {certified:,} bytes certified before the damage "
+              f"(gzip decodes {gzip_right:,} right), {len(exact):,} called exact, {wrong:,} of them wrong, "
+              f"{rep.get('damaged_blocks', '?')} damaged block, exit {rc}")
 
-    # rescue of ZIPs (Rust only): without its central directory (cut, or zeroed), and with a zeroed
+    # rescue of ZIPs: without its central directory (cut, or zeroed), and with a zeroed
     # stretch inside; every entry called intact must be identical, the damage reported
-    if os.environ.get("GPUZIP_BIN"):
-        src_zip = archives["Python zipfile level 9"]
-        data = open(src_zip, "rb").read()
-        files = {k: v for k, v in expected.items() if v[0] != "dir"}
-        cut = int(len(data) * 0.7)
-        with zipfile.ZipFile(src_zip) as z:  # entries whole before the cut: what a cut file can give back
-            before_cut = sum(1 for i in z.infolist() if not i.is_dir()
-                             and i.header_offset + 30 + len(i.filename.encode()) + len(i.extra) + i.compress_size <= cut)
-        cases = {
-            "cut at 70%": (data[:cut], before_cut),
-            "directory zeroed": (data[: int(len(data) * 0.97)] + bytes(len(data) - int(len(data) * 0.97)), int(0.6 * len(files))),
-            "4 KB zeroed inside": (data[: len(data) // 2] + bytes(4096) + data[len(data) // 2 + 4096:], int(0.6 * len(files))),
-        }
-        for label, (damaged, expect_intact) in cases.items():
-            bad = os.path.join(work, "damaged.zip")
-            open(bad, "wb").write(damaged)
-            out = os.path.join(work, "rescued_zip")
-            shutil.rmtree(out, ignore_errors=True)
-            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
-            try:
-                rep = json.loads(r.stdout.strip().splitlines()[-1])
-            except (json.JSONDecodeError, IndexError):
-                rep = {}
-            got = tree(out)
-            status = {e["name"]: e["status"] for e in rep.get("entries", [])}
-            identical = sum(1 for k, v in files.items() if k in got and got[k][0] == v[0])
-            intact_wrong = [k for k, v in files.items() if status.get(k) == "intact" and not (k in got and got[k][0] == v[0])]
-            counts = rep.get("counts", {})
-            ok = r.returncode == 2 and not intact_wrong and identical >= expect_intact and counts.get("intact", 0) >= expect_intact
-            failures += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} rescue of a zip, {label}: {identical} of {len(files)} identical, "
-                  f"{counts.get('intact', '?')} intact, {counts.get('partial', '?')} partial, {counts.get('unverified', '?')} unverified, "
-                  f"directory {'read' if rep.get('directory_ok') else 'lost'}, exit {r.returncode}"
-                  + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
-
-        # an entry whose local header is destroyed, with the 28-byte extra field Info-ZIP writes:
-        # its data is looked for at several places after where the header was, and the one where
-        # the stream begins, or else whose data ends where the next header begins, must win; from
-        # the wrong one the output is cut short and out of place
-        rnd = random.Random(5)
-        words = ["".join(rnd.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rnd.randint(2, 9))) for _ in range(3000)]
-        texts = {f"w{k}.txt": " ".join(rnd.choice(words) for _ in range(150000)).encode() for k in range(3)}
-        extra = struct.pack("<HHB2I", 0x5455, 9, 3, 1700000000, 1700000000) + struct.pack("<HHBBIBI", 0x7875, 11, 1, 4, 1000, 4, 1000)
-        z_path = os.path.join(work, "infozip.zip")
-        with zipfile.ZipFile(z_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for n, t in texts.items():
-                zi = zipfile.ZipInfo(n, (2024, 1, 1, 0, 0, 0))
-                zi.compress_type, zi.extra = zipfile.ZIP_DEFLATED, extra
-                z.writestr(zi, t)
-        raw = open(z_path, "rb").read()
-        with zipfile.ZipFile(z_path) as z:
-            info = z.getinfo("w1.txt")
-        h, d0 = info.header_offset, info.header_offset + 30 + len(info.filename) + len(extra)
-        mid = d0 + info.compress_size // 2
-        cases = {
-            "its header zeroed and 4 KB inside its data": raw[:h] + bytes(30) + raw[h + 30:mid] + bytes(4096) + raw[mid + 4096:],
-            "zeros over its header and the start of its data": raw[:h] + bytes(d0 + 3000 - h) + raw[d0 + 3000:],
-            "other data over its header and the start of its data": raw[:h] + random.Random(1).randbytes(d0 + 3000 - h) + raw[d0 + 3000:],
-        }
-        for label, damaged in cases.items():
-            bad = os.path.join(work, "damaged_infozip.zip")
-            open(bad, "wb").write(damaged)
-            out = os.path.join(work, "rescued_infozip")
-            shutil.rmtree(out, ignore_errors=True)
-            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
-            try:
-                rep = json.loads(r.stdout.strip().splitlines()[-1])
-            except (json.JSONDecodeError, IndexError):
-                rep = {}
-            status = {e["name"]: e["status"] for e in rep.get("entries", [])}
-            p = os.path.join(out, "w1.txt")
-            got = open(p, "rb").read() if os.path.exists(p) else b""
-            orig = texts["w1.txt"]
-            in_place = sum(1 for a, b in zip(got, orig) if a == b)
-            others = all(status.get(n) == "intact" and open(os.path.join(out, n), "rb").read() == texts[n] for n in ("w0.txt", "w2.txt"))
-            ok = status.get("w1.txt") == "partial" and len(got) == len(orig) and in_place >= 0.9 * len(orig) and others
-            failures += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} rescue of an Info-ZIP entry with {label}: {in_place:,} of {len(orig):,} bytes "
-                  f"right in place, {status.get('w1.txt')}, the other entries intact {others}, exit {r.returncode}")
-
-        # a docx (a ZIP of XML parts) with zeros inside its document: the text comes back, the
-        # repaired part is well-formed XML, and the rebuilt document opens
-        import xml.etree.ElementTree as ET
-        paragraphs = [f"Paragraph {i} of the test document, with some words to find again." for i in range(200)]
-        body = "".join(f'<w:p><w:r><w:t xml:space="preserve">{p}</w:t></w:r></w:p>' for p in paragraphs)
-        docx = os.path.join(work, "doc.docx")
-        with zipfile.ZipFile(docx, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-                       '<Default Extension="xml" ContentType="application/xml"/></Types>')
-            z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
-            z.writestr("word/document.xml", '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-                       f'<w:body>{body}</w:body></w:document>')
-        d = bytearray(open(docx, "rb").read())
-        with zipfile.ZipFile(docx) as z:
-            info = z.getinfo("word/document.xml")
-            start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
-            d[start + info.compress_size // 2:start + info.compress_size // 2 + 256] = bytes(256)
-        bad = os.path.join(work, "damaged.docx")
-        open(bad, "wb").write(bytes(d))
-        out = os.path.join(work, "rescued_docx")
+    src_zip = archives["Python zipfile level 9"]
+    data = open(src_zip, "rb").read()
+    files = {k: v for k, v in expected.items() if v[0] != "dir"}
+    cut = int(len(data) * 0.7)
+    with zipfile.ZipFile(src_zip) as z:  # entries whole before the cut: what a cut file can give back
+        before_cut = sum(1 for i in z.infolist() if not i.is_dir()
+                         and i.header_offset + 30 + len(i.filename.encode()) + len(i.extra) + i.compress_size <= cut)
+    cases = {
+        "cut at 70%": (data[:cut], before_cut),
+        "directory zeroed": (data[: int(len(data) * 0.97)] + bytes(len(data) - int(len(data) * 0.97)), int(0.6 * len(files))),
+        "4 KB zeroed inside": (data[: len(data) // 2] + bytes(4096) + data[len(data) // 2 + 4096:], int(0.6 * len(files))),
+    }
+    for label, (damaged, expect_intact) in cases.items():
+        bad = os.path.join(work, "damaged.zip")
+        open(bad, "wb").write(damaged)
+        out = os.path.join(work, "rescued_zip")
+        shutil.rmtree(out, ignore_errors=True)
         r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
         try:
             rep = json.loads(r.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError):
             rep = {}
-        office = rep.get("office") or {}
-        text = open(office["text_file"], encoding="utf-8").read() if office.get("text_file") else ""
-        found = sum(1 for p in paragraphs if p in text)
-        well_formed = rebuilt_ok = False
-        try:
-            ET.parse(os.path.join(out, "word", "document.xml"))
-            well_formed = True
-            with zipfile.ZipFile(office["rebuilt"]) as z:
-                ET.fromstring(z.read("word/document.xml"))
-                rebuilt_ok = True
-        except Exception:  # noqa: BLE001
-            pass
-        ok = r.returncode == 2 and found >= 0.3 * len(paragraphs) and well_formed and rebuilt_ok
+        got = tree(out)
+        status = {e["name"]: e["status"] for e in rep.get("entries", [])}
+        identical = sum(1 for k, v in files.items() if k in got and got[k][0] == v[0])
+        intact_wrong = [k for k, v in files.items() if status.get(k) == "intact" and not (k in got and got[k][0] == v[0])]
+        counts = rep.get("counts", {})
+        ok = r.returncode == 2 and not intact_wrong and identical >= expect_intact and counts.get("intact", 0) >= expect_intact
         failures += not ok
-        print(f"{'ok  ' if ok else 'FAIL'} rescue of a docx with zeros in its document: {found} of {len(paragraphs)} paragraphs in the text, "
-              f"document.xml well-formed {well_formed}, rebuilt document opens {rebuilt_ok}, exit {r.returncode}")
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of a zip, {label}: {identical} of {len(files)} identical, "
+              f"{counts.get('intact', '?')} intact, {counts.get('partial', '?')} partial, {counts.get('unverified', '?')} unverified, "
+              f"directory {'read' if rep.get('directory_ok') else 'lost'}, exit {r.returncode}"
+              + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
 
-        # an ASCII-mode transfer (every LF made CR LF) is undone; but a sound ZIP of Windows text
-        # stored as is, where nearly every LF has its CR too, must be left alone
-        lines = "".join(f"line {i} of a Windows text file\r\n" for i in range(3000))
-        for label, convert in (("a sound ZIP of stored CR LF text", False), ("a ZIP sent through FTP in ASCII mode", True)):
-            z_path = os.path.join(work, "text.zip")
-            with zipfile.ZipFile(z_path, "w", zipfile.ZIP_STORED) as z:
-                for k in range(4):
-                    z.writestr(f"text{k}.txt", lines)
-            raw = open(z_path, "rb").read()
-            if convert:
-                raw = raw.replace(b"\n", b"\r\n")  # the sender makes every LF a line end, CR or not
-            bad = os.path.join(work, "text_case.zip")
-            open(bad, "wb").write(raw)
-            out = os.path.join(work, "rescued_text")
-            shutil.rmtree(out, ignore_errors=True)
-            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
-            try:
-                rep = json.loads(r.stdout.strip().splitlines()[-1])
-            except (json.JSONDecodeError, IndexError):
-                rep = {}
-            restored = all(os.path.exists(os.path.join(out, f"text{k}.txt"))
-                           and open(os.path.join(out, f"text{k}.txt"), "rb").read() == lines.encode() for k in range(4))
-            intact = rep.get("counts", {}).get("intact", 0)
-            ok = restored and intact == 4 and rep.get("ascii_transfer_undone") == convert
-            failures += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} rescue of {label}: {intact} of 4 entries intact, "
-                  f"ASCII transfer undone {rep.get('ascii_transfer_undone')}, exit {r.returncode}")
-
-        # the reverse transfer (every CR LF made LF) removed bytes from compressed entries: the CRs
-        # are put back where each entry's CRC says, and no entry called intact may differ
-        rnd = random.Random(7)
-        texts = {f"t{k}.txt": "".join(rnd.choice("abcdefghij klmnop,.\r\n") for _ in range(16000)).encode() for k in range(120)}
-        z_path = os.path.join(work, "deflated.zip")
-        with zipfile.ZipFile(z_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for n, t in texts.items():
-                z.writestr(n, t)
-        raw = open(z_path, "rb").read()
-        lost = raw.count(b"\r\n")
-        bad = os.path.join(work, "stripped.zip")
-        open(bad, "wb").write(raw.replace(b"\r\n", b"\n"))
-        out = os.path.join(work, "rescued_stripped")
+    # an entry whose local header is destroyed, with the 28-byte extra field Info-ZIP writes:
+    # its data is looked for at several places after where the header was, and the one where
+    # the stream begins, or else whose data ends where the next header begins, must win; from
+    # the wrong one the output is cut short and out of place
+    rnd = random.Random(5)
+    words = ["".join(rnd.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rnd.randint(2, 9))) for _ in range(3000)]
+    texts = {f"w{k}.txt": " ".join(rnd.choice(words) for _ in range(150000)).encode() for k in range(3)}
+    extra = struct.pack("<HHB2I", 0x5455, 9, 3, 1700000000, 1700000000) + struct.pack("<HHBBIBI", 0x7875, 11, 1, 4, 1000, 4, 1000)
+    z_path = os.path.join(work, "infozip.zip")
+    with zipfile.ZipFile(z_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, t in texts.items():
+            zi = zipfile.ZipInfo(n, (2024, 1, 1, 0, 0, 0))
+            zi.compress_type, zi.extra = zipfile.ZIP_DEFLATED, extra
+            z.writestr(zi, t)
+    raw = open(z_path, "rb").read()
+    with zipfile.ZipFile(z_path) as z:
+        info = z.getinfo("w1.txt")
+    h, d0 = info.header_offset, info.header_offset + 30 + len(info.filename) + len(extra)
+    mid = d0 + info.compress_size // 2
+    cases = {
+        "its header zeroed and 4 KB inside its data": raw[:h] + bytes(30) + raw[h + 30:mid] + bytes(4096) + raw[mid + 4096:],
+        "zeros over its header and the start of its data": raw[:h] + bytes(d0 + 3000 - h) + raw[d0 + 3000:],
+        "other data over its header and the start of its data": raw[:h] + random.Random(1).randbytes(d0 + 3000 - h) + raw[d0 + 3000:],
+    }
+    for label, damaged in cases.items():
+        bad = os.path.join(work, "damaged_infozip.zip")
+        open(bad, "wb").write(damaged)
+        out = os.path.join(work, "rescued_infozip")
         shutil.rmtree(out, ignore_errors=True)
         r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
         try:
@@ -693,13 +587,113 @@ def main():
         except (json.JSONDecodeError, IndexError):
             rep = {}
         status = {e["name"]: e["status"] for e in rep.get("entries", [])}
-        back = {n for n, t in texts.items() if os.path.exists(os.path.join(out, n)) and open(os.path.join(out, n), "rb").read() == t}
-        intact_wrong = [n for n in texts if status.get(n) == "intact" and n not in back]
-        ok = not intact_wrong and len(back) >= len(texts) - 2 and rep.get("crs_restored", 0) >= 1
+        p = os.path.join(out, "w1.txt")
+        got = open(p, "rb").read() if os.path.exists(p) else b""
+        orig = texts["w1.txt"]
+        in_place = sum(1 for a, b in zip(got, orig) if a == b)
+        others = all(status.get(n) == "intact" and open(os.path.join(out, n), "rb").read() == texts[n] for n in ("w0.txt", "w2.txt"))
+        ok = status.get("w1.txt") == "partial" and len(got) == len(orig) and in_place >= 0.9 * len(orig) and others
         failures += not ok
-        print(f"{'ok  ' if ok else 'FAIL'} rescue of a ZIP whose CR LF pairs became LF ({lost} lost): {len(back)} of {len(texts)} "
-              f"identical, {rep.get('crs_restored')} CRs put back, exit {r.returncode}"
-              + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of an Info-ZIP entry with {label}: {in_place:,} of {len(orig):,} bytes "
+              f"right in place, {status.get('w1.txt')}, the other entries intact {others}, exit {r.returncode}")
+
+    # a docx (a ZIP of XML parts) with zeros inside its document: the text comes back, the
+    # repaired part is well-formed XML, and the rebuilt document opens
+    import xml.etree.ElementTree as ET
+    paragraphs = [f"Paragraph {i} of the test document, with some words to find again." for i in range(200)]
+    body = "".join(f'<w:p><w:r><w:t xml:space="preserve">{p}</w:t></w:r></w:p>' for p in paragraphs)
+    docx = os.path.join(work, "doc.docx")
+    with zipfile.ZipFile(docx, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="xml" ContentType="application/xml"/></Types>')
+        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
+        z.writestr("word/document.xml", '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                   f'<w:body>{body}</w:body></w:document>')
+    d = bytearray(open(docx, "rb").read())
+    with zipfile.ZipFile(docx) as z:
+        info = z.getinfo("word/document.xml")
+        start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+        d[start + info.compress_size // 2:start + info.compress_size // 2 + 256] = bytes(256)
+    bad = os.path.join(work, "damaged.docx")
+    open(bad, "wb").write(bytes(d))
+    out = os.path.join(work, "rescued_docx")
+    r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+    try:
+        rep = json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        rep = {}
+    office = rep.get("office") or {}
+    text = open(office["text_file"], encoding="utf-8").read() if office.get("text_file") else ""
+    found = sum(1 for p in paragraphs if p in text)
+    well_formed = rebuilt_ok = False
+    try:
+        ET.parse(os.path.join(out, "word", "document.xml"))
+        well_formed = True
+        with zipfile.ZipFile(office["rebuilt"]) as z:
+            ET.fromstring(z.read("word/document.xml"))
+            rebuilt_ok = True
+    except Exception:  # noqa: BLE001
+        pass
+    ok = r.returncode == 2 and found >= 0.3 * len(paragraphs) and well_formed and rebuilt_ok
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} rescue of a docx with zeros in its document: {found} of {len(paragraphs)} paragraphs in the text, "
+          f"document.xml well-formed {well_formed}, rebuilt document opens {rebuilt_ok}, exit {r.returncode}")
+
+    # an ASCII-mode transfer (every LF made CR LF) is undone; but a sound ZIP of Windows text
+    # stored as is, where nearly every LF has its CR too, must be left alone
+    lines = "".join(f"line {i} of a Windows text file\r\n" for i in range(3000))
+    for label, convert in (("a sound ZIP of stored CR LF text", False), ("a ZIP sent through FTP in ASCII mode", True)):
+        z_path = os.path.join(work, "text.zip")
+        with zipfile.ZipFile(z_path, "w", zipfile.ZIP_STORED) as z:
+            for k in range(4):
+                z.writestr(f"text{k}.txt", lines)
+        raw = open(z_path, "rb").read()
+        if convert:
+            raw = raw.replace(b"\n", b"\r\n")  # the sender makes every LF a line end, CR or not
+        bad = os.path.join(work, "text_case.zip")
+        open(bad, "wb").write(raw)
+        out = os.path.join(work, "rescued_text")
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        restored = all(os.path.exists(os.path.join(out, f"text{k}.txt"))
+                       and open(os.path.join(out, f"text{k}.txt"), "rb").read() == lines.encode() for k in range(4))
+        intact = rep.get("counts", {}).get("intact", 0)
+        ok = restored and intact == 4 and rep.get("ascii_transfer_undone") == convert
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of {label}: {intact} of 4 entries intact, "
+              f"ASCII transfer undone {rep.get('ascii_transfer_undone')}, exit {r.returncode}")
+
+    # the reverse transfer (every CR LF made LF) removed bytes from compressed entries: the CRs
+    # are put back where each entry's CRC says, and no entry called intact may differ
+    rnd = random.Random(7)
+    texts = {f"t{k}.txt": "".join(rnd.choice("abcdefghij klmnop,.\r\n") for _ in range(16000)).encode() for k in range(120)}
+    z_path = os.path.join(work, "deflated.zip")
+    with zipfile.ZipFile(z_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, t in texts.items():
+            z.writestr(n, t)
+    raw = open(z_path, "rb").read()
+    lost = raw.count(b"\r\n")
+    bad = os.path.join(work, "stripped.zip")
+    open(bad, "wb").write(raw.replace(b"\r\n", b"\n"))
+    out = os.path.join(work, "rescued_stripped")
+    shutil.rmtree(out, ignore_errors=True)
+    r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+    try:
+        rep = json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        rep = {}
+    status = {e["name"]: e["status"] for e in rep.get("entries", [])}
+    back = {n for n, t in texts.items() if os.path.exists(os.path.join(out, n)) and open(os.path.join(out, n), "rb").read() == t}
+    intact_wrong = [n for n in texts if status.get(n) == "intact" and n not in back]
+    ok = not intact_wrong and len(back) >= len(texts) - 2 and rep.get("crs_restored", 0) >= 1
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} rescue of a ZIP whose CR LF pairs became LF ({lost} lost): {len(back)} of {len(texts)} "
+          f"identical, {rep.get('crs_restored')} CRs put back, exit {r.returncode}"
+          + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
 
     # zip slip: an entry that tries to write outside the output folder must be refused
     evil = os.path.join(work, "zipslip.zip")

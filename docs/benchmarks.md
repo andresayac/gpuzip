@@ -13,31 +13,31 @@ included). RTX 5080, Ryzen 7 9700X (8 cores / 16 threads), NVMe SSD, Windows 11 
 on, 7-Zip 24.09, nvCOMP 6.0. The Rust version's extracted files were identical to 7-Zip's on
 every dataset.
 
-| Dataset | Job | 7-Zip | Python CPU | Python GPU | Python auto | Rust CPU | Rust GPU | Rust auto |
-|---|---|---|---|---|---|---|---|---|
-| 40,000 small files, 1.1 GB | test | 4.34 s | 0.81 s | 1.64 s | 0.93 s | **0.26 s** | 0.57 s | **0.26 s** |
-| | extract | 25.54 s | **9.29 s** | - | 9.30 s | 18.80 s* | - | 19.36 s* |
-| 2,000 medium files, 1.4 GB | test | 5.02 s | 0.43 s | 1.96 s | 0.47 s | **0.26 s** | 2.36 s | **0.26 s** |
-| | extract | 7.12 s | **1.10 s** | - | 1.11 s | 1.48 s* | - | 1.58 s* |
-| 8 large files, 1.1 GB | test | 3.63 s | 0.44 s | 43.29 s | 0.43 s | **0.26 s** | 0.48 s | **0.26 s** |
-| | extract | 3.90 s | 0.64 s | - | 0.67 s | **0.48 s** | - | **0.48 s** |
-| Mixed, 10,304 files, 0.8 GB | test | 2.83 s | 0.43 s | 12.22 s | 0.52 s | 0.22 s | 0.85 s | **0.20 s** |
-| | extract | 9.59 s | **2.83 s** | - | 3.09 s | 5.41 s* | - | 5.29 s* |
+| Dataset | Job | 7-Zip | Rust CPU | Rust GPU | Rust auto |
+|---|---|---|---|---|---|
+| 40,000 small files, 1.1 GB | test | 4.34 s | **0.26 s** | 0.57 s | **0.26 s** |
+| | extract | 25.54 s | 18.80 s* | - | 19.36 s* |
+| 2,000 medium files, 1.4 GB | test | 5.02 s | **0.26 s** | 2.36 s | **0.26 s** |
+| | extract | 7.12 s | 1.48 s* | - | 1.58 s* |
+| 8 large files, 1.1 GB | test | 3.63 s | **0.26 s** | 0.48 s | **0.26 s** |
+| | extract | 3.90 s | **0.48 s** | - | **0.48 s** |
+| Mixed, 10,304 files, 0.8 GB | test | 2.83 s | 0.22 s | 0.85 s | **0.20 s** |
+| | extract | 9.59 s | 5.41 s* | - | 5.29 s* |
 
 \* Windows Defender inspects every file the Rust build writes, at about 0.35 ms a file, far more
 than it charges Python's signed interpreter. The same `gpuzip.exe` run from `%TEMP%` (which this
 machine's Defender apparently leaves alone) extracts much faster:
 
-| Extract | 7-Zip | Python CPU | Rust CPU, from the project folder | Rust CPU, from `%TEMP%` |
-|---|---|---|---|---|
-| 40,000 small files | 26.38 s | 9.44 s | 19.50 s | **6.08 s** |
-| 2,000 medium files | 7.25 s | 1.41 s | 1.81 s | **1.22 s** |
-| Mixed, 10,304 files | 8.79 s | 2.77 s | 4.82 s | **1.74 s** |
+| Extract | 7-Zip | Rust CPU, from the project folder | Rust CPU, from `%TEMP%` |
+|---|---|---|---|
+| 40,000 small files | 26.38 s | 19.50 s | **6.08 s** |
+| 2,000 medium files | 7.25 s | 1.81 s | **1.22 s** |
+| Mixed, 10,304 files | 8.79 s | 4.82 s | **1.74 s** |
 
 What this shows:
 
-- Decoding: Rust is 13-20x faster than 7-Zip and 1.7-3x faster than Python. 7-Zip decodes ZIP
-  at 0.2-0.3 GB/s here; Rust with libdeflate at up to 5.6 GB/s, process start included.
+- Decoding: gpuzip is 13-20x faster than 7-Zip. 7-Zip decodes ZIP
+  at 0.2-0.3 GB/s here; gpuzip with libdeflate at up to 5.6 GB/s, process start included.
 - Extracting many files is limited by creating them, and on Windows by how Defender treats
   the program. A code-signed release with some reputation should behave like the `%TEMP%` column.
 - With nvCOMP the GPU does not beat 16 CPU threads on these ZIP files. Once running it decodes
@@ -73,7 +73,7 @@ What this shows:
 
 - `--mode gpu` gives every entry of 1 MB or more to gpuinflate, one at a time, and the rest to
   nvCOMP: 0.48 s for the 8 files of 128 MB (nvCOMP alone gives a large entry to one GPU thread:
-  43 s in the Python version, which has no gpuinflate), but 2.36 s for 2,000 files of up to
+  43 s in 0.1's Python version, which had no gpuinflate), but 2.36 s for 2,000 files of up to
   2 MB. A ZIP with one 2.1 GB entry tests in 0.70 s with gpuinflate (`auto` picks it) and
   3.84 s on the CPU.
 

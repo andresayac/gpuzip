@@ -92,7 +92,7 @@ cp gpuinflate/libgzrescue.* rust/target/release/
 
 [7-Zip](https://www.7-zip.org) (24 or later) handles RAR, 7z, tar.xz and encrypted entries. The
 GPU paths need an NVIDIA driver and, for ZIP, NVIDIA's nvCOMP library; `gpuzip doctor` says what
-it found and where it looked. Everything else, the GPU decoder and the Python version:
+it found and where it looked. Everything else, and the GPU decoder:
 [docs/building.md](docs/building.md).
 
 ## Usage
@@ -146,9 +146,8 @@ block, knows a block went through damage when its decode does not land exactly o
 block, restarts after it, and marks every byte that copied from damaged data as unknown
 ([research/recovery](research/recovery) has the method and its measurements).
 
-More in [docs/how-it-works.md](docs/how-it-works.md). The repository also holds the
-[Python version](python) the Rust one was checked against, and research on a GPU compressor
-that writes standard zstd ([research/gpu-zstd](research/gpu-zstd)).
+More in [docs/how-it-works.md](docs/how-it-works.md). The repository also holds research on a
+GPU compressor that writes standard zstd ([research/gpu-zstd](research/gpu-zstd)).
 
 ## Contributing
 

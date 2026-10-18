@@ -22,9 +22,8 @@ finds.
 ## Testing
 
 ```
-cd rust && cargo test --release                                   # unit tests
-GPUZIP_BIN=rust/target/release/gpuzip python tests/test_gpuzip.py  # the Rust build
-python tests/test_gpuzip.py                                        # the Python version
+cd rust && cargo test --release   # unit tests
+python tests/test_gpuzip.py         # the build in rust/target/release (GPUZIP_BIN=... for another)
 ```
 
 `tests/test_gpuzip.py` packs a folder with 7-Zip, Python and the system's own tool, extracts it
@@ -67,7 +66,7 @@ and their results). New behavior comes with a test that fails without it.
 
 ## Releasing
 
-Set the version in `rust/Cargo.toml` and `python/gpuzip.py`, give it a section in
+Set the version in `rust/Cargo.toml`, give it a section in
 `CHANGELOG.md`, and push a tag `v<version>` on main. [release.yml](.github/workflows/release.yml)
 builds and checks the packages for Windows, Linux and macOS and drafts the release with them;
 publish it by hand after reading it over ([docs/building.md](docs/building.md#release-packages)).

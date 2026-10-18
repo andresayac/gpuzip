@@ -50,15 +50,14 @@ are refused.
 
 Learned the hard way:
 
-- The nvCOMP Python binding holds the GIL while it works, which stalls every other Python
-  thread (a zlib thread dropped from 1.48 to 0.09 GB/s). The Python version therefore runs the
-  GPU in its own process and hands results back through shared memory. The Rust version has no
-  such lock and keeps the GPU in a thread of the same process.
+- The GPU runs in a thread of the same process. (The Python version gpuzip started as, removed
+  after 0.1.1, needed a process of its own: nvCOMP's Python binding holds the GIL while it works,
+  and a zlib thread beside it dropped from 1.48 to 0.09 GB/s.)
 - Copies to and from the GPU run at about 6 GB/s from normal memory and about 28 GB/s from pinned
-  memory, so both versions copy through pinned buffers.
+  memory, so the copies go through pinned buffers.
 - nvCOMP's raw Deflate decoder reads output from 7-Zip, zlib, Python and .NET correctly
-  (`tests/test_gpuzip.py` checks this, against both versions).
-- The Rust version calls the NVIDIA driver API (`nvcuda.dll`, `libcuda.so.1`) directly: nvCOMP
+  (`tests/test_gpuzip.py` checks this).
+- gpuzip calls the NVIDIA driver API (`nvcuda.dll`, `libcuda.so.1`) directly: nvCOMP
   links the CUDA runtime statically and works on the driver's primary context, so no CUDA
   runtime library is needed.
 
@@ -79,8 +78,7 @@ rust/           the Rust version
   src/officefix.rs  damaged Word stories rebuilt, a presentation's lost master, layout and theme remade
   src/main.rs       the command line, reports and doctor
   src/ui.rs         terminal output: colors on a terminal only, a closed pipe ends quietly
-python/         the Python version (gpuzip.py, pyproject.toml)
-tests/          correctness tests for both versions (ZIP, gzip, tar.gz, damaged files, zip slip)
+tests/          correctness tests (ZIP, gzip, tar.gz, damaged files, zip slip)
 gpuinflate/     the library that decodes one Deflate stream on the GPU, in segments (C/CUDA),
                 with its tests and fuzzer; rescue.cpp, the recovery of damaged gzip files (CPU);
                 build.cmd (Windows) and build.sh (Linux, macOS) build both

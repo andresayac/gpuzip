@@ -37,25 +37,10 @@ cache on Linux):
 
 Running needs no CUDA toolkit: the NVIDIA driver is enough. `gpuzip doctor` shows what was found.
 
-## Python
-
-Needs Python 3.10+ (3.14 for Zstandard entries). From the repository's folder, as a command
-available everywhere:
-
-```
-uv tool install "./python[gpu]"
-```
-
-or into a virtual environment (`pip install "./python[gpu]"`, or `pip install ./python` for
-CPU only).
-
-Both install a command called `gpuzip`; if both are on your PATH, the first one found wins.
-
 ## Tests
 
-`python tests/test_gpuzip.py` checks the Python version; with `GPUZIP_BIN` pointing at
-the Rust build (`rust\target\release\gpuzip.exe`, `rust/target/release/gpuzip`), it checks
-that. They pack a folder with 7-Zip, Python and the system's own tool (PowerShell on Windows,
+`python tests/test_gpuzip.py` checks the build in `rust\target\release` (`GPUZIP_BIN` points
+it at another). They pack a folder with 7-Zip, Python and the system's own tool (PowerShell on Windows,
 Info-ZIP's zip elsewhere), extract it in every mode and compare every file; without a GPU the
 gpu modes are skipped. `cd rust && cargo test --release` runs the unit tests.
 
@@ -72,10 +57,8 @@ macOS has no CUDA, so there everything is decoded on the CPU, and `gpuzip doctor
 GitHub Actions builds and tests every push to main and every pull request on all three
 ([ci.yml](../.github/workflows/ci.yml)).
 Its runners have no GPU: CI covers the CPU paths, the 7-Zip hand-off and rescue, and checks that
-gpuinflate compiles for Linux. The GPU paths of the Rust version pass every test in
-`tests/test_gpuzip.py` on an RTX 5080 under Windows 11 and under Linux (Ubuntu 24.04 in WSL2,
-same card). The Python version runs on the CPU everywhere; its GPU path (CuPy and nvCOMP's
-Python package) has been tested on Windows only.
+gpuinflate compiles for Linux. The GPU paths pass every test in `tests/test_gpuzip.py` on an
+RTX 5080 under Windows 11 and under Linux (Ubuntu 24.04 in WSL2, same card).
 
 ## Release packages
 
@@ -94,7 +77,7 @@ with PTX for newer ones. Before packing, the workflow runs the program from the 
 `gpuzip doctor` must load the rescue library from next to it, and a gzip file with a zeroed
 sector must be rescued.
 
-To release: set the version in `rust/Cargo.toml` (and `__version__` in `python/gpuzip.py`), add
+To release: set the version in `rust/Cargo.toml`, add
 its section to `CHANGELOG.md`, then push a tag `v<version>` on main. The workflow drafts a
 GitHub release with the three packages and their `SHA256SUMS`; read it over and publish it. A
 pull request that touches the packaging builds the packages too, without publishing them.
