@@ -64,7 +64,8 @@ the whole file for local headers (skipping those of ZIPs stored inside entries, 
 so entries the directory does not vouch for, or that an interrupted download cut off from it,
 are found too; every entry is recovered, stored ones by copying, Deflate ones through gzrescue,
 and its own CRC says whether it is intact. A destroyed local header is worked around with the
-directory's metadata and the CRC. On a 17 MB ZIP of 3,447 Python source files: with the
+directory's metadata and the CRC: of the places its data may start at, the one where a Deflate
+stream begins, or else whose data ends where the next header begins, is rescued. On a 17 MB ZIP of 3,447 Python source files: with the
 directory zeroed, 3,390 entries intact and 1 cut short; with a 4 KB stretch zeroed inside,
 3,436 intact and the 4 entries under the zeros partial; with a header destroyed, every entry
 intact.

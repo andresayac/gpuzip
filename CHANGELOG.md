@@ -37,6 +37,14 @@
   whose detection no longer misses the few CR LF pairs that CR CR LF leaves. Other data written
   over a cluster can look the same and is treated the same. gzrescue's ABI is now 4 (gr_options
   gains max_output and cr_budget, gr_stats cr_decoded and hidden_damage).
+- A ZIP entry whose local header is destroyed is rescued from where its data really starts. Its
+  data was looked for at up to six places after where the header was, each a whole rescue, and on
+  a tie the first was kept: with an extra field (Info-ZIP writes 28 bytes) that was the wrong one,
+  its output cut short and out of place. Now the place where a Deflate stream begins is rescued
+  alone; else the one whose data ends where the next header begins comes first; inside a hole of
+  zeros or 0xFF one rescue is enough. A 475 MB ZIP with torrent holes: 41 s to 14 s, the same
+  bytes. Of 3,318 such entries in nine real ZIPs damaged eleven ways, 4 come back better (one
+  from 2,325 bytes right to 284,706 of 566,666, one from 0 to 8,654 of 8,659), none worse.
 
 ### Changed
 - `auto` starts nvCOMP only when the CPU threads, timed on the archive's first entries, would

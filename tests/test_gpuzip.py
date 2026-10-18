@@ -23,6 +23,7 @@ import json
 import os
 import random
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -556,6 +557,51 @@ def main():
                   f"{counts.get('intact', '?')} intact, {counts.get('partial', '?')} partial, {counts.get('unverified', '?')} unverified, "
                   f"directory {'read' if rep.get('directory_ok') else 'lost'}, exit {r.returncode}"
                   + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
+
+        # an entry whose local header is destroyed, with the 28-byte extra field Info-ZIP writes:
+        # its data is looked for at several places after where the header was, and the one where
+        # the stream begins, or else whose data ends where the next header begins, must win; from
+        # the wrong one the output is cut short and out of place
+        rnd = random.Random(5)
+        words = ["".join(rnd.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rnd.randint(2, 9))) for _ in range(3000)]
+        texts = {f"w{k}.txt": " ".join(rnd.choice(words) for _ in range(150000)).encode() for k in range(3)}
+        extra = struct.pack("<HHB2I", 0x5455, 9, 3, 1700000000, 1700000000) + struct.pack("<HHBBIBI", 0x7875, 11, 1, 4, 1000, 4, 1000)
+        z_path = os.path.join(work, "infozip.zip")
+        with zipfile.ZipFile(z_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for n, t in texts.items():
+                zi = zipfile.ZipInfo(n, (2024, 1, 1, 0, 0, 0))
+                zi.compress_type, zi.extra = zipfile.ZIP_DEFLATED, extra
+                z.writestr(zi, t)
+        raw = open(z_path, "rb").read()
+        with zipfile.ZipFile(z_path) as z:
+            info = z.getinfo("w1.txt")
+        h, d0 = info.header_offset, info.header_offset + 30 + len(info.filename) + len(extra)
+        mid = d0 + info.compress_size // 2
+        cases = {
+            "its header zeroed and 4 KB inside its data": raw[:h] + bytes(30) + raw[h + 30:mid] + bytes(4096) + raw[mid + 4096:],
+            "zeros over its header and the start of its data": raw[:h] + bytes(d0 + 3000 - h) + raw[d0 + 3000:],
+            "other data over its header and the start of its data": raw[:h] + random.Random(1).randbytes(d0 + 3000 - h) + raw[d0 + 3000:],
+        }
+        for label, damaged in cases.items():
+            bad = os.path.join(work, "damaged_infozip.zip")
+            open(bad, "wb").write(damaged)
+            out = os.path.join(work, "rescued_infozip")
+            shutil.rmtree(out, ignore_errors=True)
+            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                rep = {}
+            status = {e["name"]: e["status"] for e in rep.get("entries", [])}
+            p = os.path.join(out, "w1.txt")
+            got = open(p, "rb").read() if os.path.exists(p) else b""
+            orig = texts["w1.txt"]
+            in_place = sum(1 for a, b in zip(got, orig) if a == b)
+            others = all(status.get(n) == "intact" and open(os.path.join(out, n), "rb").read() == texts[n] for n in ("w0.txt", "w2.txt"))
+            ok = status.get("w1.txt") == "partial" and len(got) == len(orig) and in_place >= 0.9 * len(orig) and others
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} rescue of an Info-ZIP entry with {label}: {in_place:,} of {len(orig):,} bytes "
+                  f"right in place, {status.get('w1.txt')}, the other entries intact {others}, exit {r.returncode}")
 
         # a docx (a ZIP of XML parts) with zeros inside its document: the text comes back, the
         # repaired part is well-formed XML, and the rebuilt document opens
