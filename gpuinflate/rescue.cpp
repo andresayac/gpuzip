@@ -110,52 +110,189 @@ void parallel_for(size_t n, F fn, unsigned max_workers = 64) {
 
 // One place a variable appears (output byte pos): what lies around it in its piece, from 5
 // bytes before to 6 after. A cell is a byte (0-255), another variable (VAR + its number) or
-// nothing known (NONE). Held in 32 bytes: a variable as its difference from the place's own (the
-// variables around one place are of the same lost window, fewer than WINDOW apart).
+// nothing known (NONE).
 struct Occ {
     static constexpr uint32_t NONE = 0xFFFFFFFFu, VAR = 0x100;
-    static constexpr int BEFORE = 5, AFTER = 6;
-    uint32_t pos_lo, next;           // its output offset (with pos_hi); the variable's next place (UINT32_MAX: none)
-    uint16_t pos_hi, vars;           // vars: bit i, cell i is a variable
-    uint16_t cells[BEFORE + AFTER];  // i < BEFORE: i + 1 bytes before; else i - BEFORE + 1 after
-    uint64_t pos() const { return (uint64_t)pos_hi << 32 | pos_lo; }
-    // cell i, for the place of variable self
-    uint32_t get(int i, uint32_t self) const {
-        if (vars >> i & 1) return Occ::VAR + self + (uint32_t)(int32_t)(int16_t)cells[i];
-        return cells[i] < 256 ? cells[i] : NONE;
-    }
-    void set(int i, uint32_t c, uint32_t self) {
-        bool v = c != NONE && c >= VAR;
-        vars = (uint16_t)(v ? vars | 1u << i : vars & ~(1u << i));
-        cells[i] = v ? (uint16_t)(int16_t)(int32_t)(c - VAR - self) : c == NONE ? 256 : (uint16_t)c;
-    }
+    static constexpr int BEFORE = 5, AFTER = 6, CELLS = BEFORE + AFTER;
+    uint64_t pos;
+    uint32_t cell[CELLS];  // i < BEFORE: i + 1 bytes before; else i - BEFORE + 1 after
 };
 // bytes of a piece handed on only once its end is settled: what its last symbol may write, and
 // the bytes after a place that its Occ records
 constexpr uint64_t DELAY = gi::MAX_SYMBOL_OUT + Occ::AFTER;
 
-// Places, in the order recorded, in chunks (a vector of them would copy them all as it grows)
+// Places, packed in the order recorded (a heavily damaged file records over a hundred million).
+// Most cells around the place of variable v are the variables of the window bytes next to v's,
+// copied along with it: q bytes before v lies v + q, q after it v - q. Where another copy begins,
+// its variables run on the same way. So a cell is a 2-bit code: nothing known, regular (the cell
+// nearer the place run on by one when that is a variable, else v + q or v - q), a byte, or
+// another variable, and only a byte or another variable has a payload. A place, at an offset in
+// the store, is: how far back the same variable's place before it lies (varint, 0: none), its
+// output offset less its chunk's first (varint; places come in output order), then its cells.
+// Short form, one byte with low bits SHORT: the nb cells nearest before the place and the na
+// nearest after are regular, the others unknown. Else 3 bytes of codes (cell i at bit 2 + 2i),
+// then the payloads in cell order: a byte as itself, another variable as its difference from the
+// regular one modulo 2^16 (2 bytes: the variables around one place are of the same lost window,
+// fewer than WINDOW apart). A place never straddles two chunks.
 struct OccStore {
-    static constexpr uint32_t CHUNK = 1u << 16;
-    std::vector<std::unique_ptr<Occ[]>> chunks;
-    uint32_t n = 0;
-    uint32_t add(const Occ& o) {
-        if (n == UINT32_MAX) throw std::bad_alloc();
-        if (n % CHUNK == 0) chunks.emplace_back(new Occ[CHUNK]);
-        chunks.back()[n % CHUNK] = o;
-        return n++;
+    static constexpr int CHUNK_BITS = 16;
+    static constexpr uint64_t CHUNK = 1ull << CHUNK_BITS;
+    static constexpr uint64_t MOST = 10 + 10 + 3 + 2 * Occ::CELLS;  // bytes a place may take
+    static constexpr uint8_t SHORT = 1;
+    enum : uint32_t { NOTHING, REGULAR, BYTE, OTHER };
+    std::vector<std::unique_ptr<uint8_t[]>> chunks;
+    std::vector<uint64_t> base;  // by chunk: the output offset of its first place
+    uint64_t end = 0;            // where the next place goes
+
+    // the place of variable self whose place before is at prev (UINT64_MAX: none); returns where it went
+    uint64_t add(const Occ& o, uint32_t self, uint64_t prev) {
+        if (end == chunks.size() * CHUNK || CHUNK - end % CHUNK < MOST) {
+            end = chunks.size() * CHUNK;
+            chunks.emplace_back(new uint8_t[CHUNK]);
+            base.push_back(o.pos);
+        }
+        uint64_t r = end, b = base[r >> CHUNK_BITS];
+        if (o.pos < b) throw std::runtime_error("places were recorded out of order");
+        uint8_t* p = at(r);
+        uint8_t* w = put(p, prev == UINT64_MAX ? 0 : r - prev);
+        w = put(w, o.pos - b);
+        w = put_cells(w, o, self);
+        end = r + (uint64_t)(w - p);
+        return r;
     }
-    Occ& operator[](uint32_t i) { return chunks[i / CHUNK][i % CHUNK]; }
-    const Occ& operator[](uint32_t i) const { return chunks[i / CHUNK][i % CHUNK]; }
+    // where the place before the one at r lies (UINT64_MAX: none)
+    uint64_t prev(uint64_t r) const {
+        const uint8_t* p = at(r);
+        uint64_t back = get(p);
+        return back ? r - back : UINT64_MAX;
+    }
+    // the place at r, of variable self
+    void read(uint64_t r, uint32_t self, Occ& o) const {
+        const uint8_t* p = at(r);
+        get(p);
+        o.pos = base[r >> CHUNK_BITS] + get(p);
+        if ((p[0] & 3) == SHORT) {
+            int nb = p[0] >> 2 & 7, na = p[0] >> 5;
+            for (int i = 0; i < Occ::CELLS; i++)
+                o.cell[i] = i < nb || (i >= Occ::BEFORE && i < Occ::BEFORE + na) ? var(self, regular(i)) : Occ::NONE;
+            return;
+        }
+        uint32_t codes = (p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16) >> 2;
+        p += 3;
+        uint16_t d[Occ::CELLS];  // a variable's difference from self
+        bool isvar[Occ::CELLS];
+        for (int i = 0; i < Occ::CELLS; i++) {
+            uint32_t code = codes >> 2 * i & 3;
+            isvar[i] = code == REGULAR || code == OTHER;
+            if (code == NOTHING) o.cell[i] = Occ::NONE;
+            else if (code == BYTE) o.cell[i] = *p++;
+            else {
+                d[i] = predict(i, isvar, d);
+                if (code == OTHER) {
+                    d[i] = (uint16_t)(d[i] + (p[0] | p[1] << 8));
+                    p += 2;
+                }
+                o.cell[i] = var(self, d[i]);
+            }
+        }
+    }
+    // the cells of the place at r, of variable self, set again. Only the cells farthest from the
+    // place are ever cleared (those past a piece's ends): the others are regular as they were, so
+    // the place does not grow.
+    void rewrite(uint64_t r, const Occ& o, uint32_t self) {
+        uint8_t* p = at(r);
+        const uint8_t* q = p;
+        get(q);
+        get(q);
+        p += q - p;
+        size_t was = 1;
+        if ((p[0] & 3) != SHORT) {
+            uint32_t codes = (p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16) >> 2;
+            was = 3;
+            for (int i = 0; i < Occ::CELLS; i++) was += (codes >> 2 * i & 3) == BYTE ? 1 : (codes >> 2 * i & 3) == OTHER ? 2 : 0;
+        }
+        uint8_t buf[MOST];
+        size_t n = (size_t)(put_cells(buf, o, self) - buf);
+        if (n > was) throw std::runtime_error("a place grew when cells were cleared");
+        memcpy(p, buf, n);
+    }
+
+  private:
+    uint8_t* at(uint64_t r) const { return chunks[r >> CHUNK_BITS].get() + (r & (CHUNK - 1)); }
+    static uint8_t* put(uint8_t* w, uint64_t x) {
+        for (; x >= 0x80; x >>= 7) *w++ = (uint8_t)(x | 0x80);
+        *w++ = (uint8_t)x;
+        return w;
+    }
+    static uint64_t get(const uint8_t*& p) {
+        uint64_t x = 0;
+        for (int s = 0;; s += 7) {
+            uint8_t b = *p++;
+            x |= (uint64_t)(b & 0x7f) << s;
+            if (!(b & 0x80)) return x;
+        }
+    }
+    // cell i's regular neighbour, as a difference from the place's own variable
+    static uint16_t regular(int i) { return (uint16_t)(i < Occ::BEFORE ? i + 1 : Occ::BEFORE - 1 - i); }
+    // the variable cell i is regular for, from the differences of the cells nearer the place
+    static uint16_t predict(int i, const bool* isvar, const uint16_t* d) {
+        if (i == 0 || i == Occ::BEFORE || !isvar[i - 1]) return regular(i);
+        return (uint16_t)(i < Occ::BEFORE ? d[i - 1] + 1 : d[i - 1] - 1);
+    }
+    // the variable that differs from self by d (as a cell held it before: d is all there is)
+    static uint32_t var(uint32_t self, uint16_t d) { return Occ::VAR + self + (uint32_t)(int32_t)(int16_t)d; }
+    static uint8_t* put_cells(uint8_t* w, const Occ& o, uint32_t self) {
+        uint16_t d[Occ::CELLS];
+        bool isvar[Occ::CELLS];
+        for (int i = 0; i < Occ::CELLS; i++) {
+            isvar[i] = o.cell[i] != Occ::NONE && o.cell[i] >= Occ::VAR;
+            d[i] = (uint16_t)(o.cell[i] - Occ::VAR - self);
+        }
+        int nb = 0, na = 0;
+        while (nb < Occ::BEFORE && isvar[nb] && d[nb] == regular(nb)) nb++;
+        while (na < Occ::AFTER && isvar[Occ::BEFORE + na] && d[Occ::BEFORE + na] == regular(Occ::BEFORE + na)) na++;
+        bool rest = false;
+        for (int i = nb; i < Occ::BEFORE; i++) rest |= o.cell[i] != Occ::NONE;
+        for (int i = Occ::BEFORE + na; i < Occ::CELLS; i++) rest |= o.cell[i] != Occ::NONE;
+        if (!rest) {
+            *w++ = (uint8_t)(SHORT | nb << 2 | na << 5);
+            return w;
+        }
+        uint8_t* codes = w;
+        w += 3;
+        uint32_t cw = 0;
+        for (int i = 0; i < Occ::CELLS; i++) {
+            uint32_t c = o.cell[i], code;
+            if (c == Occ::NONE) code = NOTHING;
+            else if (!isvar[i]) {
+                code = BYTE;
+                *w++ = (uint8_t)c;
+            } else {
+                uint16_t e = (uint16_t)(d[i] - predict(i, isvar, d));
+                code = e ? OTHER : REGULAR;
+                if (e) {
+                    w[0] = (uint8_t)e;
+                    w[1] = (uint8_t)(e >> 8);
+                    w += 2;
+                }
+            }
+            cw |= code << (2 + 2 * i);
+        }
+        codes[0] = (uint8_t)cw;
+        codes[1] = (uint8_t)(cw >> 8);
+        codes[2] = (uint8_t)(cw >> 16);
+        return w;
+    }
 };
 
 // The variables a pass met: for each, how many bytes copy it and its first MAX_OCC places, a list
-// through Occ::next in output order. Found by an open-addressing table: a file damaged in every
+// back from its last in the store. Found by an open-addressing table: a file damaged in every
 // block has millions of them.
 struct VarTable {
     struct Var {
-        uint32_t var, first = UINT32_MAX, last = UINT32_MAX, nocc = 0;
+        uint32_t var, nocc = 0;
         uint64_t count = 0;
+        uint64_t last = UINT64_MAX;  // where its last place is in occs
     };
     std::vector<Var> vars;        // in the order first met
     std::vector<uint32_t> slots;  // an index in vars + 1; 0: empty
@@ -195,14 +332,23 @@ struct VarTable {
             if (vars[k - 1].var == v) return k - 1;
         }
     }
-    void add_place(uint32_t d, Occ o) {
-        o.next = UINT32_MAX;
-        uint32_t i = occs.add(o);
+    void add_place(uint32_t d, const Occ& o) {
         Var& x = vars[d];
-        if (x.last == UINT32_MAX) x.first = i;
-        else occs[x.last].next = i;
-        x.last = i;
+        x.last = occs.add(o, x.var, x.last);
         x.nocc++;
+    }
+    // fn(r, place) for each place of variable d in output order, r where it is in occs
+    template <class Fn>
+    void each_place(uint32_t d, Fn&& fn) const {
+        const Var& x = vars[d];
+        uint64_t at[MAX_OCC];
+        uint64_t r = x.last;
+        for (uint32_t i = x.nocc; i-- > 0; r = occs.prev(r)) at[i] = r;
+        Occ o;
+        for (uint32_t i = 0; i < x.nocc; i++) {
+            occs.read(at[i], x.var, o);
+            fn(at[i], o);
+        }
     }
 };
 
@@ -615,9 +761,10 @@ struct Rescuer {
             VarTable::Var& vr = rec.vt.vars[d];
             vr.count++;
             if (vr.nocc >= MAX_OCC) continue;
-            Occ oc{(uint32_t)pos, UINT32_MAX, (uint16_t)(pos >> 32), 0, {}};
-            for (int q = 1; q <= Occ::BEFORE; q++) oc.set(q - 1, x >= (uint64_t)q ? cell(x - q) : Occ::NONE, var);
-            for (int q = 1; q <= Occ::AFTER; q++) oc.set(Occ::BEFORE + q - 1, x + q < tail.len ? cell(x + q) : Occ::NONE, var);
+            Occ oc;
+            oc.pos = pos;
+            for (int q = 1; q <= Occ::BEFORE; q++) oc.cell[q - 1] = x >= (uint64_t)q ? cell(x - q) : Occ::NONE;
+            for (int q = 1; q <= Occ::AFTER; q++) oc.cell[Occ::BEFORE + q - 1] = x + q < tail.len ? cell(x + q) : Occ::NONE;
             rec.vt.add_place(d, oc);
         }
         p.exact += exact;
@@ -1303,20 +1450,31 @@ Values infer_window(Outcome& o, Rescuer& rs, const std::vector<gi::Start>& heade
             }
         }
     }
-    // the cells of each place that lie outside its piece (since split) are not known
-    for (uint32_t d = 0; d < nv; d++) {
-        uint32_t v = vt.vars[d].var;
-        for (uint32_t i = vt.vars[d].first; i != UINT32_MAX; i = vt.occs[i].next) {
-            Occ& oc = vt.occs[i];
-            uint64_t pos = oc.pos();
-            size_t k = (size_t)(std::upper_bound(start.begin(), start.end(), pos) - start.begin()) - 1;
-            uint64_t a = start[k], e = a + pieces[k].len;
-            for (int q = 1; q <= Occ::BEFORE; q++)
-                if (pos < a + q) oc.set(q - 1, Occ::NONE, v);
-            for (int q = 1; q <= Occ::AFTER; q++)
-                if (pos + q >= e) oc.set(Occ::BEFORE + q - 1, Occ::NONE, v);
+    // the cells of each place that lie outside its piece (since split) are not known (in
+    // parallel, a block of variables at a time: each place is one variable's)
+    constexpr size_t VARS_PER_TASK = 4096;
+    parallel_for((nv + VARS_PER_TASK - 1) / VARS_PER_TASK, [&](size_t b, unsigned) {
+        for (uint32_t d = (uint32_t)(b * VARS_PER_TASK); d < nv && d < (b + 1) * VARS_PER_TASK; d++) {
+            uint32_t v = vt.vars[d].var;
+            vt.each_place(d, [&](uint64_t r, Occ& oc) {
+                uint64_t pos = oc.pos;
+                size_t k = (size_t)(std::upper_bound(start.begin(), start.end(), pos) - start.begin()) - 1;
+                uint64_t a = start[k], e = a + pieces[k].len;
+                bool cut = false;
+                for (int q = 1; q <= Occ::BEFORE; q++)
+                    if (pos < a + q && oc.cell[q - 1] != Occ::NONE) {
+                        oc.cell[q - 1] = Occ::NONE;
+                        cut = true;
+                    }
+                for (int q = 1; q <= Occ::AFTER; q++)
+                    if (pos + q >= e && oc.cell[Occ::BEFORE + q - 1] != Occ::NONE) {
+                        oc.cell[Occ::BEFORE + q - 1] = Occ::NONE;
+                        cut = true;
+                    }
+                if (cut) vt.occs.rewrite(r, oc, v);
+            });
         }
-    }
+    });
     uint64_t unknown = 0;
     for (const VarTable::Var& x : vt.vars) unknown += x.count;
     // The model learns from the pieces nearest the damage. Those not held are decoded again to
@@ -1387,32 +1545,41 @@ Values infer_window(Outcome& o, Rescuer& rs, const std::vector<gi::Start>& heade
     auto nearby = [&](uint32_t d, std::vector<uint32_t>& near) {
         near.clear();
         uint32_t v = vt.vars[d].var;
-        for (uint32_t i = vt.vars[d].first; i != UINT32_MAX; i = vt.occs[i].next)
-            for (int j = 0; j < Occ::BEFORE + Occ::AFTER; j++) {
-                uint32_t c = vt.occs[i].get(j, v);
+        vt.each_place(d, [&](uint64_t, const Occ& oc) {
+            for (int j = 0; j < Occ::CELLS; j++) {
+                uint32_t c = oc.cell[j];
                 if (c == Occ::NONE || c < Occ::VAR || c - Occ::VAR == v) continue;
                 uint32_t q = j < Occ::BEFORE ? (uint32_t)j + 1 : (uint32_t)(Occ::BEFORE - 1 - j);  // v + q, or v - q after
                 if (c - Occ::VAR == v + q) continue;  // a near one, scored again without a list
                 uint32_t u = vt.find(c - Occ::VAR);
                 if (u != UINT32_MAX) near.push_back(u);  // (one never met is never resolved)
             }
+        });
         std::sort(near.begin(), near.end());
         near.erase(std::unique(near.begin(), near.end()), near.end());
     };
-    std::vector<uint32_t> wstart(nv + 1, 0), wlist, near;
-    for (uint32_t d : todo) {
-        nearby(d, near);
-        for (uint32_t u : near) wstart[u + 1]++;
-    }
+    // (in parallel: a list's order does not matter, it only marks variables to score again)
+    std::vector<uint32_t> wstart(nv + 1, 0), wlist;
+    std::vector<std::vector<uint32_t>> nears(threads());
+    const size_t blocks = (nv + VARS_PER_TASK - 1) / VARS_PER_TASK;
+    parallel_for(blocks, [&](size_t b, unsigned w) {
+        for (uint32_t d = (uint32_t)(b * VARS_PER_TASK); d < nv && d < (b + 1) * VARS_PER_TASK; d++) {
+            nearby(d, nears[w]);
+            for (uint32_t u : nears[w]) std::atomic_ref<uint32_t>(wstart[u + 1]).fetch_add(1, std::memory_order_relaxed);
+        }
+    });
     for (uint32_t d = 0; d < nv; d++) wstart[d + 1] += wstart[d];
     wlist.resize(wstart[nv]);
     {
         std::vector<uint32_t> at(wstart.begin(), wstart.end() - 1);
-        for (uint32_t d : todo) {
-            nearby(d, near);
-            for (uint32_t u : near) wlist[at[u]++] = d;
-        }
+        parallel_for(blocks, [&](size_t b, unsigned w) {
+            for (uint32_t d = (uint32_t)(b * VARS_PER_TASK); d < nv && d < (b + 1) * VARS_PER_TASK; d++) {
+                nearby(d, nears[w]);
+                for (uint32_t u : nears[w]) wlist[std::atomic_ref<uint32_t>(at[u]).fetch_add(1, std::memory_order_relaxed)] = d;
+            }
+        });
     }
+    nears = {};
     std::vector<uint8_t> dirty(nv, 1);  // to be scored in the next round
     struct Ctx {
         uint64_t before;  // up to 6 bytes before, newest lowest
@@ -1435,24 +1602,23 @@ Values infer_window(Outcome& o, Rescuer& rs, const std::vector<gi::Start>& heade
         // the distinct contexts this byte appears in: a line copied 40 times is one piece of evidence
         std::vector<Ctx>& ctxs = w.ctxs;
         ctxs.clear();
-        for (uint32_t i = vt.vars[d].first; i != UINT32_MAX; i = vt.occs[i].next) {
-            const Occ& oc = vt.occs[i];
+        vt.each_place(d, [&](uint64_t, const Occ& oc) {
             Ctx c{0, 0, {}, 0};
             for (int q = 1; q <= Model::ORDERS; q++) {
-                int b = val(oc.get(q - 1, v), v);
+                int b = val(oc.cell[q - 1], v);
                 if (b < 0) break;
                 c.before |= (uint64_t)b << (8 * (q - 1));
                 c.nbefore = q;
             }
             for (int q = 1; q <= AHEAD; q++) {
-                int b = val(oc.get(Occ::BEFORE + q - 1, v), v);
+                int b = val(oc.cell[Occ::BEFORE + q - 1], v);
                 if (b < 0) break;
                 c.after[q - 1] = b;
                 c.nafter = q;
             }
             // Only contexts with known bytes on both sides count: a byte known only from what
             // precedes it is guessed as the commonest continuation, and measured, that misleads
-            if (c.nbefore < 2 || c.nafter < 2) continue;
+            if (c.nbefore < 2 || c.nafter < 2) return;
             // contexts that agree on the 3 bytes either side are one piece of evidence: what
             // lies further away says little about this byte, and copies repeat it
             bool dup = false;
@@ -1465,7 +1631,7 @@ Values infer_window(Outcome& o, Rescuer& rs, const std::vector<gi::Start>& heade
                 }
             }
             if (!dup) ctxs.push_back(c);
-        }
+        });
         if (ctxs.empty()) return verdict;
         // Every byte is a candidate: measured, keeping only the bytes seen after the byte before
         // let a value never seen there lose without a contest, and the wrong one win. Many weak

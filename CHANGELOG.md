@@ -10,10 +10,11 @@
   wrongly marked exact went from 57 million to 13.
 - A rescue's memory no longer grows with its output, only with the damage: a damaged .gz of 2 GB
   peaked at 24.8 GB and now takes 1.2 GB; linux-6.6.tar.gz, damaged eleven ways, 11-13.6 GB and
-  now 0.5-0.8 GB; Python-3.14.0.tgz 1.2-1.9 GB and now 0.5-0.9 GB. Past the first 128 MB the
-  output is decoded again as it is written, and a .tar.gz is extracted as it comes. What is
-  recovered is the same, byte for byte and file for file (66 real-world and 66 generated damaged
-  files).
+  now 0.5-0.8 GB; Python-3.14.0.tgz 1.2-1.9 GB and now 0.5-0.9 GB; enwik9.zip with 1,835
+  damaged blocks 13.4 GB and now 4.3 GB. Past the first 128 MB the output is decoded again as it
+  is written, and a .tar.gz is extracted as it comes; where lost bytes were copied to is packed
+  in 10-14 bytes a place. What is recovered is the same, byte for byte and file for file (66
+  real-world and 66 generated damaged files).
 - `--max-output SIZE` stops a rescue whose output would grow past a limit (a decompression bomb):
   by default 100 times the input, at least 4 GB; `0` for none.
 - Faster: the search for block headers and the scoring of lost bytes run on every core, and the
