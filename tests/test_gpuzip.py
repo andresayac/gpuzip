@@ -774,6 +774,22 @@ def main():
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} a ZIP of {label} ({len(bomb):,} bytes): t and x refuse "
               f"{results['t'][1]} and {results['x'][1]} of 20 entries (exit {results['t'][0]}, {results['x'][0]}), {written:,} bytes written")
+        # rescue gives the stream back once, under the first name, and writes none of the rest
+        # (measured before: the 2 GB and the 200 MB written)
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "rescue", p, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        status = [e["status"] for e in rep.get("entries", [])]
+        refused = sum(1 for e in rep.get("entries", []) if "no two entries share bytes" in e.get("detail", ""))
+        files = [os.path.join(d, f) for d, _, fs in os.walk(out) for f in fs] if os.path.isdir(out) else []
+        written = sum(os.path.getsize(f) for f in files)
+        ok = r.returncode == 2 and status.count("intact") == 1 and refused == 19 and len(files) == 1 and written < 11 << 20
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of a ZIP of {label}: {status.count('intact')} intact, {refused} not written as "
+              f"sharing its data, {len(files)} file of {written:,} bytes, exit {r.returncode}")
     shutil.rmtree(os.path.join(work, "overlap_out"), ignore_errors=True)
 
     # an extraction killed while it writes a large file leaves no part of it under its name:

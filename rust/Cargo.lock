@@ -261,6 +261,7 @@ dependencies = [
  "crossbeam-channel",
  "flate2",
  "glob",
+ "libdeflate-sys",
  "libdeflater",
  "libloading",
  "memmap2",

@@ -54,6 +54,10 @@ pub struct Outcome {
     /// CRs put back that an ASCII-mode transfer had removed, and in how many entries
     pub crs_restored: u64,
     pub cr_entries: usize,
+    /// directory entries not written because their data would be an earlier intact entry's
+    pub shared: usize,
+    /// local headers found only by scanning, inside an intact entry's data: not entries
+    pub inside: usize,
 }
 
 #[derive(Default)]
@@ -308,8 +312,25 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
     let office = tasks.iter().any(|t| t.name == "[Content_Types].xml")
         || (keep_parts && tasks.iter().any(|t| ["word/", "xl/", "ppt/"].iter().any(|d| t.name.starts_with(d))));
     let mut cr_left = CR_SEARCH_PER_FILE;
+    // How far the bytes of the directory's entries that came out intact reach, and whose: the
+    // input their data took, which their CRC vouches for. No two entries of a ZIP share bytes.
+    // A directory entry whose data would start inside them is not written: a zip bomb multiplies
+    // its data so (one 100 MB stream named by 20 entries: 2 GB written from 103 KB; Fifield's,
+    // each entry quoting the next one's local header: 200 MB from 12 KB), and a directory whose
+    // offsets are off (bytes lost before them) points into others (lib.zip with a 512 KB gap: 114
+    // entries written from other entries' data, their longest run of right bytes 17). A header
+    // only the scan found there is part of that entry's data (an archive stored in it: 7 in
+    // lib.zip, written as 754 KB of nothing right), not an entry. Entries only the scan found set
+    // no reach: data from another file written over a cluster can hold an intact entry of its own
+    // (crosslinked: one of lib.zip's in the pptx, over the places of three of its entries). The
+    // tasks go in the order of their headers, so the farthest reach is enough.
+    let mut reach: (usize, String) = (0, String::new());
 
     for t in tasks {
+        if t.from_scan && t.header_offset < reach.0 {
+            o.inside += 1;
+            continue;
+        }
         if t.name.ends_with('/') {
             if let (Some(r), Some(rel)) = (root, zip::safe_relpath(&t.name)) {
                 let _ = std::fs::create_dir_all(r.join(rel));
@@ -348,26 +369,43 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
                 }
             }
         }
-        let mut best: Option<(Status, Vec<u8>, String)> = None;
+        let mut best: Option<(Status, Vec<u8>, String, usize)> = None; // and where its data ends
+        let mut shared = false; // a start lay in an earlier intact entry's bytes
         for start in starts {
+            // (an empty entry has no data to share: lib.zip's empty __init__.py files came out
+            // right from such starts)
+            if start < reach.0 && t.size != Some(0) {
+                shared = true;
+                continue;
+            }
             let limit = next_header_after(start);
-            let (status, bytes, detail, crs) = recover_entry(data, lib, &t, start, limit, fill, &mut cr_left);
+            let (status, bytes, detail, crs, used) = recover_entry(data, lib, &t, start, limit, fill, &mut cr_left);
             if status == Status::Intact && crs > 0 {
                 o.crs_restored += crs as u64;
                 o.cr_entries += 1;
             }
             let better = match &best {
                 None => true,
-                Some((s, _, _)) => (status as u8) < (*s as u8),
+                Some((s, ..)) => (status as u8) < (*s as u8),
             };
             if better {
-                best = Some((status, bytes, detail));
+                best = Some((status, bytes, detail, start + used));
             }
             if (status as u8) <= (enough as u8) {
                 break;
             }
         }
-        if let Some((status, bytes, detail)) = best {
+        if best.is_none() && shared {
+            rec.detail = format!(
+                "its data would be bytes of {}, which came out intact: no two entries share bytes (a zip bomb's do; or the directory is off here); not written",
+                reach.1
+            );
+            o.shared += 1;
+        }
+        if let Some((status, bytes, detail, end)) = best {
+            if status == Status::Intact && !t.from_scan && end > reach.0 {
+                reach = (end, t.name.clone());
+            }
             rec.status = status;
             rec.size = bytes.len() as u64;
             if !detail.is_empty() {
@@ -383,6 +421,21 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
             }
         }
         o.entries.push(rec);
+    }
+    if o.shared > 0 {
+        o.notes.push(format!(
+            "{} entr{} of the directory would have read bytes another entry had already given back intact: not written \
+             (no two entries share data; a zip bomb's do, and a directory whose offsets are off points into others)",
+            o.shared,
+            if o.shared == 1 { "y" } else { "ies" }
+        ));
+    }
+    if o.inside > 0 {
+        o.notes.push(format!(
+            "{} local header{} found inside the data of entries that came out intact (an archive stored in one): not entries of this one",
+            o.inside,
+            if o.inside == 1 { "" } else { "s" }
+        ));
     }
     if root.is_some() {
         let renamed: Vec<String> = o
@@ -481,9 +534,28 @@ const CR_SEARCH_PER_FILE: u64 = 16 << 30;
 
 /// One entry's data from `start`, bounded by `limit`: (status, bytes, detail, CRs put back).
 /// `cr_left`: what the search for lost CRs may still decode in this file.
-fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize, fill: u8, cr_left: &mut u64) -> (Status, Vec<u8>, String, u32) {
+/// A raw Deflate stream that inflates to exactly `size` bytes, and how many input bytes it took
+fn inflate_exact(slice: &[u8], size: usize) -> Option<(Vec<u8>, usize)> {
+    use libdeflate_sys::*;
+    let mut out = vec![0u8; size];
+    let (mut used, mut made) = (0usize, 0usize);
+    // SAFETY: the decompressor is checked, used once and freed; both buffers' lengths are passed
+    unsafe {
+        let d = libdeflate_alloc_decompressor();
+        if d.is_null() {
+            return None;
+        }
+        let r = libdeflate_deflate_decompress_ex(d, slice.as_ptr().cast(), slice.len(), out.as_mut_ptr().cast(), out.len(), &mut used, &mut made);
+        libdeflate_free_decompressor(d);
+        (r == libdeflate_result_LIBDEFLATE_SUCCESS && made == size).then_some((out, used))
+    }
+}
+
+/// One entry from its data at `start`: its status, bytes, what to say, CRs put back, and for an
+/// intact one how many input bytes its data took
+fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize, fill: u8, cr_left: &mut u64) -> (Status, Vec<u8>, String, u32, usize) {
     if start >= data.len() {
-        return (Status::Lost, Vec::new(), "data lies beyond the end of the file".into(), 0);
+        return (Status::Lost, Vec::new(), "data lies beyond the end of the file".into(), 0, 0);
     }
     if t.method == STORED {
         let size = t.size.or(t.csize);
@@ -505,12 +577,12 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
         }
         if cut {
             let n = bytes.len();
-            return (Status::Partial, bytes, format!("cut short: {n} of {} bytes", size.unwrap_or(0)), 0);
+            return (Status::Partial, bytes, format!("cut short: {n} of {} bytes", size.unwrap_or(0)), 0, 0);
         }
         match crc {
-            Some(c) if crc32fast::hash(&bytes) == c => (Status::Intact, bytes, String::new(), 0),
-            Some(_) => (Status::Unverified, bytes, "stored data, CRC mismatch: damaged somewhere inside".into(), 0),
-            None => (Status::Unverified, bytes, "no CRC known".into(), 0),
+            Some(c) if crc32fast::hash(&bytes) == c => (Status::Intact, bytes, String::new(), 0, end - start),
+            Some(_) => (Status::Unverified, bytes, "stored data, CRC mismatch: damaged somewhere inside".into(), 0, 0),
+            None => (Status::Unverified, bytes, "no CRC known".into(), 0, 0),
         }
     } else {
         let end = match t.csize {
@@ -523,10 +595,9 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
         // ZIP of 3,440 entries: 25 s through the rescue, 2 s this way)
         if let (Some(size), Some(crc)) = (t.size, t.crc) {
             if size <= 1 << 31 {
-                let mut out = vec![0u8; size as usize];
-                if let Ok(n) = libdeflater::Decompressor::new().deflate_decompress(slice, &mut out) {
-                    if n as u64 == size && crc32fast::hash(&out) == crc {
-                        return (Status::Intact, out, String::new(), 0);
+                if let Some((out, used)) = inflate_exact(slice, size as usize) {
+                    if crc32fast::hash(&out) == crc {
+                        return (Status::Intact, out, String::new(), 0, used);
                     }
                 }
             }
@@ -543,7 +614,7 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
         });
         let report = match report {
             Ok(r) => r,
-            Err(e) => return (Status::Lost, Vec::new(), e, 0),
+            Err(e) => return (Status::Lost, Vec::new(), e, 0, 0),
         };
         let s = &report.stats;
         *cr_left = cr_left.saturating_sub(s.cr_decoded);
@@ -563,7 +634,7 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
             if cut {
                 d.push("cut short".into());
             }
-            return (Status::Partial, out, d.join(", "), 0);
+            return (Status::Partial, out, d.join(", "), 0, 0);
         }
         // in step throughout: the CRC decides
         let crc = t.crc.or_else(|| {
@@ -573,10 +644,10 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
         match crc {
             Some(c) if crc32fast::hash(&out) == c && t.size.map_or(true, |z| z == out.len() as u64) => {
                 let d = if crs > 0 { format!("{crs} CR{} put back that an ASCII transfer had removed; the CRC confirms", if crs == 1 { "" } else { "s" }) } else { String::new() };
-                (Status::Intact, out, d, crs)
+                (Status::Intact, out, d, crs, s.input_end as usize)
             }
-            Some(_) => (Status::Unverified, out, "decodes in step but the CRC does not match: damage the decoder could not see".into(), 0),
-            None => (Status::Unverified, out, "no CRC known".into(), 0),
+            Some(_) => (Status::Unverified, out, "decodes in step but the CRC does not match: damage the decoder could not see".into(), 0, 0),
+            None => (Status::Unverified, out, "no CRC known".into(), 0, 0),
         }
     }
 }

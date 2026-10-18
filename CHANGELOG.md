@@ -92,6 +92,13 @@
   and Fifield's bomb, each entry quoting the next one's header, 200 MB from 12 KB; now nothing,
   exit 2, each entry listed as failed. The other entries are extracted. 109 ZIP files from
   this machine (wheels, Office templates and themes, 14,224 entries) still test clean.
+  `rescue` gives such a stream back once: a directory entry whose data would start inside the
+  bytes an earlier entry's CRC vouched for is not written (both bombs: one file of 100 and of
+  10 MB). The same rule stops it writing other entries' data under a name when a directory's
+  offsets are off (lib.zip resumed past a 512 KB gap: 110 such files, nothing in them right), and
+  local headers found inside an intact entry's data (an archive stored in one: 7 in lib.zip)
+  are no longer taken for entries, so a ZIP whose every entry is intact is called clean. The 66
+  damaged files of the realistic tests give back the same files as before.
 
 ### Removed
 - The Python version (`python/`), the first implementation, kept as a reference. It was never
