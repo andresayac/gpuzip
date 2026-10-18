@@ -626,12 +626,23 @@ impl<'a> Run<'a> {
         }
     }
 
+    // A line every 250 ms until stop, which run() sets and then wakes this thread for: a sleep
+    // there held every `x` and `t` in a terminal up to 250 ms after its work was done (measured:
+    // 259 ms against 8 ms with stderr not a terminal, for a ZIP of one entry)
     fn progress(&self, stop: &AtomicBool) {
         let total: u64 = self.entries.iter().filter(|e| matches!(e.route, Route::Deflate | Route::Cpu)).map(|e| e.size).sum();
         let t0 = Instant::now();
         let mut err = std::io::stderr();
-        while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(250));
+        let mut next = t0;
+        loop {
+            next += Duration::from_millis(250);
+            // parked until the next line is due or run() wakes it (it may also wake for nothing)
+            while !stop.load(Ordering::Acquire) && Instant::now() < next {
+                std::thread::park_timeout(next.saturating_duration_since(Instant::now()));
+            }
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
             let c = *self.counts.lock().unwrap();
             let done = c[0].bytes + c[1].bytes;
             let rate = done as f64 / t0.elapsed().as_secs_f64() / 1e9;
@@ -751,8 +762,9 @@ impl<'a> Run<'a> {
                 h.join().unwrap();
             }
             this.run_7z_entries();
-            stop.store(true, Ordering::Relaxed);
+            stop.store(true, Ordering::Release);
             if let Some(h) = progress {
+                h.thread().unpark();
                 h.join().unwrap();
             }
         });

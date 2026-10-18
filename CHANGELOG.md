@@ -68,12 +68,18 @@
   threads at once, and gpuinflate is not used again in that run. The note says what failed,
   instead of counting it among the GPU results that failed the CRC check.
 
+### Fixed
+- `x` and `t` run in a terminal no longer wait up to 250 ms after their work for the thread
+  that draws the progress line to wake: a ZIP of one entry takes 8 ms instead of 259 ms, 300
+  small files extract in 90 ms instead of 260. With stderr redirected (scripts, benchmarks)
+  nothing changes: that thread is not started.
+
 ### Removed
 - The Python version (`python/`), the first implementation, kept as a reference. It was never
   released (the packages hold the Rust build only), did less (no rescue, no gpuinflate, .gz and
   tar handed to 7-Zip), and every change had to be made twice. It is in 0.1.0 and 0.1.1. The
-  tests and `bench/bench.py` now run the Rust build alone; `bench/results.*` keep the Python
-  columns of their last run until the next one.
+  tests and `bench/bench.py` now run the Rust build alone; `bench/results.*` hold the Rust rows
+  of their last run.
 
 ## 0.1.1 (2026-10-17)
 
