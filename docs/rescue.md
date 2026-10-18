@@ -101,10 +101,11 @@ A rescue's memory does not grow with the file. gzrescue keeps the first 128 MB o
 memory and, of the rest, only what inferring lost bytes needs (each lost window byte's places
 with the bytes around them, and the exact bytes near the damage its model learns from); the rest
 is decoded a second time, the same way, as it is written out, and a `.tar.gz` is extracted as the
-output comes. What it holds grows with the damage instead, about 40 bytes for each place a lost
-byte was copied to: under 1 GB for linux-6.6.tar.gz (1.4 GB of output) damaged in any of the
-eleven ways below, 7.5 GB for enwik9.zip with 1,835 damaged blocks of Wikipedia text, whose lost
-bytes were copied 237 million times. The search for block headers and the scoring of lost bytes
+output comes. What it holds grows with the damage instead, about 15 bytes for each place a lost
+byte was copied to (the places are packed: most bytes around one are the next lost bytes, copied
+along with it): under 1 GB for linux-6.6.tar.gz (1.4 GB of output) damaged in any of the eleven
+ways below, 4.3 GB for enwik9.zip with 1,835 damaged blocks of Wikipedia text, whose lost bytes
+were copied 237 million times. The search for block headers and the scoring of lost bytes
 use every CPU core.
 
 `--max-output` stops a rescue whose output would grow past a limit (by default 100 times the
