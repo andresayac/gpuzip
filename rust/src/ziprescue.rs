@@ -302,6 +302,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
     // an Office document; when cut short it has lost [Content_Types].xml, written last
     let office = tasks.iter().any(|t| t.name == "[Content_Types].xml")
         || (keep_parts && tasks.iter().any(|t| ["word/", "xl/", "ppt/"].iter().any(|d| t.name.starts_with(d))));
+    let mut cr_left = CR_SEARCH_PER_FILE;
 
     for t in tasks {
         if t.name.ends_with('/') {
@@ -340,7 +341,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
         let mut best: Option<(Status, Vec<u8>, String)> = None;
         for start in starts {
             let limit = next_header_after(start);
-            let (status, bytes, detail, crs) = recover_entry(data, lib, &t, start, limit, fill);
+            let (status, bytes, detail, crs) = recover_entry(data, lib, &t, start, limit, fill, &mut cr_left);
             if status == Status::Intact && crs > 0 {
                 o.crs_restored += crs as u64;
                 o.cr_entries += 1;
@@ -404,8 +405,14 @@ fn lost_bytes(data: &[u8], t: &Task, start: usize, limit: usize) -> u8 {
     }
 }
 
-/// One entry's data from `start`, bounded by `limit`: (status, bytes, detail, CRs put back)
-fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize, fill: u8) -> (Status, Vec<u8>, String, u32) {
+/// What the searches for CRs an ASCII-mode transfer removed may decode in one file, all entries
+/// together (each at most 1 GiB): a ZIP of thousands of entries that each lost a few would
+/// otherwise take hours. The CRC judges every repair, so the limit only gives up on some.
+const CR_SEARCH_PER_FILE: u64 = 16 << 30;
+
+/// One entry's data from `start`, bounded by `limit`: (status, bytes, detail, CRs put back).
+/// `cr_left`: what the search for lost CRs may still decode in this file.
+fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize, fill: u8, cr_left: &mut u64) -> (Status, Vec<u8>, String, u32) {
     if start >= data.len() {
         return (Status::Lost, Vec::new(), "data lies beyond the end of the file".into(), 0);
     }
@@ -457,7 +464,9 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
         }
         let mut out = Vec::with_capacity(t.size.unwrap_or(slice.len() as u64 * 3) as usize);
         let (mut unknown, mut inferred) = (0u64, 0u64);
-        let report = lib.rescue_raw(slice, (t.size, t.crc), fill, lost_bytes(data, t, start, limit), |d, m| {
+        // with the file's budget spent, no CRs are looked for (255: none lost)
+        let crs = if *cr_left == 0 { 255 } else { lost_bytes(data, t, start, limit) };
+        let report = lib.rescue_raw(slice, (t.size, t.crc), fill, crs, (*cr_left).min(1 << 30), |d, m| {
             out.extend_from_slice(d);
             unknown += m.iter().filter(|&&x| x == UNKNOWN).count() as u64;
             inferred += m.iter().filter(|&&x| x == INFERRED).count() as u64;
@@ -468,6 +477,7 @@ fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize
             Err(e) => return (Status::Lost, Vec::new(), e, 0),
         };
         let s = &report.stats;
+        *cr_left = cr_left.saturating_sub(s.cr_decoded);
         let crs = s.cr_restored;
         let cut = t.csize.map_or(false, |c| ((end - start) as u64) < c) || s.truncated != 0;
         if s.damaged > 0 || unknown > 0 || inferred > 0 || cut {

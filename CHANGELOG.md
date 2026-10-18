@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Rescue
+- Small files and repetitive data packed into one Deflate block are rescued honestly: zeros (or
+  the 0xFF of erased flash) inside a block mark where its damage begins, so what came before them
+  is exact and the rest flagged, and a one-block stream whose CRC fails though it decoded in
+  step is flagged from them on instead of every byte called exact. On 159 such files, bytes
+  wrongly marked exact went from 57 million to 13.
+- A rescue's memory no longer grows with its output, only with the damage: a damaged .gz of 2 GB
+  peaked at 24.8 GB and now takes 1.2 GB; linux-6.6.tar.gz, damaged eleven ways, 11-13.6 GB and
+  now 0.5-0.8 GB; Python-3.14.0.tgz 1.2-1.9 GB and now 0.5-0.9 GB. Past the first 128 MB the
+  output is decoded again as it is written, and a .tar.gz is extracted as it comes. What is
+  recovered is the same, byte for byte and file for file (66 real-world and 66 generated damaged
+  files).
+- `--max-output SIZE` stops a rescue whose output would grow past a limit (a decompression bomb):
+  by default 100 times the input, at least 4 GB; `0` for none.
+- Faster: the search for block headers and the scoring of lost bytes run on every core, and the
+  scoring looks again only at bytes whose surroundings changed. A 475 MB ZIP of data that hardly
+  compresses went from 15-153 s to 4-39 s per damage, silesia.zip after an FTP transfer from
+  136 s to 15 s, enwik9.zip damaged from 9-14 minutes to 1-1.6.
+- The search for the CRs an FTP transfer removed tries the second CR's places in parallel and
+  stops at 16 GB of decoding per file (1 GB per entry, as before).
+- tar.gz files from GNU gzip (python.org, gnu.org) and pigz (kernel.org) are no longer taken for
+  damaged: GNU gzip ends some blocks at a multiple of 4,096 symbols and pigz at the end of each
+  128 KiB chunk, where zlib always fills them to 16,383; a `.gz` stored inside the tar is told
+  apart from the stream around it; and a stream whose CRC checks is never flagged. An undamaged
+  Python-3.14.0.tgz had 181 blocks flagged and 1,245 of its 5,045 files called intact; now all.
+  Its damaged copies give back 4,000 to 4,900 files instead of about 1,300.
+- Damage that can keep the decoder in step (flipped bits, CRs removed by an ASCII transfer)
+  leaves no file called intact when the checksum cannot be checked: they are written and listed
+  as decoded cleanly but unconfirmed ("unverified" in --json), since the same damage may lie
+  where it changed nothing a decoder sees. It is recognized by a block in step with a symbol count
+  its encoder never writes (and no zeros to account for it), by a broken block that one flipped
+  bit mends, by a CRC that fails though every block stayed in step, or by the transfer itself,
+  whose detection no longer misses the few CR LF pairs that CR CR LF leaves. Other data written
+  over a cluster can look the same and is treated the same. gzrescue's ABI is now 4 (gr_options
+  gains max_output and cr_budget, gr_stats cr_decoded and hidden_damage).
+
 ## 0.1.1 (2026-10-17)
 
 ### Fixed

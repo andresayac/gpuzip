@@ -26,8 +26,11 @@ CRC, with no location. The one tool for this, gzrecover, dates from 2000s and it
    damage: that block is kept but marked suspect, and decoding restarts at the next header. Only
    the damaged block is in doubt.
 3. **Catches damage that stays in step.** zlib puts the same number of symbols in every block
-   (16,383 by default). A block that landed correctly but holds a different count was damaged
-   in a way the decoder could not see; a second pass treats it as suspect. (A bit flip that only
+   (16,383 by default); pigz too, but for the block that ends each of its 128 KiB chunks; GNU
+   gzip ends a block at 32,767 symbols or at any multiple of 4,096 (trees.c, ct_tally). A block
+   that landed correctly but holds a count its encoder never writes was damaged in a way the
+   decoder could not see; a second pass treats it as suspect. A stream whose CRC checks is never
+   flagged this way. (A bit flip that only
    changes one literal into another keeps the count and the alignment: undetectable, and gzip
    cannot see it either.)
 4. **Marks what cannot be known.** After a damaged block the 32 KB window is untrusted: bytes
@@ -37,6 +40,8 @@ CRC, with no location. The one tool for this, gzrecover, dates from 2000s and it
 5. **Keeps the offsets right.** The damaged block's true length is taken from the gzip trailer
    when there is one such block (spread by compressed size when there are several), so the data
    after it sits where it belongs and a tar stays extractable.
+6. **Finds where the damage begins inside a block**, when it is a run of zeros or 0xFF bytes:
+   the block is split there, exact before it, suspect after (see "Files of one block").
 
 Output: the recovered data (`--fill` for unknown bytes), a JSON report of every piece and what
 happened to it, and `--mask`: one byte per output byte, exact / suspect / unknown.
@@ -92,6 +97,51 @@ What it says:
 Speed: 5-10 s for a 26 MB `.gz` on one CPU thread; the header scan is the GPU prefilter's job
 for large files.
 
+## Files of one block
+
+zlib starts a new block every 16,383 symbols, so a text under about 60 KB is one block, and so
+are megabytes of repetitive data (a symbol copies up to 258 bytes). Such a file has no next
+header to land on and no symbol count to compare with, and gzrescue did badly on it. Measured on
+159 single-block files (the first 8, 20 and 60 KB of `rust/src/ziprescue.rs` at zlib level 6,
+and 2.4 to 4.2 MB of one short line repeated, five lines, at levels 1, 6 and 9, RLE and
+fixed-Huffman; zeros, 0xFF, random bytes, a flipped bit or a cut, at 20, 50 and 80% of the file),
+56,956,061 wrong bytes were marked exact, in 75 of them, three ways:
+
+- A damaged block was suspect from its first byte, so nothing was certified before the damage,
+  less than gzip gives (20 KB of code with 512 zero bytes: 0 exact; gzip decodes 8,345 right).
+- Zeros decode as valid codes, and the decoder falls back in step after them and ends at the real
+  end of the stream: no block looked damaged and every byte was called exact, with only the CRC
+  failing (the same 60 KB file with 64 zero bytes: 23,054 wrong bytes exact).
+- Or the zeros keep decoding to the end of the file, which then looks truncated: 6,742,341 bytes
+  written for a 4,200,000-byte original, 4.5 million of them wrong and called exact.
+
+Now:
+
+- **Damage that writes zeros (or erases to 0xFF) begins where the run begins**: 16 such bytes or
+  more, looked for only in data already known to be damaged. A damaged block whose decode, from a
+  start in step, broke only at the run or after it, and passed no header before it, is split
+  there: what it decoded from input before the run (every bit of each of those symbols read from
+  before it) is exact, since decoding is a function of the bits read; the rest is suspect.
+- **A member decoded as one piece whose CRC or length fails** though it decoded in step is
+  flagged from the first such run on, split the same way; with no run, it is flagged whole:
+  nothing says where in it the damage is. A member of several pieces is left as it was: its CRC
+  says something is wrong somewhere, and blaming the block with the zeros would vouch for every
+  other block, which nothing checks. A first version did, and on linux-6.6.tar.gz with three
+  zeroed sectors that each decoded in step (kernel.org's gzip fills its blocks to no fixed count)
+  it flagged the first and called 81,661 files intact, 53 of them wrong; every file is again
+  unverified there.
+- **A truncated decode that ran through such a run** is suspect from the run on.
+
+On the same 159 files: 13 wrong bytes are marked exact, in one file (a piece restarted inside a
+fixed-Huffman block after the damage, at an offset nobody knows; they were there before too),
+and the exact bytes before the damage come to 186.1 million against gzip's 193.4 million right
+(160.0 million before). Random bytes and a flipped bit leave no mark where they begin: their block
+stays suspect from its start, as before. In six repetitive files the certified prefix is shorter
+than before: bytes decoded from the 0xFF run came out right by chance (a match distance that is a
+multiple of the text's period) and were called exact; they are suspect now. The assumption is
+that the damage in a block begins at its first run: a flipped bit before the zeros, in the same
+block, would pass.
+
 ## In gpuzip
 
 The method lives in `gpuinflate/rescue.cpp` (C API in `rescue.h`, built as `gzrescue.dll`, `libgzrescue.so` or `libgzrescue.dylib`, CPU
@@ -126,7 +176,9 @@ stored ones by copying, Deflate ones through `gr_rescue_raw`, the library's entr
 raw stream with a known size and CRC (they stand in for the gzip trailer). A destroyed local
 header is worked around by trying the data at the offsets the directory implies and keeping the
 one whose CRC matches. Entries are classified intact (CRC verified), partial (flagged blocks,
-unknown bytes, cut short), unverified (in step but CRC mismatch, or no CRC), lost, unsupported.
+unknown bytes, cut short), unverified (in step but CRC mismatch with nothing to place the damage,
+or no CRC), lost, unsupported. An entry decoded as one piece whose CRC fails gets a flagged
+block, from its zeros on when it has any, and is partial.
 
 `make_zip_cases.py` builds a 17 MB ZIP of 3,447 Python source files and a 300-paragraph docx
 with six kinds of damage; `check_zip.py` compares the result with the original:
@@ -137,7 +189,7 @@ with six kinds of damage; `check_zip.py` compares the result with the original:
 | directory zeroed (last 3%) | 3,390 | 1 | 49 under the zeros | |
 | 4 KB zeroed inside | 3,436 | 4 (the entries under the zeros) | 0 | directory read |
 | a local header zeroed | 3,440 | 0 | 0 | the entry found by its CRC |
-| docx: 512 zero bytes in `document.xml`'s data | 3 | 1 unverified | | 141 of 300 paragraphs in the text; repaired XML well-formed; rebuilt document opens |
+| docx: 512 zero bytes in `document.xml`'s data | 3 | 1 (its CRC fails; the damage placed at the zeros) | | 141 of 300 paragraphs in the text; repaired XML well-formed; rebuilt document opens |
 | docx: cut before the directory | 4 | 0 | | all 300 paragraphs; rebuilt document opens |
 
 Every entry called intact was identical to the original in every case. For an Office document
