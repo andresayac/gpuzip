@@ -27,7 +27,10 @@
   128 KiB chunk, where zlib always fills them to 16,383; a `.gz` stored inside the tar is told
   apart from the stream around it; and a stream whose CRC checks is never flagged. An undamaged
   Python-3.14.0.tgz had 181 blocks flagged and 1,245 of its 5,045 files called intact; now all.
-  Its damaged copies give back 4,000 to 4,900 files instead of about 1,300.
+  Its damaged copies give back 4,000 to 4,900 files instead of about 1,300. Block headers of a
+  `.gz` inside that lie in the data of the outer stream's own stored blocks are never taken for
+  the stream's: before, where the blocks fell could make an undamaged tar.gz look damaged (seen
+  on CI with this repository's source; 8 of 200 placements with zlib, 15 with zlib-ng).
 - Damage that can keep the decoder in step (flipped bits, CRs removed by an ASCII transfer)
   leaves no file called intact when the checksum cannot be checked: they are written and listed
   as decoded cleanly but unconfirmed ("unverified" in --json), since the same damage may lie

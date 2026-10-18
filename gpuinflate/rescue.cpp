@@ -1189,6 +1189,17 @@ struct Rescuer {
                 // or an embedded stream's, which this stream never lands on
                 size_t j = t0 + r.landed;
                 int chain = chain_outcome(headers, t0, j, p);
+                // Headers that all lie in the data of stored blocks this decode went through are
+                // not this stream's: a block header never sits inside a stored block's bytes, and
+                // the decode, having copied them, landed on a header of its own. However the chain
+                // from them goes, they are the data's (measured: a tar holding a .gz of 127-symbol
+                // blocks whose chain went on to land where p lands, as if p had missed them; the
+                // same tar with other file contents did not, so it hung on where blocks fell).
+                if (chain == 1) {
+                    bool all_stored = true;
+                    for (size_t q = t0; q < j && all_stored; q++) all_stored = stored_around(p, headers[q].bit).second != 0;
+                    if (all_stored) chain = 0;
+                }
                 if (chain == 0) {
                     commit(p, k, false, true);
                     cur = headers[j];

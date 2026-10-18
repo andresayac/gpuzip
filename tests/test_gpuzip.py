@@ -188,10 +188,8 @@ def build_gzips(src, work):
         g["gzip by 7-Zip -mx7"] = (p, {"seven.txt": (digest(one), 0)})
     return g
 
-def habit_archives(work):
-    """.tar.gz files whose blocks follow their encoder's habit: {label: (path, files)}. The text is
-    this repository's source, three times over where it must make enough blocks to show a habit
-    (each copy lies farther back than Deflate's window reaches, so it compresses as the first)."""
+def repo_text():
+    """This repository's source files: {path: bytes}"""
     root = os.path.join(HERE, "..")
     text = {}
     for sub in ("rust/src", "gpuinflate", "research/recovery", "docs", "tests"):
@@ -199,16 +197,25 @@ def habit_archives(work):
         for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
             if n.endswith((".rs", ".cpp", ".cu", ".cuh", ".h", ".py", ".md")):
                 text[f"{sub}/{n}"] = open(os.path.join(d, n), "rb").read()
+    return text
 
-    def tar_of(files):
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as t:
-            for name, data in files.items():
-                info = tarfile.TarInfo(name)
-                info.size, info.mtime = len(data), 0
-                t.addfile(info, io.BytesIO(data))
-        return buf.getvalue()
 
+def tar_of(files):
+    """A GNU tar of {name: bytes}, every time 0"""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as t:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size, info.mtime = len(data), 0
+            t.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def habit_archives(work):
+    """.tar.gz files whose blocks follow their encoder's habit: {label: (path, files)}. The text is
+    this repository's source, three times over where it must make enough blocks to show a habit
+    (each copy lies farther back than Deflate's window reaches, so it compresses as the first)."""
+    text = repo_text()
     made = {}
     # a .gz inside: its compressed bytes go into the outer stream's stored blocks, whose headers
     # break it up; its own block headers are not the outer stream's (blocks of 127 symbols, zlib's
@@ -454,6 +461,33 @@ def main():
             print(f"{'ok  ' if ok else 'FAIL'} rescue of a tar.gz {label}, {how}: {identical} of {len(files)} identical, "
                   f"{intact} called intact, {unverified} unverifiable, {rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}"
                   + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
+
+    # the same .gz inside, undamaged, at 120 places in the tar: whether its block headers, found in
+    # the outer stream's stored blocks, were taken for the stream's own hung on where the blocks
+    # fell (the archive above failed so on CI after an edit to this file changed its text; before
+    # the fix, 8 of 200 such places flagged with zlib, 15 with zlib-ng). None may be: 120 places
+    # miss that regression less than once in a hundred runs, in about 50 s
+    text = repo_text()
+    c = zlib.compressobj(6, zlib.DEFLATED, 31, 1)
+    inner = c.compress(b"".join(text.values())) + c.flush()
+    flagged_at = []
+    for v in range(120):
+        files = {"pad.bin": random.Random(v).randbytes(v * 1531), **{f"a/{k}": d for k, d in text.items()},
+                 "inner.txt.gz": inner, **{f"b/{k}": d for k, d in text.items()}}
+        p = os.path.join(work, "shifted.tar.gz")
+        open(p, "wb").write(gzip.compress(tar_of(files), 6, mtime=0))
+        out = os.path.join(work, "rescued_shifted")
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "rescue", p, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        if r.returncode != 0 or rep.get("damaged_blocks") != 0 or (rep.get("tar") or {}).get("intact") != len(files):
+            flagged_at.append(v)
+    failures += bool(flagged_at)
+    print(f"{'ok  ' if not flagged_at else 'FAIL'} rescue of 120 undamaged tar.gz files with a .gz inside at different places: "
+          f"{120 - len(flagged_at)} clean" + (f"; FLAGGED AS DAMAGED: variants {flagged_at[:5]}" if flagged_at else ""))
 
     # rescue of gzip files of one Deflate block: a small text, and repetitive data that
     # packs megabytes into one block, with zeros written over the middle. Zeros decode as valid
