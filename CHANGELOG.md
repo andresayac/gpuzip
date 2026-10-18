@@ -86,6 +86,12 @@
   512 MiB, a file of a .tar.gz and a .gz were the ones written as they decode: killed part way,
   they left 184 of 400 MB, 296 of 600 and 344 of 400 under their names. Nor does a wrong CRC
   leave its output any more (`gpuzip rescue` keeps what can be saved).
+- ZIP entries whose bytes overlap (a local header inside another entry's header or data) are
+  refused, by `x` and `t`, as Info-ZIP's unzip and Python's zipfile refuse them: that is how
+  zip bombs multiply their data. One 100 MB stream named by 20 entries wrote 2 GB from 103 KB,
+  and Fifield's bomb, each entry quoting the next one's header, 200 MB from 12 KB; now nothing,
+  exit 2, each entry listed as failed. The other entries are extracted. 109 ZIP files from
+  this machine (wheels, Office templates and themes, 14,224 entries) still test clean.
 
 ### Removed
 - The Python version (`python/`), the first implementation, kept as a reference. It was never

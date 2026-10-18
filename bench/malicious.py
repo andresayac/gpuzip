@@ -144,7 +144,7 @@ def main():
     lh = local_header("kernel.bin", comp, crc, len(comp), len(zeros))
     cds = [central(f"copy{i:02}.bin", crc, len(comp), len(zeros), 0) for i in range(20)]
     case("zip: 20 entries overlapping one 100 MB stream", build([lh], cds), ".zip",
-         check=lambda rc, got, info: True)  # recorded for what it does: a bomb is extracted or refused
+         check=lambda rc, got, info: rc == 2 and info["total_written_mb"] == 0)  # refused, as unzip and zipfile do
 
     # ZIP: sizes that lie
     data = os.urandom(1 << 20) + bytes(99 << 20)

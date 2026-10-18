@@ -315,6 +315,7 @@ fn list_entries(entries: &[Entry], opts: &Opts) {
             Route::Dir => "dir",
             Route::Unsafe => "unsafe",
             Route::Dup => "dup",
+            Route::Overlap => "overlap",
         };
         match counts.iter_mut().find(|(r, _)| *r == route) {
             Some((_, n)) => *n += 1,

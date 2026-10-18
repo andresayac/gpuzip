@@ -22,6 +22,8 @@ pub enum Route {
     Unsafe,
     /// a later entry has the same path
     Dup,
+    /// its bytes overlap another entry's: data shared, as in a zip bomb
+    Overlap,
 }
 
 pub struct Entry {
@@ -306,8 +308,15 @@ pub fn read_central_directory(data: &[u8], lost_ok: bool) -> Result<Vec<Entry>, 
 /// Give every entry its route and point it at its compressed bytes.
 fn plan(data: &[u8], entries: &mut [Entry]) -> Result<(), String> {
     let mut by_path: HashMap<String, usize> = HashMap::new();
+    let mut spans: Vec<(u64, u64, usize)> = Vec::new(); // each entry's bytes: local header to the end of its data
     for i in 0..entries.len() {
         let e = &mut entries[i];
+        let h = e.data_offset as usize;
+        if h + 30 <= data.len() && u32le(data, h) == 0x0403_4b50 {
+            let start = (h + 30 + u16le(data, h + 26) as usize + u16le(data, h + 28) as usize) as u64;
+            let need = if e.method == STORED && e.flags & 0x1 == 0 { e.size.max(e.csize) } else { e.csize };
+            spans.push((h as u64, start + need, i));
+        }
         e.path = safe_relpath(&e.name);
         e.route = if e.path.is_none() {
             Route::Unsafe
@@ -338,6 +347,28 @@ fn plan(data: &[u8], entries: &mut [Entry]) -> Result<(), String> {
             if let Some(prev) = by_path.insert(key, i) {
                 entries[prev].route = Route::Dup;
             }
+        }
+    }
+    // Entries whose bytes overlap, a local header inside another entry's header or data, share
+    // data, which is how a zip bomb multiplies it: one 100 MB stream named by 20 entries wrote
+    // 2 GB from 103 KB; each entry quoting the next one's header in a stored block (Fifield's
+    // "better zip bomb"), 200 MB from 12 KB. Info-ZIP's unzip and Python's zipfile refuse them;
+    // here each entry that overlaps another is skipped, the others are extracted.
+    spans.sort_unstable();
+    let (mut reach, mut holder) = (0u64, usize::MAX); // the farthest end so far, and whose
+    let mut overlaps = vec![false; entries.len()];
+    for &(start, end, i) in &spans {
+        if holder != usize::MAX && start < reach {
+            overlaps[i] = true;
+            overlaps[holder] = true;
+        }
+        if end > reach {
+            (reach, holder) = (end, i);
+        }
+    }
+    for (e, over) in entries.iter_mut().zip(overlaps) {
+        if over && matches!(e.route, Route::Deflate | Route::Cpu | Route::SevenZip | Route::Dup) {
+            e.route = Route::Overlap;
         }
     }
     Ok(())

@@ -723,6 +723,59 @@ def main():
             print(f"{'ok  ' if ok else 'FAIL'} {cmd} of a {label} holding device names: {len(written)} of {len(expect)} files back, "
                   f"renamed here: {ascii(renamed)}" + ("" if ok else f"; wrote {ascii(sorted(written))}, notes {ascii(rep.get('notes'))}"))
 
+    # entries whose bytes overlap, the way zip bombs multiply their data: one stream named by 20
+    # entries, and Fifield's, where each entry's stream opens with a stored block quoting the next
+    # one's local header (measured before: 103 KB written out as 2 GB, 12 KB as 200 MB). Each
+    # entry is refused and nothing written; `t` fails them too
+    def local_header(name, crc, csize, size):
+        n = name.encode()
+        return struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0, 8, 0, 0x21, crc, csize, size, len(n), 0) + n
+
+    def central_entry(name, crc, csize, size, at):
+        n = name.encode()
+        return struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0, 8, 0, 0x21, crc, csize, size, len(n), 0, 0, 0, 0, 0, at) + n
+
+    def zip_with(body, cds):
+        cd = b"".join(cds)
+        return body + cd + struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(cds), len(cds), len(cd), len(body), 0)
+
+    kernel = bytes(10 << 20)
+    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    kernel_z, kernel_crc = c.compress(kernel) + c.flush(), zlib.crc32(kernel)
+    one_stream = zip_with(local_header("kernel.bin", kernel_crc, len(kernel_z), len(kernel)) + kernel_z,
+                          [central_entry(f"copy{i:02}.bin", kernel_crc, len(kernel_z), len(kernel), 0) for i in range(20)])
+    stream, content, chain = kernel_z, kernel, []
+    for i in reversed(range(20)):
+        lh = local_header(f"f{i:02}.bin", zlib.crc32(content), len(stream), len(content))
+        chain.insert(0, (f"f{i:02}.bin", lh, zlib.crc32(content), len(stream), len(content)))
+        stream = b"\x00" + struct.pack("<HH", len(lh), len(lh) ^ 0xFFFF) + lh + stream
+        content = lh + content
+    cds, at = [], 0
+    for name, lh, crc, csize, size in chain:
+        cds.append(central_entry(name, crc, csize, size, at))
+        at += len(lh) + 5
+    quoting = zip_with(chain[0][1] + stream[5 + len(chain[0][1]):], cds)
+    for label, bomb in (("one stream named by 20 entries", one_stream), ("20 entries each quoting the next (Fifield)", quoting)):
+        p = os.path.join(work, "overlap.zip")
+        open(p, "wb").write(bomb)
+        out = os.path.join(work, "overlap_out")
+        shutil.rmtree(out, ignore_errors=True)
+        results = {}
+        for cmd in ("t", "x"):
+            r = subprocess.run([*GPUZIP, cmd, p, *(["-o", out] if cmd == "x" else []), "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                rep = {}
+            refused = sum(1 for f in rep.get("failed", []) if "overlap" in str(f))
+            results[cmd] = (r.returncode, refused)
+        written = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs) if os.path.isdir(out) else 0
+        ok = results["t"] == (2, 20) and results["x"] == (2, 20) and written == 0
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} a ZIP of {label} ({len(bomb):,} bytes): t and x refuse "
+              f"{results['t'][1]} and {results['x'][1]} of 20 entries (exit {results['t'][0]}, {results['x'][0]}), {written:,} bytes written")
+    shutil.rmtree(os.path.join(work, "overlap_out"), ignore_errors=True)
+
     # an extraction killed while it writes a large file leaves no part of it under its name:
     # every file there must be whole (measured before: 184 MB of 400 left as big.bin in the
     # tar.gz, 344 of 400 from the .gz, 296 of 600 of the ZIP's entry). The ZIP's is past the

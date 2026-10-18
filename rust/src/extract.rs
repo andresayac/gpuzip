@@ -770,6 +770,7 @@ impl<'a> Run<'a> {
             match e.route {
                 Route::Unsafe => self.fail(e, "path leaves the output folder; skipped"),
                 Route::Dup => self.note(format!("duplicate path, kept the last copy: {}", e.name)),
+                Route::Overlap => self.fail(e, "its bytes overlap another entry's (data shared, as in a zip bomb); skipped"),
                 _ if self.out_root.is_some() && zip::device_renamed(&e.name) => self.note(format!(
                     "{} uses a name this Windows takes for a device (what is written to one is lost): written as {}",
                     e.name,
