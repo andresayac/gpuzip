@@ -12,9 +12,10 @@
 //    with another count was damaged in a way landing cannot see: a second pass flags it.
 // 4. A damaged block is kept but flagged; decoding restarts at the next header; bytes that copy
 //    from a damaged block, and whatever copies from those, are unknown.
-// 4b. A member whose CRC fails with every block in step was damaged where the decoder fell back
-//    in step: at a run of zeros or 0xFF bytes in its data (they decode as valid codes), or, with
-//    one piece and no such run, anywhere in it. That piece is flagged in another pass.
+// 4b. A member decoded as one piece whose CRC fails though it decoded in step was damaged where
+//    the decoder fell back in step: at a run of zeros or 0xFF bytes in its data (they decode as
+//    valid codes), or, with no such run, anywhere in it. It is flagged in another pass. (With
+//    several pieces nothing says which hold the damage: all are left as they are.)
 // 4c. Within a damaged piece the damage begins at the first such run, when the decode from a
 //    start in step broke only at it or after: what was decoded from the input before it is exact,
 //    the rest suspect. A truncated decode that ran through such a run is suspect from it on.
@@ -367,42 +368,39 @@ struct Rescuer {
         }
     }
 
-    // A member whose CRC or length fails though every block decoded in step was damaged in a way
-    // decoding cannot see: zeroed storage decodes as valid codes, and the decoder falls back in
-    // step after it. A run of zeros (or of 0xFF bytes) in its compressed data is that damage; with
-    // none, a member decoded as one piece has nowhere else for it to be. Returns the pieces to
-    // flag, by start bit, and why.
+    // A member decoded as one piece whose CRC or length fails though it decoded in step was
+    // damaged in a way decoding cannot see: zeroed storage decodes as valid codes, and the
+    // decoder falls back in step after it. The piece is flagged, from a run of zeros (or 0xFF
+    // bytes) in its data on when there is one (localize splits it there), else whole. Only the
+    // bytes before the run are vouched for. A member of several pieces is left alone: its CRC
+    // says something is wrong somewhere, and blaming the pieces with zeros would vouch for the
+    // others, which nothing checks (measured: linux-6.6.tar.gz with three zeroed sectors, each
+    // decoded in step; the first flagged, 53 wrong files were called intact). Returns the pieces
+    // to flag, by start bit, and why.
     std::map<uint64_t, std::string> crc_misses(const Outcome& o, std::vector<std::string>& notes) {
         std::map<uint64_t, std::string> out;
         for (const Member& m : o.members) {
-            if (!m.trailer || m.last_piece >= o.pieces.size() || o.pieces[m.last_piece].status != gi::OK) continue;
-            uint32_t c = 0;
-            uint64_t len = 0;
-            bool checkable = true;
-            for (size_t k = m.first_piece; k <= m.last_piece && checkable; k++) {
-                const Piece& p = o.pieces[k];
-                checkable = !p.suspect && std::all_of(p.known.begin(), p.known.end(), [](uint8_t kn) { return kn == 1; });
-                c = crc32(p.bytes.data(), p.bytes.size(), c);
-                len += p.bytes.size();
-            }
-            if (!checkable || !((m.has_crc && c != m.crc) || (m.size_known && (uint32_t)len != m.isize))) continue;
+            if (!m.trailer || m.first_piece != m.last_piece || m.last_piece >= o.pieces.size() ||
+                o.pieces[m.last_piece].status != gi::OK)
+                continue;
+            const Piece& p = o.pieces[m.last_piece];
+            if (p.suspect || !std::all_of(p.known.begin(), p.known.end(), [](uint8_t kn) { return kn == 1; })) continue;
+            uint32_t c = crc32(p.bytes.data(), p.bytes.size());
+            if (!((m.has_crc && c != m.crc) || (m.size_known && (uint32_t)p.bytes.size() != m.isize))) continue;
             std::string what = std::string("the stream's ") + (m.has_crc ? "CRC" : "length") + " does not match what was decoded";
-            const Piece& last = o.pieces[m.last_piece];
             uint64_t n = 0;
             uint8_t v = 0;
-            uint64_t at = first_run(o.pieces[m.first_piece].in_bit_start / 8, (last.in_bit_end + 7) / 8, n, v);
+            uint64_t at = first_run(p.in_bit_start / 8, (p.in_bit_end + 7) / 8, n, v);
             if (at != UINT64_MAX) {
-                size_t k = m.first_piece;
-                while (k < m.last_piece && (o.pieces[k].in_bit_end + 7) / 8 <= at) k++;
                 std::string run = "a run of " + std::to_string(n) + (v ? " 0xFF" : " zero") + " bytes at input byte " + std::to_string(at);
-                out[o.pieces[k].in_bit_start] = what + ", and " + run + " lies in this block: damage that decodes as valid codes";
-                notes.push_back(what + ", though every block decoded in step: the damage is placed where the " +
-                                (v ? "0xFF bytes" : "zeros") + " begin, and the output from there on is flagged. The bytes before "
-                                "them decoded cleanly; with the CRC failing, nothing more confirms them");
-            } else if (m.first_piece == m.last_piece) {
-                out[last.in_bit_start] = what + ", and nothing shows where in this, the stream's only piece, the damage lies";
+                out[p.in_bit_start] = what + ", and " + run + " lies in this block: damage that decodes as valid codes";
+                notes.push_back(what + ", though it decoded in step: the damage is placed where the " + (v ? "0xFF bytes" : "zeros") +
+                                " begin, and the output from there on is flagged. The bytes before them decoded cleanly; with the "
+                                "CRC failing, nothing more confirms them");
+            } else {
+                out[p.in_bit_start] = what + ", and nothing shows where in this, the stream's only piece, the damage lies";
                 notes.push_back(what + ", though it decoded in step, and nothing shows where the damage lies: decoded in one piece (" +
-                                std::to_string(last.blocks) + " block" + (last.blocks == 1 ? "" : "s") + "), all of it is flagged");
+                                std::to_string(p.blocks) + " block" + (p.blocks == 1 ? "" : "s") + "), all of it is flagged");
             }
         }
         return out;

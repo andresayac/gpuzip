@@ -8,7 +8,7 @@
  * through the sink with a mask: per byte, GR_EXACT, GR_SUSPECT (inside a damaged block: right
  * from its start, wrong from somewhere inside; when the damage is a run of zeros or 0xFF bytes,
  * the block is split there and what came before it is exact) or GR_UNKNOWN (written as the fill
- * byte). A member whose CRC fails with every block in step gets the damage placed the same way. A
+ * byte). A member of one piece whose CRC fails though it decoded in step is flagged the same way. A
  * damaged block's true length is taken from the trailer when it is the only one, so the data
  * after it keeps its offsets. See research/recovery/README.md for what this recovers. */
 #ifndef GZRESCUE_H

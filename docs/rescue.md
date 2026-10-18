@@ -29,8 +29,8 @@ format, and in a ZIP whose transfer went the other way (every CR LF made LF) the
 back entry by entry, where each entry's CRC confirms them; the zeros a crash or an unfinished download leaves at the end are not taken for data;
 and a block that decoded through zeros to the end of the file is caught by its symbol count.
 Zeros (or the 0xFF of erased flash) inside a damaged block mark where its damage begins: the
-block is split there, exact before them, flagged after; a stream whose CRC fails though every
-block decoded in step gets the block holding them flagged. That is what saves a small file, or
+block is split there, exact before them, flagged after; a one-block stream whose CRC fails
+though it decoded in step is flagged from them on. That is what saves a small file, or
 repetitive data, that Deflate packed into one block, with no next header to land on. For
 a `.tar.gz` the files are then extracted from the recovered stream. Tar headers copy their
 repeated fields from the header before them, so after damage their unknown bytes are made whole

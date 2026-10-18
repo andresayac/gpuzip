@@ -119,9 +119,14 @@ Now:
   start in step, broke only at the run or after it, and passed no header before it, is split
   there: what it decoded from input before the run (every bit of each of those symbols read from
   before it) is exact, since decoding is a function of the bits read; the rest is suspect.
-- **A member whose CRC or length fails with every block in step** gets the block holding the
-  first such run flagged, and then split the same way. With no run, a member decoded in one piece
-  is flagged whole: nothing says where in it the damage is.
+- **A member decoded as one piece whose CRC or length fails** though it decoded in step is
+  flagged from the first such run on, split the same way; with no run, it is flagged whole:
+  nothing says where in it the damage is. A member of several pieces is left as it was: its CRC
+  says something is wrong somewhere, and blaming the block with the zeros would vouch for every
+  other block, which nothing checks. A first version did, and on linux-6.6.tar.gz with three
+  zeroed sectors that each decoded in step (kernel.org's gzip fills its blocks to no fixed count)
+  it flagged the first and called 81,661 files intact, 53 of them wrong; every file is again
+  unverified there.
 - **A truncated decode that ran through such a run** is suspect from the run on.
 
 On the same 159 files: 13 wrong bytes are marked exact, in one file (a piece restarted inside a
@@ -169,8 +174,8 @@ raw stream with a known size and CRC (they stand in for the gzip trailer). A des
 header is worked around by trying the data at the offsets the directory implies and keeping the
 one whose CRC matches. Entries are classified intact (CRC verified), partial (flagged blocks,
 unknown bytes, cut short), unverified (in step but CRC mismatch with nothing to place the damage,
-or no CRC), lost, unsupported. An entry whose CRC fails with a run of zeros in its data, or that
-is a single piece, gets a flagged block and is partial.
+or no CRC), lost, unsupported. An entry decoded as one piece whose CRC fails gets a flagged
+block, from its zeros on when it has any, and is partial.
 
 `make_zip_cases.py` builds a 17 MB ZIP of 3,447 Python source files and a 300-paragraph docx
 with six kinds of damage; `check_zip.py` compares the result with the original:

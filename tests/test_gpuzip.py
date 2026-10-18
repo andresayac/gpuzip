@@ -252,17 +252,22 @@ def main():
         print(f"{'ok  ' if ok else 'FAIL'} damaged gzip refused{'':<26} {mode:<5} {(rep.get('failed') or [{}])[0].get('reason', rep)}")
 
     # rescue (Rust only): a .tar.gz with a zeroed stretch must give back nearly every file, the
-    # damage must be reported, and no file the report calls intact may differ from the source
+    # damage must be reported, and no file the report calls intact may differ from the source.
+    # Two stretches in the random blobs (stored blocks) both decode in step: the CRC fails and
+    # cannot say where, so blaming the block with the first one would vouch for the other
     if os.environ.get("GPUZIP_BIN"):
         src_tgz = archives["tar.gz (Python tarfile)"]
         files = {k: v for k, v in expected.items() if v[0] != "dir"}
-        for where in (0.4, 0.85):  # the random blobs (stored blocks: only the CRC can tell), then text
+        for where in ((0.4,), (0.85,), (0.25, 0.4)):  # the random blobs, then text, then two in the blobs
             data = bytearray(open(src_tgz, "rb").read())
-            p = int(len(data) * where)
-            data[p:p + 2048] = bytes(2048)
-            bad = os.path.join(work, f"damaged{int(where * 100)}.tar.gz")
+            for w in where:
+                p = int(len(data) * w)
+                data[p:p + 2048] = bytes(2048)
+            label = " and ".join(f"{int(w * 100)}%" for w in where)
+            bad = os.path.join(work, f"damaged{int(where[0] * 100)}.tar.gz")
             open(bad, "wb").write(bytes(data))
-            out = os.path.join(work, f"rescued{int(where * 100)}")
+            out = os.path.join(work, f"rescued{int(where[0] * 100)}")
+            shutil.rmtree(out, ignore_errors=True)
             r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
             try:
                 rep = json.loads(r.stdout.strip().splitlines()[-1])
@@ -275,11 +280,15 @@ def main():
             # the test's text repeats a small vocabulary, so a damaged block taints what copies from
             # it for a long way: many files come back partial, and that is the honest answer
             reported = rep.get("damaged_blocks", 0) >= 1 or rep.get("crc_check") == 0
-            ok = r.returncode == 2 and reported and identical >= 0.5 * len(files) and identical >= intact
+            # files called intact: every file not listed otherwise, unless all are unverifiable
+            flagged = set(t.get("inferred", [])) | set(t.get("suspect", [])) | set(t.get("partial", []))
+            intact_wrong = [] if unverified else [k for k, v in files.items() if k in got and got[k][0] != v[0] and k not in flagged]
+            ok = r.returncode == 2 and reported and identical >= 0.5 * len(files) and identical >= intact and not intact_wrong
             failures += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} rescue of a tar.gz zeroed at {int(where * 100)}%: {identical} of {len(files)} files identical, "
+            print(f"{'ok  ' if ok else 'FAIL'} rescue of a tar.gz zeroed at {label}: {identical} of {len(files)} files identical, "
                   f"{intact} called intact, {unverified} unverifiable, {len(t.get('partial', []))} partial, "
-                  f"{rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}")
+                  f"{rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}"
+                  + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
 
     # rescue of gzip files of one Deflate block (Rust only): a small text, and repetitive data that
     # packs megabytes into one block, with zeros written over the middle. Zeros decode as valid
