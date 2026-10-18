@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Rescue
+- Small files and repetitive data packed into one Deflate block are rescued honestly: zeros (or
+  the 0xFF of erased flash) inside a block mark where its damage begins, so what came before them
+  is exact and the rest flagged, and a one-block stream whose CRC fails though it decoded in
+  step is flagged from them on instead of every byte called exact. On 159 such files, bytes
+  wrongly marked exact went from 57 million to 13.
+
 ## 0.1.1 (2026-10-17)
 
 ### Fixed

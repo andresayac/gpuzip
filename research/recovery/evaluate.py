@@ -165,8 +165,14 @@ def eval_gz(case, o, work):
         g = np.frombuffer(open(out_p, "rb").read(), dtype=np.uint8)
         m = np.frombuffer(open(mask_p, "rb").read(), dtype=np.uint8)
         covered = np.zeros(len(orig), dtype=bool)
+        prev = None  # the piece before, and where it went
         for pc in json.load(open(rep_p))["pieces"]:
             t = starts.get(mp(pc["in_byte_start"]))
+            if t is None and prev and not prev[0]["suspect"] and pc["suspect"] and pc["in_byte_start"] == prev[0]["in_byte_end"]:
+                # a damaged block split where its damage begins: the rest goes on right after the
+                # exact bytes before it, decoded from the block's start
+                t = prev[1] + prev[0]["length"]
+            prev = (pc, t) if t is not None else None
             if t is None:
                 continue  # a restart inside a block: no place to compare it with; not counted
             a, n = pc["out_offset"], min(pc["length"], len(orig) - t)

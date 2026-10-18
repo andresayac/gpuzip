@@ -12,6 +12,13 @@
 //    with another count was damaged in a way landing cannot see: a second pass flags it.
 // 4. A damaged block is kept but flagged; decoding restarts at the next header; bytes that copy
 //    from a damaged block, and whatever copies from those, are unknown.
+// 4b. A member decoded as one piece whose CRC fails though it decoded in step was damaged where
+//    the decoder fell back in step: at a run of zeros or 0xFF bytes in its data (they decode as
+//    valid codes), or, with no such run, anywhere in it. It is flagged in another pass. (With
+//    several pieces nothing says which hold the damage: all are left as they are.)
+// 4c. Within a damaged piece the damage begins at the first such run, when the decode from a
+//    start in step broke only at it or after: what was decoded from the input before it is exact,
+//    the rest suspect. A truncated decode that ran through such a run is suspect from it on.
 // 5. The damaged block's true length comes from the trailer when there is one such block.
 // 6. The unknown bytes are inferred: each is a copy of one byte of the window that was lost, and
 //    every copy of it appears somewhere in the output with bytes around it. A model of the file's
@@ -43,9 +50,12 @@ constexpr uint64_t SCRATCH = 32u << 20;      // symbols decoded per run() call
 constexpr uint64_t VERIFY_OUT = 256u << 10;  // a header is confirmed by decoding this much (or to the end) from it
 constexpr uint32_t VERIFY_BLOCKS = 2;
 constexpr uint64_t FIXED_SEARCH = 8ull << 23;  // bits: how far past an error to try resynchronizing in a fixed block
+constexpr uint64_t RUN = 16;                    // bytes of 0x00 or 0xFF in a row that mark where damage begins
+constexpr uint64_t MAX_SYMBOL_BITS = 48;        // one symbol: a 15-bit length code, 5 extra bits, a 15-bit distance code, 13
 
 struct Piece {
     uint64_t in_bit_start = 0, in_bit_end = 0;
+    gi::Start start{UINT64_MAX, UINT64_MAX, gi::AT_BLOCK, -1};  // where its decode began
     std::vector<uint8_t> bytes, known;  // known: 0 unknown, 1 exact, 2 inferred
     std::vector<uint32_t> var;          // an unknown byte: the window byte it copies (0: none)
     bool suspect = false;       // damaged somewhere inside
@@ -53,6 +63,8 @@ struct Piece {
     uint64_t true_len = 0;      // suspect: what its length must have been (0: unknown)
     bool stream_start = false;  // began at a gzip member's first block
     bool landed = false;        // ended by landing on the next header
+    bool anchored = false;      // its start is a real block start: the decode before it was in step, or it landed
+    bool by_crc = false;        // flagged because the member's CRC or length failed, every block in step
     int status = gi::OK;
     uint32_t blocks = 0, symbols = 0;
     uint64_t last_block_bit = UINT64_MAX;  // header of the last block it started
@@ -172,6 +184,7 @@ struct Rescuer {
     // of trusted output when there is one, else they are unknown.
     gi::Result decode_piece(gi::Start s, bool stream_start, const gi::Start* targets, int ntargets, Piece& piece) {
         piece.in_bit_start = s.bit;
+        piece.start = s;
         piece.stream_start = stream_start;
         // a piece with no window before it: its references before its start are copies of
         // the lost window's bytes, each a variable
@@ -281,6 +294,8 @@ struct Rescuer {
         t.known.assign(p.known.begin() + at, p.known.end());
         t.var.assign(p.var.begin() + at, p.var.end());
         t.in_bit_start = p.last_block_bit;
+        t.start = {p.last_block_bit, p.last_block_bit, gi::AT_BLOCK, -1};
+        t.anchored = p.anchored;  // the decode reached its header in step from p's start
         t.in_bit_end = p.in_bit_end;
         t.status = p.status;
         t.blocks = 1;
@@ -307,6 +322,169 @@ struct Rescuer {
                 note = "the decode ran to the end of the file through damaged data: its last block holds more symbols than the stream's blocks do";
     }
 
+    // The first run of at least RUN bytes of 0x00 (zeroed storage, a crash, a hole in a download)
+    // or 0xFF (erased flash) that starts in [from, to). UINT64_MAX: none.
+    uint64_t first_run(uint64_t from, uint64_t to, uint64_t& len, uint8_t& value) const {
+        to = std::min(to, size);
+        for (uint64_t i = from; i < to;) {
+            uint8_t v = in[i];
+            uint64_t j = i + 1;
+            if (v == 0 || v == 0xff) {
+                while (j < size && in[j] == v) j++;
+                if (j - i >= RUN) {
+                    len = j - i;
+                    value = v;
+                    return i;
+                }
+            }
+            i = j;
+        }
+        return UINT64_MAX;
+    }
+
+    // What piece p's decode produced from input before bit `damage`, every bit of every symbol
+    // read from before it: {output bytes, symbols}. Decoding is a function of the bits read, so
+    // these are what the undamaged file decodes to, whatever lies from `damage` on.
+    std::pair<uint64_t, uint64_t> output_before(const Piece& p, uint64_t damage) {
+        if (p.start.bit == UINT64_MAX || damage < p.start.bit + MAX_SYMBOL_BITS) return {0, 0};
+        uint64_t stop = damage - MAX_SYMBOL_BITS;  // a symbol begun before it ends before the damage
+        gi::Start st = p.start;
+        bool first = p.stream_start;
+        uint64_t out = 0, syms = 0;
+        for (;;) {
+            gi::Result q = dec.run(in, size, st, nullptr, 0, scratch.data(), (uint32_t)scratch.size(), first, stop);
+            first = false;
+            if (q.status == gi::ERR_OVERFLOW) {
+                out += q.out_len;
+                syms += q.symbols;
+                st = q.resume;
+                continue;
+            }
+            if (q.status != gi::STOPPED) return {0, 0};  // p's own decode went on past here: not reached
+            // a stored block is copied whole: one begun before the stop may reach past the damage
+            if (q.end_bit > damage && q.last_block_bit != UINT64_MAX && q.out_len > q.last_block_out)
+                return {out + q.last_block_out, syms + q.symbols};
+            return {out + q.out_len, syms + q.symbols};
+        }
+    }
+
+    // A member decoded as one piece whose CRC or length fails though it decoded in step was
+    // damaged in a way decoding cannot see: zeroed storage decodes as valid codes, and the
+    // decoder falls back in step after it. The piece is flagged, from a run of zeros (or 0xFF
+    // bytes) in its data on when there is one (localize splits it there), else whole. Only the
+    // bytes before the run are vouched for. A member of several pieces is left alone: its CRC
+    // says something is wrong somewhere, and blaming the pieces with zeros would vouch for the
+    // others, which nothing checks (measured: linux-6.6.tar.gz with three zeroed sectors, each
+    // decoded in step; the first flagged, 53 wrong files were called intact). Returns the pieces
+    // to flag, by start bit, and why.
+    std::map<uint64_t, std::string> crc_misses(const Outcome& o, std::vector<std::string>& notes) {
+        std::map<uint64_t, std::string> out;
+        for (const Member& m : o.members) {
+            if (!m.trailer || m.first_piece != m.last_piece || m.last_piece >= o.pieces.size() ||
+                o.pieces[m.last_piece].status != gi::OK)
+                continue;
+            const Piece& p = o.pieces[m.last_piece];
+            if (p.suspect || !std::all_of(p.known.begin(), p.known.end(), [](uint8_t kn) { return kn == 1; })) continue;
+            uint32_t c = crc32(p.bytes.data(), p.bytes.size());
+            if (!((m.has_crc && c != m.crc) || (m.size_known && (uint32_t)p.bytes.size() != m.isize))) continue;
+            std::string what = std::string("the stream's ") + (m.has_crc ? "CRC" : "length") + " does not match what was decoded";
+            uint64_t n = 0;
+            uint8_t v = 0;
+            uint64_t at = first_run(p.in_bit_start / 8, (p.in_bit_end + 7) / 8, n, v);
+            if (at != UINT64_MAX) {
+                std::string run = "a run of " + std::to_string(n) + (v ? " 0xFF" : " zero") + " bytes at input byte " + std::to_string(at);
+                out[p.in_bit_start] = what + ", and " + run + " lies in this block: damage that decodes as valid codes";
+                notes.push_back(what + ", though it decoded in step: the damage is placed where the " + (v ? "0xFF bytes" : "zeros") +
+                                " begin, and the output from there on is flagged. The bytes before them decoded cleanly; with the "
+                                "CRC failing, nothing more confirms them");
+            } else {
+                out[p.in_bit_start] = what + ", and nothing shows where in this, the stream's only piece, the damage lies";
+                notes.push_back(what + ", though it decoded in step, and nothing shows where the damage lies: decoded in one piece (" +
+                                std::to_string(p.blocks) + " block" + (p.blocks == 1 ? "" : "s") + "), all of it is flagged");
+            }
+        }
+        return out;
+    }
+
+    // Damage that writes zeros (or erases to 0xFF) begins where the run of them begins. A damaged
+    // piece that decoded cleanly from a start in step up to such a run, and broke only within it
+    // or after it, holds exact bytes up to it and suspect ones from it on: it is split there. A
+    // truncated decode that ran through such a run is suspect from it on.
+    void localize(Outcome& o, const std::vector<gi::Start>& headers) {
+        std::vector<Piece> out;
+        std::vector<size_t> head_at(o.pieces.size()), tail_at(o.pieces.size());
+        for (size_t k = 0; k < o.pieces.size(); k++) {
+            Piece& p = o.pieces[k];
+            head_at[k] = out.size();
+            bool runs_out = !p.suspect && o.truncated && k + 1 == o.pieces.size() && p.status == gi::ERR_INPUT;
+            uint64_t n = 0, at = UINT64_MAX;
+            uint8_t v = 0;
+            if (p.suspect && p.anchored && p.start.mode == gi::AT_BLOCK) {
+                // the damage lies before where the decode broke (its last symbol read up to
+                // MAX_SYMBOL_BITS past that) or landed, and before any header it passed over:
+                // a decode in step lands on every real header
+                uint64_t limit = p.in_bit_end + (p.status == gi::OK ? 0 : MAX_SYMBOL_BITS);
+                auto h = std::upper_bound(headers.begin(), headers.end(), p.in_bit_start,
+                                          [](uint64_t b, const gi::Start& s) { return b < s.bit; });
+                if (h != headers.end() && h->bit < p.in_bit_end) limit = std::min(limit, h->bit);
+                at = first_run(p.in_bit_start / 8, (limit + 7) / 8, n, v);
+            } else if (runs_out) {
+                at = first_run(p.in_bit_start / 8, size, n, v);
+            }
+            auto [nb, ns] = at == UINT64_MAX ? std::pair<uint64_t, uint64_t>{0, 0} : output_before(p, at * 8);
+            nb = std::min<uint64_t>(nb, p.bytes.size());
+            if (at == UINT64_MAX || (nb == 0 && !runs_out)) {
+                out.push_back(std::move(p));
+                tail_at[k] = out.size() - 1;
+                continue;
+            }
+            std::string run = "a run of " + std::to_string(n) + (v ? " 0xFF" : " zero") + " bytes at input byte " + std::to_string(at);
+            Piece t;
+            t.in_bit_start = at * 8;
+            t.in_bit_end = p.in_bit_end;
+            t.bytes.assign(p.bytes.begin() + nb, p.bytes.end());
+            t.known.assign(p.known.begin() + nb, p.known.end());
+            t.var.assign(p.var.begin() + nb, p.var.end());
+            t.suspect = true;
+            t.by_crc = p.by_crc;
+            t.status = p.status;
+            t.landed = p.landed;
+            t.blocks = 1;
+            t.symbols = (uint32_t)(p.symbols > ns ? p.symbols - ns : 0);
+            if (runs_out)
+                t.why = "the decode ran through " + run + " and on to the end of the file: zeros where compressed data should be "
+                        "decode as valid codes, so nothing from them on is trusted";
+            else if (p.by_crc)
+                t.why = p.why;
+            else
+                t.why = p.why + "; the damage begins at " + run + ": the " + std::to_string(nb) + " bytes decoded before it are exact";
+            if (nb > 0) {
+                p.bytes.resize(nb);
+                p.known.resize(nb);
+                p.var.resize(nb);
+                p.in_bit_end = at * 8;
+                p.suspect = p.by_crc = p.landed = false;
+                p.why.clear();
+                p.status = gi::STOPPED;
+                p.symbols = (uint32_t)ns;
+                out.push_back(std::move(p));
+            } else {
+                t.stream_start = p.stream_start;
+            }
+            out.push_back(std::move(t));
+            tail_at[k] = out.size() - 1;
+            if (runs_out)
+                for (std::string& note : o.notes)
+                    if (note == "the file ends inside the stream (truncated)")
+                        note = "the decode ran through " + run + " to the end of the file: from there on the output is flagged";
+        }
+        for (Member& m : o.members) {
+            if (m.first_piece < head_at.size()) m.first_piece = head_at[m.first_piece];
+            if (m.last_piece < tail_at.size()) m.last_piece = tail_at[m.last_piece];
+        }
+        o.pieces.swap(out);
+    }
+
     // the trusted output grows by a piece; the window keeps its last 32 KB (several pieces, when
     // blocks are small)
     void set_window(const Piece& p) {
@@ -329,15 +507,16 @@ struct Rescuer {
     }
 
     // One pass over the file. `forced`: start bits of pieces known to be damaged from an earlier
-    // pass. gzip: the stream starts after a member header of hlen bytes (0: damaged, start at
-    // the first block header found) and ends with a trailer, more members may follow. Raw: the
-    // stream starts at bit 0; the caller knows its size and CRC, if anyone does.
-    Outcome rescue(const std::vector<gi::Start>& headers, bool gzip, uint64_t hlen, const std::set<uint64_t>& forced,
+    // pass, and why. gzip: the stream starts after a member header of hlen bytes (0: damaged,
+    // start at the first block header found) and ends with a trailer, more members may follow.
+    // Raw: the stream starts at bit 0; the caller knows its size and CRC, if anyone does.
+    Outcome rescue(const std::vector<gi::Start>& headers, bool gzip, uint64_t hlen, const std::map<uint64_t, std::string>& forced,
                    uint64_t expected_size = UINT64_MAX, bool has_crc = false, uint32_t expected_crc = 0) {
         Outcome o;
         drop_window();
         next_var = 1;
         bool stream_start = !gzip || hlen != 0;
+        bool in_step = stream_start;  // the decode before the next piece landed on its start
         if (gzip && !hlen) o.notes.push_back("the gzip header is damaged: decoding starts at the first block header found");
         gi::Start cur = !gzip ? gi::Start{0, 0, gi::AT_BLOCK, -1}
                         : hlen  ? gi::Start{hlen * 8, hlen * 8, gi::AT_BLOCK, -1}
@@ -357,12 +536,15 @@ struct Rescuer {
             Piece p;
             gi::Result r = decode_piece(cur, stream_start, headers.data() + t0, (int)(headers.size() - t0), p);
             stream_start = false;
+            p.anchored = in_step || (r.status == gi::OK && r.landed == 0);
+            in_step = false;
             Member& m = o.members.back();
             m.last_piece = o.pieces.size();
-            bool forced_bad = forced.count(p.in_bit_start) > 0;
+            auto fb = forced.find(p.in_bit_start);
+            bool forced_bad = fb != forced.end();
             if (forced_bad) {
                 p.suspect = true;
-                p.why = "its symbol count differs from the stream's regular one";
+                p.why = fb->second;
             }
             uint64_t t = (r.end_bit + 7) / 8, next = gzip ? t + 8 : t;
             uint64_t nh = gzip && next < size ? gzip_header(in, size, next) : 0;
@@ -375,6 +557,7 @@ struct Rescuer {
                 o.pieces.push_back(std::move(p));
                 set_window(o.pieces.back());
                 cur = headers[t0];
+                in_step = true;
                 continue;
             }
             if (r.status == gi::OK && r.landed > 0 && !forced_bad) {
@@ -386,13 +569,15 @@ struct Rescuer {
                     set_window(o.pieces.back());
                     cur = headers[j];
                     t0 = j;
+                    in_step = true;
                     continue;
                 }
                 p.why = "its decode passed over the next block header without landing on it";
             }
-            if (r.status == gi::OK && r.landed < 0 && real_end && !forced_bad) {  // the member's last block
+            if (r.status == gi::OK && r.landed < 0 && real_end) {  // the member's last block (flagged, when forced)
                 o.pieces.push_back(std::move(p));
-                set_window(o.pieces.back());
+                if (forced_bad) drop_window();
+                else set_window(o.pieces.back());
                 if (gzip && t + 8 <= size) {
                     m.trailer = true;
                     m.has_crc = true;
@@ -405,7 +590,7 @@ struct Rescuer {
                 if (nh) {
                     o.members.push_back({o.pieces.size(), o.pieces.size()});
                     cur = {(next + nh) * 8, (next + nh) * 8, gi::AT_BLOCK, -1};
-                    stream_start = true;
+                    stream_start = in_step = true;
                     drop_window();
                     continue;
                 }
@@ -429,10 +614,13 @@ struct Rescuer {
                         : r.status == gi::ERR_INPUT      ? "the decode ran off the end of the file"
                                                          : "the decode hit invalid data";
             }
-            // damaged: keep what was decoded, restart at the next header, trust no window
+            // damaged: keep what was decoded, restart at the next header, trust no window. A forced
+            // piece that landed past the next header passed over an embedded stream's (an earlier
+            // pass found it in step): it restarts where it landed
             p.suspect = true;
             o.pieces.push_back(std::move(p));
             drop_window();
+            if (forced_bad && r.status == gi::OK && r.landed > 0) t0 += r.landed;
             if (t0 < headers.size()) {
                 cur = headers[t0];
                 continue;
@@ -1026,16 +1214,25 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         std::vector<gi::Start> headers = rs.find_headers(gzip ? (hlen ? hlen * 8 : 80) : 1);
         if (gzip && headers.empty() && !hlen) return GR_ERR_NO_DEFLATE;
         if (!gzip && size == 0) return GR_ERR_NO_DEFLATE;
-        // first pass; a second one when blocks that stayed in step have the wrong symbol count
+        // first pass; a second one when blocks that stayed in step have the wrong symbol count, and
+        // another when a member's CRC fails with every block in step and the damage can be placed
         Outcome o = rs.rescue(headers, gzip, hlen, {}, expected_size, has_crc, expected_crc);
         std::string anomaly_note;
         uint32_t regular = 0;
-        std::set<uint64_t> anomalies = symbol_count_anomalies(o, anomaly_note, regular);
-        if (!anomalies.empty()) {
-            o = rs.rescue(headers, gzip, hlen, anomalies, expected_size, has_crc, expected_crc);
-            o.notes.push_back(anomaly_note);
+        std::map<uint64_t, std::string> forced;
+        for (uint64_t b : symbol_count_anomalies(o, anomaly_note, regular)) forced[b] = "its symbol count differs from the stream's regular one";
+        if (!forced.empty()) o = rs.rescue(headers, gzip, hlen, forced, expected_size, has_crc, expected_crc);
+        std::vector<std::string> crc_notes;
+        std::map<uint64_t, std::string> placed = rs.crc_misses(o, crc_notes);
+        if (!placed.empty()) {
+            forced.insert(placed.begin(), placed.end());
+            o = rs.rescue(headers, gzip, hlen, forced, expected_size, has_crc, expected_crc);
+            for (Piece& p : o.pieces) p.by_crc = placed.count(p.in_bit_start) > 0;
         }
+        if (!anomaly_note.empty()) o.notes.push_back(anomaly_note);
+        o.notes.insert(o.notes.end(), crc_notes.begin(), crc_notes.end());
         rs.suspect_overfull_tail(o, regular);
+        rs.localize(o, headers);
         if (ascii_undone) o.notes.push_back("the file had gone through an ASCII-mode transfer (every LF became CR LF): undone");
         if (crs_restored)
             o.notes.push_back(std::to_string(crs_restored) + " CR" + (crs_restored == 1 ? "" : "s") +
@@ -1117,9 +1314,10 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         // With damaged blocks in the stream its CRC cannot be checked, and "exact" means exact as
         // far as decoding can tell: measured on bit rot, a flipped bit that kept the decoder in
         // step left megabytes of a log wrong and unflagged.
+        // (A block flagged because the CRC failed has its own note.)
         if (res->stats.crc_check == -1) {
             bool damaged = false;
-            for (const Piece& p : pieces) damaged |= p.suspect;
+            for (const Piece& p : pieces) damaged |= p.suspect && !p.by_crc;
             if (damaged)
                 o.notes.push_back("with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as "
                                   "decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal "
