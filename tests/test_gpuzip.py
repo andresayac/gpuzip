@@ -555,7 +555,10 @@ def main():
     # an entry whose local header is destroyed, with the 28-byte extra field Info-ZIP writes:
     # its data is looked for at several places after where the header was, and the one where
     # the stream begins, or else whose data ends where the next header begins, must win; from
-    # the wrong one the output is cut short and out of place
+    # the wrong one the output is cut short and out of place. How much the damaged block costs
+    # depends on the zlib that made the archive: zlib-ng (Python 3.14 on Windows) ends blocks
+    # sooner than zlib (Linux, macOS), and the right start gives back 76-91% of the entry in
+    # place, the wrong one 3-5%. Half is the bar.
     rnd = random.Random(5)
     words = ["".join(rnd.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rnd.randint(2, 9))) for _ in range(3000)]
     texts = {f"w{k}.txt": " ".join(rnd.choice(words) for _ in range(150000)).encode() for k in range(3)}
@@ -592,7 +595,7 @@ def main():
         orig = texts["w1.txt"]
         in_place = sum(1 for a, b in zip(got, orig) if a == b)
         others = all(status.get(n) == "intact" and open(os.path.join(out, n), "rb").read() == texts[n] for n in ("w0.txt", "w2.txt"))
-        ok = status.get("w1.txt") == "partial" and len(got) == len(orig) and in_place >= 0.9 * len(orig) and others
+        ok = status.get("w1.txt") == "partial" and len(got) == len(orig) and in_place >= 0.5 * len(orig) and others
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} rescue of an Info-ZIP entry with {label}: {in_place:,} of {len(orig):,} bytes "
               f"right in place, {status.get('w1.txt')}, the other entries intact {others}, exit {r.returncode}")
