@@ -32,6 +32,11 @@ in every mode and compares every byte and timestamp, then damages archives and c
 `gpuzip rescue` gives back. Without a GPU the gpu modes are skipped; CI runs everything else on
 Windows, Linux and macOS for every pull request.
 
+Before a release, or after a change to how archives are read or written, run the real-world
+campaign in [docs/testing.md](docs/testing.md): public and generated archives against 7-Zip,
+hostile ones, fuzzing, other file systems, a busy GPU, and the A/B of `bench/realworld.py`
+between the last release and the change (0 silent errors is the bar).
+
 A change to rescue should also pass the damage that happens in practice, in
 [research/recovery](research/recovery): `realistic.py` breaks six files in eleven ways and
 `evaluate.py` compares gpuzip with gzip, tar, 7-Zip and Python's zipfile. A change to gpuinflate
