@@ -20,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Ubuntu named, not ubuntu-latest: that moves to 26.04 from 2026-10-19, and a new image is
+        # taken on when it has been tried, not on GitHub's date
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -38,7 +40,7 @@ jobs:
       - name: Rust
         run: rustup update stable --no-self-update && rustup default stable
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
