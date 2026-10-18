@@ -22,6 +22,14 @@
   136 s to 15 s, enwik9.zip damaged from 9-14 minutes to 1-1.6.
 - The search for the CRs an FTP transfer removed tries the second CR's places in parallel and
   stops at 16 GB of decoding per file (1 GB per entry, as before).
+- A ZIP entry whose local header is destroyed is rescued from where its data really starts. Its
+  data was looked for at up to six places after where the header was, each a whole rescue, and on
+  a tie the first was kept: with an extra field (Info-ZIP writes 28 bytes) that was the wrong one,
+  its output cut short and out of place. Now the place where a Deflate stream begins is rescued
+  alone; else the one whose data ends where the next header begins comes first; inside a hole of
+  zeros or 0xFF one rescue is enough. A 475 MB ZIP with torrent holes: 41 s to 14 s, the same
+  bytes. Of 3,318 such entries in nine real ZIPs damaged eleven ways, 4 come back better (one
+  from 2,325 bytes right to 284,706 of 566,666, one from 0 to 8,654 of 8,659), none worse.
 
 ## 0.1.1 (2026-10-17)
 

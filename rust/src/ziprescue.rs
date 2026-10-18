@@ -326,6 +326,8 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
         }
         // where the data starts: from the local header, or guessed when that header is destroyed
         let mut starts: Vec<usize> = Vec::new();
+        // a rescue of the entry from each start, until one comes out this good: a whole rescue each
+        let mut enough = Status::Intact;
         match t.data_offset {
             Some(d) => starts.push(d),
             None => {
@@ -336,6 +338,9 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
                     }
                 }
                 rec.detail = "local header destroyed; data found by its CRC".into();
+                if t.method == DEFLATED {
+                    enough = order_starts(data, &t, &mut starts, |s| lost_bytes(data, &t, s, next_header_after(s)) == 255);
+                }
             }
         }
         let mut best: Option<(Status, Vec<u8>, String)> = None;
@@ -353,7 +358,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
             if better {
                 best = Some((status, bytes, detail));
             }
-            if status == Status::Intact {
+            if (status as u8) <= (enough as u8) {
                 break;
             }
         }
@@ -403,6 +408,56 @@ fn lost_bytes(data: &[u8], t: &Task, start: usize, limit: usize) -> u8 {
         [] if rooms.iter().all(|&d| room.saturating_sub(d) + 8 < csize) => 254,
         _ => 0,
     }
+}
+
+/// Output a guessed start must decode to, cleanly and as the beginning of a stream, to be taken for
+/// where an entry's data begins: what gzrescue decodes to confirm a block header it finds.
+const PROBE_OUT: u64 = 256 << 10;
+
+/// Whether the entry's Deflate stream begins at `start`: from there its first PROBE_OUT bytes (all
+/// of it, when the entry is smaller) decode cleanly, nothing referring back before the start.
+fn stream_begins(data: &[u8], t: &Task, start: usize) -> bool {
+    let want = t.size.map_or(PROBE_OUT, |s| s.min(PROBE_OUT));
+    let mut out = vec![0u8; want as usize];
+    match libdeflater::Decompressor::new().deflate_decompress(&data[start..], &mut out) {
+        // the whole stream: as long as the entry
+        Ok(n) => t.size.map_or(true, |s| n as u64 == s),
+        // the probe's worth, and the entry is longer
+        Err(libdeflater::DecompressionError::InsufficientSpace) => t.size.map_or(true, |s| s > want),
+        Err(libdeflater::DecompressionError::BadData) => false,
+    }
+}
+
+/// The order in which to rescue a Deflate entry whose local header is destroyed from the places its
+/// data may start at, and how good a result ends the search (each try is a whole rescue of the
+/// entry). A start where the stream begins, when only one does, comes first, and anything it gives
+/// back ends the search. Otherwise the start whose data ends where the next header begins (`fits`),
+/// when only one does, comes first, so that its result is kept when the others' are no better (from
+/// a wrong start the stream is cut short or runs into the next entry), and only an intact entry ends
+/// the search; but when every start lies in one run of zeros or 0xFF bytes (a hole, erased flash),
+/// no stream can begin at any of them: its beginning is lost whichever start is right, and none
+/// can give back more than a partial entry.
+fn order_starts(data: &[u8], t: &Task, starts: &mut Vec<usize>, fits: impl Fn(usize) -> bool) -> Status {
+    let first = |starts: &mut Vec<usize>, s: usize| {
+        starts.retain(|&x| x != s);
+        starts.insert(0, s);
+    };
+    let begins: Vec<usize> = starts.iter().copied().filter(|&s| stream_begins(data, t, s)).collect();
+    if let [s] = begins[..] {
+        first(starts, s);
+        return Status::Unverified;
+    }
+    if let [s] = starts.iter().copied().filter(|&s| fits(s)).collect::<Vec<_>>()[..] {
+        first(starts, s);
+    }
+    let (Some(&lo), Some(&hi)) = (starts.iter().min(), starts.iter().max()) else { return Status::Intact };
+    // from each start the stream's first block would be a stored one whose length and its
+    // complement read zero, or of the invalid type 3
+    let run = &data[lo..(hi + 5).min(data.len())];
+    if begins.is_empty() && (run.iter().all(|&b| b == 0) || run.iter().all(|&b| b == 0xff)) {
+        return Status::Partial;
+    }
+    Status::Intact
 }
 
 /// What the searches for CRs an ASCII-mode transfer removed may decode in one file, all entries
@@ -1314,5 +1369,55 @@ mod tests {
         let of = office_repair(&mut entries, Some(&dir), 0);
         assert!(of.rebuilt.is_some());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_start_where_the_stream_begins_is_tried_first() {
+        // a destroyed local header of 40 bytes, a 28-byte extra field, the data, the directory
+        let mut x = 1u32;
+        let text: Vec<u8> = (0..600_000)
+            .map(|_| {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                b"abcdefgh ij\n"[(x >> 16) as usize % 12]
+            })
+            .collect();
+        let mut comp = vec![0u8; text.len() + 1024];
+        let n = libdeflater::Compressor::new(libdeflater::CompressionLvl::default()).deflate_compress(&text, &mut comp).unwrap();
+        let mut sound = vec![0u8; 40];
+        sound.extend((0..28u8).map(|i| i.wrapping_mul(37) + 1));
+        sound.extend_from_slice(&comp[..n]);
+        sound.extend_from_slice(b"PK\x01\x02");
+        let t = Task {
+            name: "0123456789".into(), data_offset: None, header_offset: 0, method: DEFLATED, flags: 0, crc: Some(crc32fast::hash(&text)),
+            csize: Some(n as u64), size: Some(text.len() as u64), dos_time: 0, dos_date: 0, from_scan: false, cd_extra_len: 0,
+        };
+        let order = |data: &[u8]| {
+            let mut starts = vec![40, 49, 64, 68, 60];
+            let enough = order_starts(data, &t, &mut starts, |s| lost_bytes(data, &t, s, data.len()) == 255);
+            (starts, enough)
+        };
+        // the stream begins at 68: it alone is rescued, unless it gives back nothing
+        assert_eq!(order(&sound), (vec![68, 40, 49, 64, 60], Status::Unverified));
+        // zeros over the extra field and the stream's first 3,000 bytes: the stream begins nowhere,
+        // 68 is where its data ends at the directory, and no start can give back more than a part
+        let mut hole = sound.clone();
+        hole[40..68 + 3000].fill(0);
+        assert_eq!(order(&hole), (vec![68, 40, 49, 64, 60], Status::Partial));
+        hole[40..68 + 3000].fill(0xff);
+        assert_eq!(order(&hole), (vec![68, 40, 49, 64, 60], Status::Partial));
+        // other data there: 68 is tried first, every start until one is intact
+        let mut other = sound.clone();
+        let mut y = 7u32;
+        other[40..68 + 3000].iter_mut().for_each(|b| {
+            y = y.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            *b = (y >> 16) as u8;
+        });
+        assert_eq!(order(&other), (vec![68, 40, 49, 64, 60], Status::Intact));
+        // a small entry: the whole stream, as long as the entry
+        let small = Task { size: Some(1000), ..t };
+        let n = libdeflater::Compressor::new(libdeflater::CompressionLvl::default()).deflate_compress(&text[..1000], &mut comp).unwrap();
+        let data = [&sound[..68], &comp[..n]].concat();
+        assert!(stream_begins(&data, &small, 68) && !stream_begins(&data, &small, 40));
+        assert!(!stream_begins(&data, &Task { size: Some(999), ..small }, 68));
     }
 }

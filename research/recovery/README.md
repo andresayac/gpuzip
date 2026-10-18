@@ -172,7 +172,12 @@ an entry, such as a wheel, are skipped by tracking the data extents), and recove
 stored ones by copying, Deflate ones through `gr_rescue_raw`, the library's entry point for a
 raw stream with a known size and CRC (they stand in for the gzip trailer). A destroyed local
 header is worked around by trying the data at the offsets the directory implies and keeping the
-one whose CRC matches. Entries are classified intact (CRC verified), partial (flagged blocks,
+one whose CRC matches. Each try is a whole rescue of the entry, so the offsets are probed first:
+where the stream begins (its first 256 KB decode cleanly, as gzrescue confirms a block header),
+when only one does, is the only one rescued; else the one whose data ends where the next header
+begins is tried first and kept on a tie (from a wrong one the stream is cut short and its output
+out of place); when every offset lies in one run of zeros or 0xFF, no stream can begin there and
+none can give back more than a partial entry, so the search ends at the first one. Entries are classified intact (CRC verified), partial (flagged blocks,
 unknown bytes, cut short), unverified (in step but CRC mismatch with nothing to place the damage,
 or no CRC), lost, unsupported. An entry decoded as one piece whose CRC fails gets a flagged
 block, from its zeros on when it has any, and is partial.
