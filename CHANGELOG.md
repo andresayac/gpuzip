@@ -40,6 +40,11 @@
   whose detection no longer misses the few CR LF pairs that CR CR LF leaves. Other data written
   over a cluster can look the same and is treated the same. gzrescue's ABI is now 4 (gr_options
   gains max_output and cr_budget, gr_stats cr_decoded and hidden_damage).
+- ZIP entry names not flagged UTF-8, CP437 from Windows tools or UTF-8 from Unix ones, are read
+  from local headers as the directory reads them. Before, their non-ASCII bytes became U+FFFD
+  there: an entry such as `data/año 2026/` was not matched to its own header and was rescued as
+  if its header were destroyed, and one found only by scanning lost its name. Headers and the
+  directory are now matched on the name's bytes.
 - A ZIP entry whose local header is destroyed is rescued from where its data really starts. Its
   data was looked for at up to six places after where the header was, each a whole rescue, and on
   a tie the first was kept: with an extra field (Info-ZIP writes 28 bytes) that was the wrong one,

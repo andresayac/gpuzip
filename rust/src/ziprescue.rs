@@ -77,6 +77,7 @@ struct Local {
     csize: u64,
     size: u64,
     name: String,
+    raw_name: Vec<u8>, // as stored: what the directory's entry is matched on
     dos_time: u16,
     dos_date: u16,
 }
@@ -103,15 +104,14 @@ fn parse_local(data: &[u8], h: usize) -> Option<Local> {
         return None; // names do not hold control characters: a signature inside data
     }
     let flags = u16le(data, h + 6);
-    let name = if flags & 0x800 != 0 || raw.is_ascii() {
-        String::from_utf8_lossy(raw).into_owned()
-    } else {
-        raw.iter().map(|&b| if b < 0x80 { b as char } else { '\u{fffd}' }).collect()
-    };
     let mut csize = u32le(data, h + 18) as u64;
     let mut size = u32le(data, h + 22) as u64;
-    // Zip64 in the local header's extra field
     let extra = &data[h + 30 + nlen..h + 30 + nlen + xlen];
+    // decoded as the directory decodes it: UTF-8 when flagged, else Info-ZIP's Unicode Path, else
+    // CP437; a local header does not say what system made it, so a name that is valid UTF-8 is
+    // taken as UTF-8 (what zip tools on Unix and macOS write without the flag)
+    let name = zip::decode_name(raw, flags & 0x800 != 0, std::str::from_utf8(raw).is_ok(), zip::unicode_path(extra, raw));
+    // Zip64 in the local header's extra field
     let mut x = 0;
     while x + 4 <= extra.len() {
         let (id, len) = (u16le(extra, x), u16le(extra, x + 2) as usize);
@@ -134,7 +134,8 @@ fn parse_local(data: &[u8], h: usize) -> Option<Local> {
         crc: u32le(data, h + 14),
         csize,
         size,
-        name: name.replace('\\', "/"),
+        name,
+        raw_name: raw.to_vec(),
         dos_time: u16le(data, h + 10),
         dos_date: u16le(data, h + 12),
     })
@@ -196,6 +197,7 @@ fn write_file(root: Option<&Path>, name: &str, bytes: &[u8], dos_time: u16, dos_
 
 struct Task {
     name: String,
+    raw_name: Vec<u8>,
     data_offset: Option<usize>, // None: the local header is destroyed
     header_offset: usize,
     method: u16,
@@ -222,18 +224,19 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
     let mut covered: Vec<usize> = Vec::new(); // local header offsets the directory's entries took
     // the scanned headers by name: when bytes were inserted or lost before an entry, the offset
     // the directory gives is off, but the entry's own local header is still there, elsewhere
-    let mut by_name: std::collections::HashMap<&str, Vec<&Local>> = std::collections::HashMap::new();
+    let mut by_name: std::collections::HashMap<&[u8], Vec<&Local>> = std::collections::HashMap::new();
     for l in &locals {
-        by_name.entry(l.name.as_str()).or_default().push(l);
+        by_name.entry(l.raw_name.as_slice()).or_default().push(l);
     }
     match zip::read_central_directory(data, true) {
         Ok(cd) => {
             o.cd_ok = true;
             for e in &cd {
                 let at = e.data_offset as usize; // the local header, as the directory says
-                let local = by_offset.get(&at).copied().filter(|l| l.name == e.name).or_else(|| {
+                // matched on the name's bytes: decoding can tell a name apart from its own header
+                let local = by_offset.get(&at).copied().filter(|l| l.raw_name == e.raw_name).or_else(|| {
                     // the same name, the same CRC when the header has one, nearest the expected place
-                    by_name.get(e.name.as_str()).and_then(|v| {
+                    by_name.get(e.raw_name.as_slice()).and_then(|v| {
                         v.iter()
                             .filter(|l| !covered.contains(&l.offset) && (l.crc == e.crc || (l.flags & 8 != 0 && l.crc == 0)))
                             .min_by_key(|l| (l.offset as i64 - at as i64).unsigned_abs())
@@ -249,6 +252,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
                 covered.push(h);
                 tasks.push(Task {
                     name: e.name.clone(),
+                    raw_name: e.raw_name.clone(),
                     data_offset: local.map(|l| l.data_offset),
                     header_offset: h,
                     method: e.method,
@@ -274,17 +278,18 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
             o.notes.push(format!("the central directory cannot be read ({}): the entries come from the local headers found by scanning", o.cd_error));
         }
     }
-    let cd_names: std::collections::HashSet<String> = tasks.iter().map(|t| t.name.clone()).collect();
+    let cd_names: std::collections::HashSet<Vec<u8>> = tasks.iter().map(|t| t.raw_name.clone()).collect();
     // entries only the scan knows
     for l in &locals {
         // a header the directory took, or a second copy of a name the directory has (bytes
         // written twice by a bad resume): skip
-        if covered.contains(&l.offset) || cd_names.contains(&l.name) {
+        if covered.contains(&l.offset) || cd_names.contains(&l.raw_name) {
             continue;
         }
         let bit3 = l.flags & 8 != 0;
         tasks.push(Task {
             name: l.name.clone(),
+            raw_name: l.raw_name.clone(),
             data_offset: Some(l.data_offset),
             header_offset: l.offset,
             method: l.method,
@@ -1388,7 +1393,7 @@ mod tests {
         sound.extend_from_slice(&comp[..n]);
         sound.extend_from_slice(b"PK\x01\x02");
         let t = Task {
-            name: "0123456789".into(), data_offset: None, header_offset: 0, method: DEFLATED, flags: 0, crc: Some(crc32fast::hash(&text)),
+            name: "0123456789".into(), raw_name: b"0123456789".to_vec(), data_offset: None, header_offset: 0, method: DEFLATED, flags: 0, crc: Some(crc32fast::hash(&text)),
             csize: Some(n as u64), size: Some(text.len() as u64), dos_time: 0, dos_date: 0, from_scan: false, cd_extra_len: 0,
         };
         let order = |data: &[u8]| {

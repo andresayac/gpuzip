@@ -27,6 +27,8 @@ pub enum Route {
 pub struct Entry {
     /// the name as stored, with backslashes turned into slashes
     pub name: String,
+    /// the name's bytes as stored, before any decoding
+    pub raw_name: Vec<u8>,
     /// where the entry goes below the output folder
     pub path: Option<PathBuf>,
     pub method: u16,
@@ -88,7 +90,7 @@ fn cp437() -> &'static [char] {
 /// CP437 from DOS and Windows tools, but Unix and macOS tools (Info-ZIP's zip among them) store
 /// a UTF-8 system's names as they are, without the flag, so a valid UTF-8 name from those is
 /// read as UTF-8. Info-ZIP's Unicode Path field, when its CRC matches the name, wins over both.
-fn decode_name(raw: &[u8], utf8: bool, made_on_unix: bool, unicode_path: Option<String>) -> String {
+pub fn decode_name(raw: &[u8], utf8: bool, made_on_unix: bool, unicode_path: Option<String>) -> String {
     let raw = raw.split(|&b| b == 0).next().unwrap_or(raw);
     let name = if let Some(name) = unicode_path {
         name
@@ -99,6 +101,21 @@ fn decode_name(raw: &[u8], utf8: bool, made_on_unix: bool, unicode_path: Option<
         raw.iter().map(|&b| if b < 0x80 { b as char } else { table[(b - 0x80) as usize] }).collect()
     };
     name.replace('\\', "/")
+}
+
+/// Info-ZIP's Unicode Path extra field (0x7075), when it is there and still matches the name: version
+/// 1, the CRC-32 of the name it replaces, then the name in UTF-8. Directory and local headers both
+/// carry it.
+pub fn unicode_path(extra: &[u8], raw_name: &[u8]) -> Option<String> {
+    let mut x = 0;
+    while x + 4 <= extra.len() {
+        let (id, len) = (u16le(extra, x), u16le(extra, x + 2) as usize);
+        if id == 0x7075 && len >= 5 && x + 4 + len <= extra.len() && extra[x + 4] == 1 && u32le(extra, x + 5) == crc32fast::hash(raw_name) {
+            return std::str::from_utf8(&extra[x + 9..x + 4 + len]).ok().map(str::to_string);
+        }
+        x += 4 + len;
+    }
+    None
 }
 
 /// The entry's path below the output folder, or None if it would escape it.
@@ -179,16 +196,10 @@ pub fn read_central_directory(data: &[u8], lost_ok: bool) -> Result<Vec<Entry>, 
         }
         let raw_name = &data[p + 46..p + 46 + nlen];
         let extra = &data[p + 46 + nlen..p + 46 + nlen + xlen];
-        let mut unicode_path = None;
+        let unicode_path = unicode_path(extra, raw_name);
         let mut x = 0;
         while x + 4 <= extra.len() {
             let (id, len) = (u16le(extra, x), u16le(extra, x + 2) as usize);
-            if id == 0x7075 && len >= 5 && x + 4 + len <= extra.len() && extra[x + 4] == 1
-                && u32le(extra, x + 5) == crc32fast::hash(raw_name)
-            {
-                // Info-ZIP's Unicode Path: version 1, the CRC-32 of the name it replaces, the UTF-8 name
-                unicode_path = std::str::from_utf8(&extra[x + 9..x + 4 + len]).ok().map(str::to_string);
-            }
             if id == 0x0001 && x + 4 + len <= extra.len() {
                 // Zip64: the 64-bit values of the fields that overflowed, in this order
                 let mut q = x + 4;
@@ -204,6 +215,7 @@ pub fn read_central_directory(data: &[u8], lost_ok: bool) -> Result<Vec<Entry>, 
         entries.push(Entry {
             // the high byte of "version made by": 3 Unix, 19 macOS
             name: decode_name(raw_name, flags & 0x800 != 0, matches!(data[p + 5], 3 | 19), unicode_path),
+            raw_name: raw_name.to_vec(),
             path: None,
             method,
             flags,

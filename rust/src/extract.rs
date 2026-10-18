@@ -785,6 +785,7 @@ mod tests {
     fn entries(sizes: &[(u64, f64)]) -> Vec<Entry> {
         let entry = |&(size, ratio): &(u64, f64)| Entry {
             name: String::new(),
+            raw_name: Vec::new(),
             path: None,
             method: 8,
             flags: 0,

@@ -634,6 +634,48 @@ def main():
         print(f"{'ok  ' if ok else 'FAIL'} rescue of an Info-ZIP entry with {label}: {in_place:,} of {len(orig):,} bytes "
               f"right in place, {status.get('w1.txt')}, the other entries intact {others}, exit {r.returncode}")
 
+    # names that are not flagged UTF-8: CP437 from Windows tools, UTF-8 from Unix ones. The
+    # directory decodes them; each entry's local header must be matched to it on the name's bytes,
+    # not taken for destroyed, and an entry found only by scanning must keep its name
+    def raw_zip(entries):
+        """A ZIP by hand: [(name bytes, made by, data)], Deflate, no UTF-8 flag"""
+        body, cd = b"", b""
+        for name, made_by, data in entries:
+            c = zlib.compressobj(6, zlib.DEFLATED, -15)
+            comp = c.compress(data) + c.flush()
+            crc, at = zlib.crc32(data), len(body)
+            body += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0, 8, 0, 0x5821, crc, len(comp), len(data), len(name), 0) + name + comp
+            cd += struct.pack("<IBBHHHHHIIIHHHHHII", 0x02014B50, 20, made_by, 20, 0, 8, 0, 0x5821, crc, len(comp), len(data),
+                              len(name), 0, 0, 0, 0, 0, at) + name
+        return body + cd + struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(cd), len(body), 0)
+    rnd = random.Random(9)
+    filler = " ".join(rnd.choice(words) for _ in range(40000)).encode()
+    named = [("data/a\xa4o 2026/notes.txt".encode("latin-1"), 0, b"notes " * 3000, "data/a\u00f1o 2026/notes.txt"),
+             ("datos/a\u00f1o/x.txt".encode("utf-8"), 3, b"x " * 5000, "datos/a\u00f1o/x.txt"),
+             (b"filler.txt", 0, filler, "filler.txt")]
+    zdata = raw_zip([(n, m, d) for n, m, d, _ in named])
+    fill_at = zdata.find(b"filler.txt") + len(b"filler.txt") + 2000  # inside filler.txt's data
+    cd_at = zdata.find(struct.pack("<I", 0x02014B50))
+    for label, damaged in (("the directory read, 4 KB zeroed in another entry", zdata[:fill_at] + bytes(4096) + zdata[fill_at + 4096:]),
+                           ("the directory lost", zdata[:cd_at])):
+        bad = os.path.join(work, "names.zip")
+        open(bad, "wb").write(damaged)
+        out = os.path.join(work, "rescued_names")
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        status = {e["name"]: (e["status"], e.get("detail", "")) for e in rep.get("entries", [])}
+        back = [want for _, _, data, want in named[:2]
+                if status.get(want, ("", ""))[0] == "intact" and "destroyed" not in status[want][1]
+                and os.path.exists(os.path.join(out, want)) and open(os.path.join(out, want), "rb").read() == data]
+        ok = len(back) == 2
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of a zip with names not flagged UTF-8, {label}: {len(back)} of 2 back under their names"
+              + ("" if ok else f"; got {ascii(sorted(status))}, {ascii([v[1] for v in status.values()])}"))
+
     # a docx (a ZIP of XML parts) with zeros inside its document: the text comes back, the
     # repaired part is well-formed XML, and the rebuilt document opens
     import xml.etree.ElementTree as ET
