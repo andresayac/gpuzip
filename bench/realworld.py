@@ -12,7 +12,8 @@ for what they are about instead: no crash, nothing written outside the output fo
 
 --rescue instead damages each ZIP and tar.gz of 1 GB or less in the eleven ways of
 research/recovery/realistic.py and runs `gpuzip rescue` on each: how many files come back
-identical, and how many it calls intact although they differ (silent errors, which must be 0).
+identical, how many it calls intact although they differ (silent errors, which must be 0), and the
+most memory each run held.
 
 Results go to WORK/report/realworld*.json and .md. The public downloads this was run on:
 linux-6.6.tar.gz (kernel.org), Python-3.14.0.tgz (python.org), enwik9.zip (mattmahoney.net),
@@ -93,18 +94,43 @@ def compare(ref, got):
             "examples": (missing + extra + differs)[:5]}
 
 
+def peak_memory(p):
+    """The finished process's peak memory, in bytes, read from the system rather than sampled
+    (Windows: its peak working set; elsewhere: wait4's maxrss). Reaps the process."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (f, ctypes.c_size_t) for f in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                              "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                              "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+        p.wait()
+        c = Counters(cb=ctypes.sizeof(Counters))
+        ok = ctypes.windll.kernel32.K32GetProcessMemoryInfo(wintypes.HANDLE(int(p._handle)), ctypes.byref(c), c.cb)
+        return c.PeakWorkingSetSize if ok else 0
+    _, status, usage = os.wait4(p.pid, 0)
+    p.returncode = os.waitstatus_to_exitcode(status)
+    return usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+
+
 def run(cmd, cwd=None):
     t = time.perf_counter()
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd)
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                         errors="replace", cwd=cwd)
+    out = p.stdout.read()
+    p.stdout.close()
+    peak = peak_memory(p)
     secs = time.perf_counter() - t
     rep = {}
-    for line in reversed(r.stdout.strip().splitlines()):
+    for line in reversed(out.strip().splitlines()):
         try:
             rep = json.loads(line)
             break
         except json.JSONDecodeError:
             continue
-    return r.returncode, secs, rep, (r.stdout + r.stderr)[-600:]
+    return p.returncode, secs, rep, out[-600:], peak
 
 
 def unpacked_size(path):
@@ -167,7 +193,7 @@ def special(path, bins, modes, work):
             shutil.rmtree(sandbox, ignore_errors=True)
             out = os.path.join(sandbox, "out")
             os.makedirs(sandbox)
-            rc, secs, rep, tail = run([exe, "x", path, "-o", out, "--mode", mode, "--json"])
+            rc, secs, rep, tail, _ = run([exe, "x", path, "-o", out, "--mode", mode, "--json"])
             outside = [p for p in os.listdir(sandbox) if p != "out"] + [p for p in escapes if os.path.exists(p)]
             got = sorted(tree(out)) if os.path.isdir(out) else []
             ok = rc in (0, 2) and not outside and "panicked" not in tail
@@ -202,7 +228,7 @@ def extraction(archives, bins, modes, work, max_gb, cache_path):
                 row = {"archive": name, "bin": label, "mode": mode, "size": os.path.getsize(path)}
                 times = []
                 for _ in range(1 if handed_off else 3):  # testing is cheap: the median of three
-                    rc, secs, rep, tail = run([exe, "t", path, "--mode", mode, "--json", *extra])
+                    rc, secs, rep, tail, _ = run([exe, "t", path, "--mode", mode, "--json", *extra])
                     times.append(secs)
                     if rc != 0:
                         break
@@ -212,7 +238,7 @@ def extraction(archives, bins, modes, work, max_gb, cache_path):
                 if not test_only:
                     out = os.path.join(work, "out")
                     shutil.rmtree(out, ignore_errors=True)
-                    rc, secs, rep, tail = run([exe, "x", path, "-o", out, "--mode", mode, "--json", *extra])
+                    rc, secs, rep, tail, _ = run([exe, "x", path, "-o", out, "--mode", mode, "--json", *extra])
                     got = tree(out) if os.path.isdir(out) else {}
                     if kind(path) == "gz":  # one file, named by gpuzip and 7-Zip each in its own way
                         cmp = compare({"file": v for v in ref["tree"].values()}, {"file": v for v in got.values()})
@@ -263,12 +289,16 @@ def rescue_matrix(archives, bins, work, cache_path, only=None):
             for label, exe in bins:
                 out = os.path.join(work, "rescued")
                 shutil.rmtree(out, ignore_errors=True)
-                rc, secs, rep, tail = run([exe, "rescue", dpath, "-o", out, "--json"])
+                rc, secs, rep, tail, peak = run([exe, "rescue", dpath, "-o", out, "--json"])
                 got = tree(out) if os.path.isdir(out) else {}
                 identical = sum(1 for f, h in ref.items() if got.get(f) == h)
                 if k == "zip":
                     status = {e["name"]: e["status"] for e in rep.get("entries", [])}
                     silent = sum(1 for f, h in ref.items() if status.get(f) == "intact" and got.get(f) != h)
+                    # an entry found by scanning may come out under another name than the reference's:
+                    # still a silent error if what it holds is no file of the archive
+                    contents = set(ref.values())
+                    silent += sum(1 for f, s in status.items() if s == "intact" and f not in ref and got.get(f) not in contents)
                     called = sum(1 for s in status.values() if s == "intact")
                 else:
                     t = rep.get("tar") or {}
@@ -277,12 +307,13 @@ def rescue_matrix(archives, bins, work, cache_path, only=None):
                         1 for f, h in ref.items() if f in got and got[f] != h and f not in flagged)
                     called = t.get("intact", 0)
                 shutil.rmtree(out, ignore_errors=True)
-                ok = silent == 0 and rc in (0, 2) and "panicked" not in tail
+                # an archive of no files has nothing to find once damaged: exit 1 says so
+                ok = silent == 0 and (rc in (0, 2) or not ref) and "panicked" not in tail
                 rows.append({"archive": name, "failure": failure, "bin": label, "rc": rc, "seconds": round(secs, 2),
                              "files": len(ref), "identical": identical, "called_intact": called, "silent": silent,
-                             "ok": ok, "tail": "" if ok else tail})
+                             "peak_mb": peak >> 20, "ok": ok, "tail": "" if ok else tail})
                 print(f"  {'ok  ' if ok else 'FAIL'} {failure:<14} {label:<10} {identical:>6} of {len(ref)} identical, "
-                      f"{called} called intact, silent {silent}, {secs:6.2f} s", flush=True)
+                      f"{called} called intact, silent {silent}, {secs:6.2f} s, {peak / 2**30:5.2f} GB", flush=True)
             os.remove(dpath)
     return rows
 
@@ -290,10 +321,12 @@ def rescue_matrix(archives, bins, work, cache_path, only=None):
 def markdown(rows, rescue):
     lines = []
     if rescue:
-        lines += ["| Archive | Failure | gpuzip | Identical | Called intact | Silent errors | Seconds |", "|---|---|---|---|---|---|---|"]
+        lines += ["| Archive | Failure | gpuzip | Identical | Called intact | Silent errors | Seconds | Peak memory |",
+                  "|---|---|---|---|---|---|---|---|"]
         for r in rows:
             lines.append(f"| {r['archive']} | {r['failure']} | {r['bin']} | {r['identical']} of {r['files']} | "
-                         f"{r['called_intact']} | {'**' + str(r['silent']) + '**' if r['silent'] else 0} | {r['seconds']} |")
+                         f"{r['called_intact']} | {'**' + str(r['silent']) + '**' if r['silent'] else 0} | {r['seconds']} | "
+                         f"{r.get('peak_mb', 0) / 1024:.2f} GB |")
         return "\n".join(lines) + "\n"
     lines += ["| Archive | gpuzip | Mode | Test (s) | Extract (s) | GPU files | Result |", "|---|---|---|---|---|---|---|"]
     for r in rows:

@@ -4,7 +4,8 @@
 else: archives from the wild and from other tools, hostile ones, damage as it happens, other
 file systems, a busy GPU, and the tools people already use. The first campaign ran on
 2026-10-17, against v0.1.1 and two branches, on an RTX 5080, a Ryzen 7 9700X, Windows 11 and
-Ubuntu 24.04 in WSL2. What it found, and what was done about it, is at the end.
+Ubuntu 24.04 in WSL2; a second pass on 2026-10-18 checked the combined rescue branch. What it
+found, and what was done about it, is at the end.
 
 ## The scripts
 
@@ -12,7 +13,7 @@ Ubuntu 24.04 in WSL2. What it found, and what was done about it, is at the end.
 |---|---|
 | `bench/make_realworld.py DIR` | makes the archives other tools and odd situations make: 7-Zip at -mx9, AES-256, ZipCrypto, Deflate64, bzip2, LZMA; Python's stored, Zstandard and streamed (data descriptors) ZIPs; PowerShell, Info-ZIP, a JAR; Zip64 by count (70,000 entries) and by size (4.5 GB); a self-extractor's stub before the archive; a 60 KB comment; names Windows refuses; entries that try to leave the folder; gzip with three members, every header field, bgzip's layout; a tar.gz with long names and links |
 | `bench/realworld.py --bin A=PATH --bin B=PATH PATHS...` | every archive, every gpuzip given, every mode: `x` and `t`, every extracted file compared by SHA-256 with 7-Zip's extraction (Python's zipfile, or the source folder, when 7-Zip itself fails) |
-| `bench/realworld.py --rescue ...` | each ZIP and tar.gz damaged in the eleven ways of `research/recovery/realistic.py`, then `gpuzip rescue`: files back identical, files called intact, and silent errors (called intact, but wrong) |
+| `bench/realworld.py --rescue ...` | each ZIP and tar.gz damaged in the eleven ways of `research/recovery/realistic.py`, then `gpuzip rescue`: files back identical, files called intact, silent errors (called intact, but wrong), and peak memory |
 | `bench/malicious.py --bin PATH` | hostile archives: overlapping entries (a zip bomb), sizes that lie both ways, a wrong CRC, offsets past the end, tar links out of the folder, gzip bombs extracted and rescued with peak memory measured |
 | `bench/fuzz_archives.py --bin PATH` | 3,000 randomly damaged ZIPs (four producers, Zip64, data descriptors), tar.gz and gzip files; each tested, extracted and rescued: no crash, no hang, nothing written outside, `t` and `x` agreeing |
 | `bench/make_edge.py --bin PATH` | names from Japanese, Chinese and Russian Windows; split ZIPs, 7-Zip volumes, a self-extractor; passwords wrong, missing, mixed; Unix permissions, read-only, folder times, extended time |
@@ -41,8 +42,8 @@ GitHub zip; plus an Android ROM (5.8 GB, 54 entries, nine of them about 740 MB t
   once, 200 runs in a row (times flat, GPU memory back to the same level), a GPU busy with matrix
   products (1.7x slower, still right), an output folder on another disk and on a network path.
 - **Damage:** the 11 realistic failures on silesia, a GitHub zip, Python's and the kernel's
-  tarballs, three generated ZIPs (up to 70,000 entries): no silent errors except the CR LF case
-  below.
+  tarballs, three generated ZIPs (up to 70,000 entries), and 13 more generated archives on the
+  combined rescue branch: no silent errors except the CR LF case below.
 
 ## Against the tools people use
 
@@ -74,13 +75,41 @@ Windows 11 (NTFS, Defender on), gpuzip from the auto-mode branch:
 Where gpuzip loses: ripunzip writes 70,000 tiny files faster on Windows (finding 17), and on
 Linux a ZIP of many small files is faster on the CPU than with the GPU's start-up (finding 15).
 
+## Rescue: v0.1.1 against the combined branch
+
+`bench/realworld.py --rescue` with three builds: v0.1.1, the GNU-counts branch (2e65adc), and the
+combined branch (`claude/rescue-combined` at aebe20a: findings 2, 3 and 18, plus fewer recorded
+places in a stream that lost its CRs). The run was stopped part way on 2026-10-18. Done:
+
+- **13 generated archives**, 11 failures each, 429 runs: 7-Zip's bzip2, Deflate64, LZMA and -mx9
+  ZIPs, an empty ZIP, two 300 MB entries that hardly compress, Info-ZIP's, a JAR, a pax tar.gz with
+  links, PowerShell's, Python's with a comment, with a stub before it, and stored. 0 silent errors
+  in all three builds, and the same files back identical (27,419) and called intact in every
+  case. The combined branch took 305 s in all against v0.1.1's 627 s. On the two 300 MB entries its
+  peak memory fell from 4.5 to 1.8 GB (torrent_holes) and from 4.3 to 1.4 GB (bad_sectors), but
+  not with their CRs stripped: 4.26 to 4.07 GB (finding 21).
+- **20 cases again with a stricter count** (an entry called intact under a name the reference
+  lacks must hold one of the archive's files): 0 silent. Those entries are finding 20's.
+- **`bench/malicious.py --big`:** 14 of 14. The 8 GB gzip bomb, rescued, stops at the 4.3 GB limit
+  with a 354 MB peak and exit 1.
+- **Python's and the kernel's tarballs**, 22 cases, checked by the session that made the branch:
+  every count the same as 07a63e3's, 0 silent. The kernel with its CRs stripped: 2.98 to 2.07 GB,
+  40 to 35 s; Python's: 1.11 to 0.92 GB.
+
+Not done: py_streamed, py_zstd, zero_bytes and zip64_70k among the generated archives; enwik9,
+silesia and the GitHub zip; the two tarballs against v0.1.1 with this harness's peak memory. Six
+runs on empty.zip were reported as failures because rescue exits 1 when a 22-byte archive is
+overwritten ("no Deflate data could be recognised"); the harness now accepts exit 1 for an
+archive of no files. One time to measure again: py_prepended.zip after resume_dup, 3.6 s with
+v0.1.1, 14.1 s and then 7.7 s with the combined branch.
+
 ## What it found
 
 | | Finding | Where | State |
 |---|---|---|---|
 | 1 | gpuinflate ran past its input buffer on large streams that compress less than about 2.4:1: every such entry failed on the GPU and was redone on the CPU | the Android ROM | fixed in 0.1.1 |
 | 2 | A tar.gz whose CR LF pairs became LF: files called intact are wrong (Python's tarball: 114 of 163; the kernel's: 5,732 of 8,092) | rescue | fixed on a branch, checked here: with no checksum to confirm them such files are "unverified", never "intact"; 0 silent errors on every case above |
-| 3 | Rescue holds 6-8 times the output in memory (2 GB out: 12-17 GB), so a large damaged file, or a small gzip bomb, exhausts RAM | rescue | fixed on a branch (a 2 GB .gz: 24.8 GB to 1.1 GB, 80 s to 37 s), to check here once combined with finding 2's |
+| 3 | Rescue holds 6-8 times the output in memory (2 GB out: 12-17 GB), so a large damaged file, or a small gzip bomb, exhausts RAM | rescue | fixed on the combined branch (a 2 GB .gz: 24.8 GB to 1.1 GB, 80 s to 37 s), checked here in part: see above |
 | 4 | A branch that placed damage inside blocks called 53 wrong kernel files intact | rescue branch | fixed before merging (d0f67aa) |
 | 5 | Searching for lost CRs in a binary ZIP takes 2 minutes and finds none (silesia) | rescue | to bound in time |
 | 6 | An entry named `nul` (or `CON`, `PRN`, `AUX`, `COM1`...) is written to the Windows device and lost, with no error | extraction, Windows | to fix |
@@ -96,6 +125,9 @@ Linux a ZIP of many small files is faster on the CPU than with the GPU's start-u
 | 16 | A bad sector in a large tar.gz leaves every file "unverified" though 99.8% are identical | rescue | by design (finding 2's rule); the summary says how many decoded cleanly |
 | 17 | 70,000 tiny files: ripunzip 8.0 s, gpuzip 9.0 s on Windows, where creating files is the cost | extraction, Windows | to study: how ripunzip spreads its writes |
 | 18 | GNU gzip's and pigz's block sizes read as damage: rescue flagged 181 blocks in a clean python.org tarball and lost thousands of files on every kind of damage | rescue | fixed on the same branch, checked here: their counts recognized (Python-3.14.0.tgz: 3,000-3,700 more files back per case; ZIPs unchanged) |
+| 19 | Rescue reads only stored and Deflate entries: LZMA, bzip2, Deflate64 and Zstandard ones are listed as "not readable here", undamaged ones too (7-Zip's LZMA ZIP: 26 of 428 files back from the clean archive) | rescue | to add: decode them and let their CRC vouch, as for Deflate |
+| 20 | Rescue names the entries it finds by scanning with � for every byte that is not ASCII, ignoring the Unicode Path field and CP437 that extraction reads: in 7-Zip's ZIP with its CRs stripped, 66 files decoded intact landed in `data/a�o 2026/`, while the same files under their right names came out partial | rescue | to fix: name them as extraction does, so each joins its directory entry (66 more files back in 17 cases of 4 archives) |
+| 21 | A stream that lost its CRs still costs rescue more memory than any other damage on the combined branch: the kernel's tarball 2.07 GB, two 300 MB ZIP entries 4.07 GB (1.1-1.8 GB for the other failures) | rescue | later: redesign inference so it does not record the places of every lost byte |
 
 The numbers behind each finding are in the scripts' reports (`report/*.json`, `*.md`), which the
 commands above write again.
