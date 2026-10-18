@@ -274,6 +274,7 @@ def eval_zip(case, o, work, office=False):
         out["text_gpuzip"] = 100 * sum(1 for u in units if u in tg) / len(units)
         out["opens_damaged"] = opens(case["path"], kind)
         rebuilt = (rep.get("office") or {}).get("rebuilt")
+        out["rebuilt_written"] = bool(rebuilt)
         out["opens_rebuilt"] = bool(rebuilt) and opens(rebuilt, kind)
     return out
 
@@ -355,7 +356,8 @@ def main():
             if guessed:
                 row += f" {r['inferred_wrong']:,} |"
             if office:
-                row += f" {r['text_7z']:.0f}% | **{r['text_gpuzip']:.0f}%** | {'yes' if r['opens_damaged'] else 'no'} | {'yes' if r['opens_rebuilt'] else 'no'} |"
+                rebuilt = "yes" if r["opens_rebuilt"] else "no" if r.get("rebuilt_written", True) else "none written"
+                row += f" {r['text_7z']:.0f}% | **{r['text_gpuzip']:.0f}%** | {'yes' if r['opens_damaged'] else 'no'} | {rebuilt} |"
             lines.append(row)
     open(os.path.join(a.dir, "results.md"), "w", encoding="utf-8").write("\n".join(lines) + "\n")
     print("\n".join(lines))

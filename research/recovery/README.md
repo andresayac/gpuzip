@@ -258,7 +258,7 @@ Excel and PowerPoint open the rebuilt documents is `office_check.py`'s to say, f
 | Failure | Windows tar | 7-Zip | gpuzip rescue | silent errors | inferred, wrong |
 |---|---|---|---|---|---|
 | ftp_ascii | 0 | 0 | **1828** | 0 | 0 |
-| ascii_strip | 12 | 12 | **106** | 1 | 0 |
+| ascii_strip | 12 | 12 | **106** | 0 | 0 |
 | bad_sectors | 87 | 87 | **1722** | 0 | 0 |
 | flash_ff | 207 | 207 | **1771** | 0 | 0 |
 | crosslinked | 1208 | 1208 | **1753** | 0 | 0 |
@@ -267,7 +267,7 @@ Excel and PowerPoint open the rebuilt documents is `office_check.py`'s to say, f
 | resume_dup | 544 | 544 | **1748** | 0 | 0 |
 | resume_gap | 794 | 794 | **1484** | 0 | 0 |
 | crash_tail | 1359 | 1359 | **1359** | 0 | 0 |
-| bitrot | 794 | 794 | **1240** | 6 | 0 |
+| bitrot | 794 | 794 | **1240** | 0 | 0 |
 
 **lib.zip**, entries identical (of 3,440):
 
@@ -337,8 +337,10 @@ Another tool gives back more than gpuzip in nine of the 66 cases, by at most 0.1
 wherever a stream ends early, its last symbol may have been read from bits past the end, so
 gpuzip does not trust what that symbol wrote (up to 258 bytes); the others keep it, and here it
 happened to be right. The pptx is 25 KB: a 16 KB erase block or torrent piece takes most of it.
-Silent errors: the bitrot cases and one file of the CR-stripped tar, below; inferred bytes that
-were wrong: none.
+Silent errors: only the bitrot log's, below; inferred bytes that were wrong: none. The bitrot
+and CR-stripped tars call no file intact: the 1,239 and 82 files that decoded cleanly are
+unverified, since the same damage may lie where it changed nothing a decoder sees, and 6 and 1
+of them are indeed wrong (before, they were called intact).
 
 What the cases taught, each a fix now in the code:
 
@@ -352,7 +354,7 @@ What the cases taught, each a fix now in the code:
   it lost is known from its stored size against the room it has, so an entry that lost more
   than two is not searched. The decode with the CRs before a candidate goes on from a snapshot,
   so each trial decodes only the rest of the entry. `lib.zip` went from 3,218 entries to 3,429
-  of 3,440 (233 CRs put back, 53 s), the docx and the xlsx came back whole; what is left lost
+  of 3,440 (233 CRs put back, 15 s), the docx and the xlsx came back whole; what is left lost
   three CRs or more, or two in an entry too big for the search's budget (1 GB decoded). A gzip
   stream cannot be repaired this way: its one CRC covers the whole file, and nothing finer tells
   a right CR from a wrong one. A wrong CR makes a block land on the next header with the
@@ -406,10 +408,13 @@ The limits that remain:
   damage, the trailer's CRC fails and no file is called intact. When other damage makes the CRC
   uncheckable, it passes: six files in the bitrot tar, and 9 MB of the bitrot log, where a flip
   in a match length moved the rest of its block by a byte and later blocks copied the moved
-  bytes on. The report now says so whenever the CRC cannot be checked: exact then means exact
-  as far as decoding can tell.
+  bytes on. Damage of that kind shows elsewhere, in a block decoded in step with a symbol count
+  its encoder never writes, so then no file is called intact (the six are among the bitrot
+  tar's 1,239 unverified files) and the report says exact means exact as far as decoding can
+  tell; the log's bytes are still marked so.
 - **A substitution of the same length** inside a file (one in the CR-stripped tar) leaves the
-  tar's headers in place: nothing to see without a checksum per file.
+  tar's headers in place: nothing to see without a checksum per file. The transfer that caused
+  it is recognized, so that tar too calls no file intact.
 - **LZ77 taint** on repetitive data: with bad sectors the log keeps 44% where gzip gives 7%, and
   the rest is marked unknown, not guessed.
 
