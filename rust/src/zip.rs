@@ -118,7 +118,8 @@ pub fn unicode_path(extra: &[u8], raw_name: &[u8]) -> Option<String> {
     None
 }
 
-/// The entry's path below the output folder, or None if it would escape it.
+/// The entry's path below the output folder, or None if it would escape it. On Windows a part
+/// that names a device gets a `_` before it, as 7-Zip does.
 pub fn safe_relpath(name: &str) -> Option<PathBuf> {
     let mut parts = Vec::new();
     for p in name.split(['/', '\\']) {
@@ -130,9 +131,79 @@ pub fn safe_relpath(name: &str) -> Option<PathBuf> {
         }
         let clean: String = p.chars().map(|c| if ":<>|\"?*".contains(c) { '_' } else { c }).collect();
         let clean = clean.trim_end_matches(['.', ' ']);
-        parts.push(if clean.is_empty() { "_".to_string() } else { clean.to_string() });
+        parts.push(if clean.is_empty() {
+            "_".to_string()
+        } else if cfg!(windows) && is_windows_device(clean) {
+            format!("_{clean}")
+        } else {
+            clean.to_string()
+        });
     }
     if parts.is_empty() { None } else { Some(parts.iter().collect()) }
+}
+
+/// Does Windows take this file name for a device? A file written under one goes to the device:
+/// NUL's without an error, and lost. Microsoft lists CON, PRN, AUX, NUL, COM0-9, LPT0-9 (with the
+/// digits ¹ ² ³ too), CONIN$ and CONOUT$, in any case, bare or with any extension, and Windows 10
+/// takes them all so; Windows 11 only NUL inside a folder (build 26300, measured: con, CON.txt,
+/// aux.c and com1 are files there). So a name on the list is put to this Windows itself.
+pub fn is_windows_device(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    let listed = match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        _ => {
+            let c: Vec<char> = stem.chars().collect();
+            c.len() == 4 && matches!(&c[..3], ['C', 'O', 'M'] | ['L', 'P', 'T']) && matches!(c[3], '0'..='9' | '¹' | '²' | '³')
+        }
+    };
+    listed && windows_takes_for_device(part)
+}
+
+/// GetFullPathNameW makes `\\.\NAME` of a name Windows takes for a device, and opens nothing (to
+/// write to PRN or COM1 to find out could reach a real printer or port); if it fails, the name
+/// is taken for one
+#[cfg(windows)]
+fn windows_takes_for_device(part: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFullPathNameW(name: *const u16, len: u32, buf: *mut u16, file_part: *mut *mut u16) -> u32;
+    }
+    let path: Vec<u16> = std::ffi::OsStr::new(&format!("C:\\gpuzip\\{part}")).encode_wide().chain([0]).collect();
+    let mut buf = [0u16; 512];
+    // SAFETY: path ends in a 0; buf's length is passed, and nothing else is written
+    let n = unsafe { GetFullPathNameW(path.as_ptr(), buf.len() as u32, buf.as_mut_ptr(), std::ptr::null_mut()) } as usize;
+    n == 0 || (n < buf.len() && buf.starts_with(&[b'\\' as u16, b'\\' as u16, b'.' as u16, b'\\' as u16]))
+}
+
+#[cfg(not(windows))]
+fn windows_takes_for_device(_: &str) -> bool {
+    false
+}
+
+/// A rescue's note on the files it wrote under another name because they name a Windows device
+pub fn device_note(names: &[String]) -> Option<String> {
+    let (first, more) = names.split_first()?;
+    let shown: Vec<&str> = names.iter().take(5).map(String::as_str).collect();
+    Some(if more.is_empty() {
+        format!("{first} uses a name this Windows takes for a device (what is written to one is lost): written with a _ before it")
+    } else {
+        format!(
+            "{} names use names this Windows takes for devices (what is written to one is lost), written with a _ before them: {}{}",
+            names.len(),
+            shown.join(", "),
+            if names.len() > 5 { ", ..." } else { "" }
+        )
+    })
+}
+
+/// Did safe_relpath rename a part of this name because it names a Windows device?
+pub fn device_renamed(name: &str) -> bool {
+    cfg!(windows)
+        && name
+            .split(['/', '\\'])
+            .map(|p| p.chars().map(|c| if ":<>|\"?*".contains(c) { '_' } else { c }).collect::<String>())
+            .any(|p| is_windows_device(p.trim_end_matches(['.', ' '])))
 }
 
 /// The entry's DOS timestamp as a local time, like Python's time.mktime.
@@ -274,7 +345,8 @@ fn plan(data: &[u8], entries: &mut [Entry]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_name;
+    use super::{decode_name, device_renamed, is_windows_device, safe_relpath};
+    use std::path::PathBuf;
 
     #[test]
     fn names_without_the_utf8_flag() {
@@ -287,5 +359,20 @@ mod tests {
         assert_eq!(decode_name(b"caf\x82.txt", false, true, None), "café.txt");
         assert_eq!(decode_name(b"x\\y.txt", true, false, None), "x/y.txt");
         assert_eq!(decode_name(b"a.txt", false, false, Some("ä.txt".into())), "ä.txt");
+    }
+
+    #[test]
+    fn device_names() {
+        // NUL is a device on every Windows (the others on Windows 10, not 11), and nowhere else
+        for n in ["nul", "NUL", "Nul", "nul "] {
+            assert_eq!(is_windows_device(n), cfg!(windows), "{n}");
+        }
+        for n in ["nulx", ".nul", "connect", "com10", "lpt", "auxiliary", "a.nul"] {
+            assert!(!is_windows_device(n), "{n}");
+        }
+        let renamed = if cfg!(windows) { "a/_nul/x.txt" } else { "a/nul/x.txt" };
+        assert_eq!(safe_relpath("a/nul/x.txt"), Some(PathBuf::from(renamed)));
+        assert_eq!(device_renamed("a/NUL/x.txt"), cfg!(windows));
+        assert!(!device_renamed("a/nulx/x.txt"));
     }
 }

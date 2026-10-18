@@ -508,7 +508,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
             reader.feed(d, m);
             true
         });
-        let report = match report {
+        let mut report = match report {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("{path}: {e}");
@@ -521,6 +521,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         }
         let mut t = reader.finish();
         failed.extend(t.failed.iter().cloned());
+        report.notes.extend(zip::device_note(&t.renamed));
         // a checksum failure with no block to blame: the damage is somewhere no decoder can see
         // it (raw stored data, a flipped bit that stayed in step), so no file can be vouched for
         if report.stats.crc_check == 0 && report.stats.damaged == 0 {
@@ -537,7 +538,8 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         }
         (report, Some(t), None)
     } else {
-        let target = out_root.join(gz::output_name(&archive));
+        let (out_name, renamed) = gz::output_file(&archive);
+        let target = out_root.join(out_name);
         if let Err(e) = std::fs::create_dir_all(&out_root) {
             eprintln!("{}: {e}", out_root.display());
             return 1;
@@ -561,7 +563,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
             eprintln!("{}: {e}", target.display());
             return 1;
         }
-        let report = match report {
+        let mut report = match report {
             Ok(r) => r,
             Err(e) => {
                 // nothing, or not all of it, was written (no Deflate data, a decompression bomb)
@@ -571,6 +573,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
                 return 1;
             }
         };
+        report.notes.extend(renamed);
         (report, None, Some(target))
     };
     let secs = t0.elapsed().as_secs_f64();

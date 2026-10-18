@@ -4,6 +4,7 @@
 
 use crate::extract::{Count, GpuInfo, Outcome, Via};
 use crate::inflate;
+use crate::zip;
 use crate::{Mode, Opts};
 use crossbeam_channel::{Receiver, bounded};
 use std::fs::File;
@@ -33,6 +34,18 @@ pub fn output_name(path: &str) -> String {
     } else {
         format!("{base}.out")
     }
+}
+
+/// The name the decompressed file is written under: output_name, with a `_` before it when it
+/// names a Windows device (as safe_relpath does), and then a note that says so
+pub fn output_file(path: &str) -> (String, Option<String>) {
+    let name = output_name(path);
+    if cfg!(windows) && crate::zip::is_windows_device(&name) {
+        let to = format!("_{name}");
+        let note = format!("{name} is a name this Windows takes for a device (what is written to one is lost): written as {to}");
+        return (to, Some(note));
+    }
+    (name, None)
 }
 
 struct Header {
@@ -250,6 +263,7 @@ struct Untarred {
     files: u64,
     bytes: u64,
     failed: Vec<(String, String)>,
+    renamed: Vec<String>, // notes on the names written under another
     error: Option<String>,
 }
 
@@ -280,7 +294,30 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
         if list {
             crate::ui::say!("{:>12}  {name}", if file { crate::commas(size) } else { String::new() });
         }
+        let kind = e.header().entry_type();
         match root {
+            // a name of a Windows device goes where safe_relpath puts it (CON to _CON): under its
+            // own name a file's data would go to the device
+            Some(r) if zip::device_renamed(&name) && (kind.is_file() || kind.is_dir()) => match zip::safe_relpath(&name) {
+                Some(rel) => {
+                    let dst = r.join(&rel);
+                    let made = dst.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| e.unpack(&dst).map(|_| ()));
+                    match made {
+                        Ok(()) => u.renamed.push(format!(
+                            "{name} uses a name this Windows takes for a device (what is written to one is lost): written as {}",
+                            rel.display()
+                        )),
+                        Err(x) => {
+                            u.failed.push((name, x.to_string()));
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    u.failed.push((name, "path leaves the output folder; skipped".into()));
+                    continue;
+                }
+            },
             Some(r) => match e.unpack_in(r) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -315,6 +352,7 @@ pub fn run(cmd: char, archive: &str, data: &[u8], out_root: Option<PathBuf>, opt
     let tar = is_tar_name(archive);
     let mut failed: Vec<(String, String)> = Vec::new();
     let mut notes = Vec::new();
+    let mut renamed: Vec<String>;
     let mut mode = opts.mode;
     let mut files = 0u64;
     let mut retried = 0;
@@ -337,13 +375,16 @@ pub fn run(cmd: char, archive: &str, data: &[u8], out_root: Option<PathBuf>, opt
             let u = extractor.join().unwrap_or_default();
             files = u.files;
             failed = u.failed;
+            renamed = u.renamed;
             match (r, u.error) {
                 (Ok(()), Some(e)) => Err(Fail::Corrupt(e)),
                 (Err(Fail::Stopped), Some(e)) => Err(Fail::Corrupt(e)),
                 (r, _) => r,
             }
         } else {
-            let target = out_root.as_ref().map(|r| r.join(output_name(archive)));
+            let (out_name, note) = output_file(archive);
+            renamed = out_root.is_some().then_some(note).flatten().into_iter().collect();
+            let target = out_root.as_ref().map(|r| r.join(out_name));
             let mut file = match &target {
                 Some(p) => {
                     let _ = std::fs::create_dir_all(p.parent().unwrap());
@@ -393,6 +434,7 @@ pub fn run(cmd: char, archive: &str, data: &[u8], out_root: Option<PathBuf>, opt
         }
     }
     notes.extend(d.notes.drain(..));
+    notes.extend(renamed);
     let mut info = std::mem::take(&mut d.info);
     if d.members > 1 {
         info.push(format!("{} gzip members", d.members));

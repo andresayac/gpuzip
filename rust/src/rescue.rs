@@ -363,6 +363,8 @@ pub struct TarOutcome {
     pub unverified: u64,
     pub failed: Vec<(String, String)>,
     pub bytes: u64,
+    /// files and folders that name a Windows device, written with a `_` before (safe_relpath)
+    pub renamed: Vec<String>,
 }
 
 fn octal(field: &[u8]) -> Option<u64> {
@@ -632,6 +634,9 @@ impl<'a> TarReader<'a> {
                     if let (Some(r), Some(rel)) = (self.root, zip::safe_relpath(&name)) {
                         self.make_root();
                         let _ = std::fs::create_dir_all(r.join(rel));
+                        if zip::device_renamed(&name) {
+                            self.o.renamed.push(name.clone());
+                        }
                     }
                     Body::Skip
                 }
@@ -647,7 +652,12 @@ impl<'a> TarReader<'a> {
                                     let _ = std::fs::create_dir_all(parent);
                                 }
                                 match File::create(&path) {
-                                    Ok(f) => file = Some(f),
+                                    Ok(f) => {
+                                        file = Some(f);
+                                        if zip::device_renamed(&name) {
+                                            self.o.renamed.push(name.clone());
+                                        }
+                                    }
                                     Err(e) => err = Some(e.to_string()),
                                 }
                             }

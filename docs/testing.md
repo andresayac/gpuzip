@@ -112,7 +112,7 @@ v0.1.1, 14.1 s and then 7.7 s with the combined branch.
 | 3 | Rescue holds 6-8 times the output in memory (2 GB out: 12-17 GB), so a large damaged file, or a small gzip bomb, exhausts RAM | rescue | fixed on the combined branch (a 2 GB .gz: 24.8 GB to 1.1 GB, 80 s to 37 s), checked here in part: see above |
 | 4 | A branch that placed damage inside blocks called 53 wrong kernel files intact | rescue branch | fixed before merging (d0f67aa) |
 | 5 | Searching for lost CRs in a binary ZIP takes 2 minutes and finds none (silesia) | rescue | to bound in time |
-| 6 | An entry named `nul` (or `CON`, `PRN`, `AUX`, `COM1`...) is written to the Windows device and lost, with no error | extraction, Windows | to fix |
+| 6 | An entry named `nul` (or `CON`, `PRN`, `AUX`, `COM1`...) is written to the Windows device and lost, with no error | extraction, Windows | fixed: a name this Windows takes for a device (asked with GetFullPathNameW, which opens nothing) is written with a `_` before it, as 7-Zip does, with a note; in ZIP and tar.gz extraction, a `.gz` named `nul.gz`, and rescue. Windows 11 (26300) takes only NUL so inside a folder, Windows 10 all of them; the test asks Windows the same way, so it holds on either (run on 11 only) |
 | 7 | tar symbolic links fail on Windows ("failed to unpack", exit 2: 63 in the kernel); 7-Zip writes empty files instead | extraction, Windows | to fix: link when allowed, else a copy of the target, with a note |
 | 8 | tar entries that differ only in case overwrite each other with no note on Windows and macOS (13 pairs in the kernel); ZIP extraction does note it | extraction | to fix |
 | 9 | Overlapping ZIP entries are not detected: 100 KB extract to 2 GB | extraction | to fix (Info-ZIP's unzip refuses them) |

@@ -73,6 +73,11 @@
   that draws the progress line to wake: a ZIP of one entry takes 8 ms instead of 259 ms, 300
   small files extract in 90 ms instead of 260. With stderr redirected (scripts, benchmarks)
   nothing changes: that thread is not started.
+- On Windows, an entry named `nul` (or a folder of that name in its path), and on Windows 10
+  also `CON`, `PRN`, `AUX`, `COM1`... with any extension, was written to the device and lost,
+  `nul`'s with no error. It is written with a `_` before the name, as 7-Zip does, and a note
+  says so: in ZIP and tar.gz extraction, a `.gz` named `nul.gz`, and rescue. Only the names this
+  Windows takes for a device are renamed (Windows 11 keeps `CON.txt` or `aux.c` as they are).
 
 ### Removed
 - The Python version (`python/`), the first implementation, kept as a reference. It was never

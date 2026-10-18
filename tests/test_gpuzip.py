@@ -246,6 +246,20 @@ def habit_archives(work):
     return out
 
 
+def device_path(name):
+    """Where gpuzip writes an entry of this name: with a _ before each part this Windows takes for
+    a device (GetFullPathNameW makes \\\\.\\NAME of it, and opens nothing); elsewhere as it is"""
+    if os.name != "nt":
+        return name
+    import ctypes
+    buf = ctypes.create_unicode_buffer(512)
+
+    def device(part):
+        ctypes.windll.kernel32.GetFullPathNameW("C:\\gpuzip\\" + part, 512, buf, None)
+        return buf.value.startswith("\\\\.\\")
+    return "/".join("_" + p if device(p) else p for p in name.split("/"))
+
+
 def run_gpuzip(*args):
     r = subprocess.run([*GPUZIP, *args, "--json"], capture_output=True, text=True)
     try:
@@ -676,6 +690,37 @@ def main():
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} rescue of a zip with names not flagged UTF-8, {label}: {len(back)} of 2 back under their names"
               + ("" if ok else f"; got {ascii(sorted(status))}, {ascii([v[1] for v in status.values()])}"))
+
+    # names Windows may take for devices (NUL on every Windows; CON, AUX, COM1... on Windows 10):
+    # what is written under one is lost, NUL's with no error. Each must come back, under its name
+    # or, where this Windows takes a part of it for a device, with a _ before that part, said in a note
+    dev_files = {"nul": b"nul data", "CON.txt": b"con data", "aux/x.txt": b"in aux", "com1": b"com1 data",
+                 "Lpt¹.log": b"lpt1", "d/NUL/inside.txt": b"inside", "nul.tar.gz": b"a name only", "plain.txt": b"plain"}
+    dev_zip = os.path.join(work, "devices.zip")
+    with zipfile.ZipFile(dev_zip, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, d in dev_files.items():
+            z.writestr(n, d)
+    dev_tgz = os.path.join(work, "devices.tar.gz")
+    open(dev_tgz, "wb").write(gzip.compress(tar_of(dev_files), 6, mtime=0))
+    dev_gz = os.path.join(work, "nul.gz")
+    open(dev_gz, "wb").write(gzip.compress(b"one file named nul", 6, mtime=0))
+    for cmd in ("x", "rescue"):
+        for label, path, want in (("zip", dev_zip, dev_files), ("tar.gz", dev_tgz, dev_files), (".gz named nul", dev_gz, {"nul": b"one file named nul"})):
+            out = os.path.join(work, "devices_out")
+            shutil.rmtree(out, ignore_errors=True)
+            r = subprocess.run([*GPUZIP, cmd, path, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                rep = {}
+            written = {k: open(os.path.join(out, k), "rb").read() for k in tree(out) if not k.endswith("/")}
+            expect = {device_path(n): d for n, d in want.items()}
+            renamed = sorted(n for n in want if device_path(n) != n)
+            noted = any("this Windows takes for" in n for n in rep.get("notes", []))
+            ok = written == expect and noted == bool(renamed)
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} {cmd} of a {label} holding device names: {len(written)} of {len(expect)} files back, "
+                  f"renamed here: {ascii(renamed)}" + ("" if ok else f"; wrote {ascii(sorted(written))}, notes {ascii(rep.get('notes'))}"))
 
     # a docx (a ZIP of XML parts) with zeros inside its document: the text comes back, the
     # repaired part is well-formed XML, and the rebuilt document opens

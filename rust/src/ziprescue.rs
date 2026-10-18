@@ -384,6 +384,15 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
         }
         o.entries.push(rec);
     }
+    if root.is_some() {
+        let renamed: Vec<String> = o
+            .entries
+            .iter()
+            .filter(|e| !matches!(e.status, Status::Lost | Status::Unsupported) && zip::device_renamed(&e.name))
+            .map(|e| e.name.clone())
+            .collect();
+        o.notes.extend(zip::device_note(&renamed));
+    }
     if o.crs_restored > 0 {
         o.notes.push(format!(
             "the file went through an ASCII-mode transfer that removed the CR of every CR LF: {} CRs put back in {} entries, each entry's CRC confirming them",
