@@ -26,8 +26,11 @@ CRC, with no location. The one tool for this, gzrecover, dates from 2000s and it
    damage: that block is kept but marked suspect, and decoding restarts at the next header. Only
    the damaged block is in doubt.
 3. **Catches damage that stays in step.** zlib puts the same number of symbols in every block
-   (16,383 by default). A block that landed correctly but holds a different count was damaged
-   in a way the decoder could not see; a second pass treats it as suspect. (A bit flip that only
+   (16,383 by default); pigz too, but for the block that ends each of its 128 KiB chunks; GNU
+   gzip ends a block at 32,767 symbols or at any multiple of 4,096 (trees.c, ct_tally). A block
+   that landed correctly but holds a count its encoder never writes was damaged in a way the
+   decoder could not see; a second pass treats it as suspect. A stream whose CRC checks is never
+   flagged this way. (A bit flip that only
    changes one literal into another keeps the count and the alignment: undetectable, and gzip
    cannot see it either.)
 4. **Marks what cannot be known.** After a damaged block the 32 KB window is untrusted: bytes

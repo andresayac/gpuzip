@@ -7,9 +7,15 @@
 //    next is in step; one that hits invalid data, runs off the end, reads a "final" block where
 //    data goes on, or passes over the next header went through damage. Headers of Deflate
 //    streams embedded in the data (a .gz inside a tar) are told apart: their chain of blocks
-//    ends on its own instead of joining the stream's.
-// 3. zlib fills every block with the same number of symbols (16,383 by default); a block in step
-//    with another count was damaged in a way landing cannot see: a second pass flags it.
+//    ends on its own instead of joining the stream's, or runs into the header of the stored
+//    block that holds it.
+// 3. Encoders end blocks by habit: zlib at 16,383 symbols (2^k - 1), pigz too but at the end of
+//    each chunk, GNU gzip at 32,767 or a multiple of 4,096. A block in step with a count its
+//    encoder never writes was damaged in a way landing cannot see: a second pass flags it (not
+//    in a member whose CRC checks). Such damage, with no run of zeros to account for it, or a
+//    broken block that one flipped bit mends, or a CR-stripped transfer, or a CRC that fails with
+//    every block in step, is of a kind that elsewhere may change nothing a decoder sees: with no
+//    CRC to check, nothing is vouched for.
 // 4. A damaged block is kept but flagged; decoding restarts at the next header; bytes that copy
 //    from a damaged block, and whatever copies from those, are unknown.
 // 4b. A member decoded as one piece whose CRC fails though it decoded in step was damaged where
@@ -70,6 +76,25 @@ constexpr uint64_t TRIM = 1u << 20;             // bytes the tail of a piece she
 constexpr size_t MAX_OCC = 64;                  // places per lost window byte its value is inferred from
 constexpr uint64_t TRAIN = 1u << 20;            // exact bytes the model of the file learns from
 constexpr uint64_t CR_BUDGET = 1ull << 30;      // input bytes the search for a stream's lost CRs decodes, at most
+constexpr uint64_t FLIP_BITS = 16384;           // how far before where a decode broke a flipped bit is looked for
+constexpr int FLIP_PIECES = 8;                  // damaged pieces looked at for one
+
+// How the stream's encoder ends its blocks (symbol_count_anomalies): GNU gzip at 32,767 symbols
+// or a multiple of 4,096; zlib at 2^k - 1 (pigz too, and at the end of its chunks, a piece of
+// several blocks when marked); one count for most blocks; or no habit seen.
+struct Habit {
+    enum Kind { NONE, GNU, ZLIB, ONE } kind = NONE;
+    uint32_t regular = 0;  // the most symbols a block of the stream holds (0: no habit)
+    // a piece of `blocks` blocks (its last ends a pigz chunk, when several) and `symbols` symbols
+    bool fits(uint32_t symbols, uint32_t blocks) const {
+        switch (kind) {
+            case GNU: return symbols == 32767 || (symbols < 32768 && symbols % 4096 == 0);
+            case ZLIB: return symbols == regular || blocks > 1;
+            case ONE: return symbols == regular;
+            default: return true;
+        }
+    }
+};
 
 // Workers for the parts that run in parallel; GR_THREADS for experiments (results do not depend on it)
 unsigned threads() {
@@ -239,6 +264,7 @@ struct Piece {
     bool landed = false;        // ended by landing on the next header
     bool anchored = false;      // its start is a real block start: the decode before it was in step, or it landed
     bool by_crc = false;        // flagged because the member's CRC or length failed, every block in step
+    bool length_exact = false;  // suspect, but its decode stayed in step: its length is right
     int status = gi::OK;
     uint32_t blocks = 0, symbols = 0;
     uint64_t last_block_bit = UINT64_MAX;  // header of the last block it started
@@ -667,10 +693,61 @@ struct Rescuer {
         return true;
     }
 
+    // The stored block of piece p's decode whose data holds input bit `bit`: the input bytes of
+    // its data, [first, second). {0, 0}: bit lies in no stored block's data.
+    std::pair<uint64_t, uint64_t> stored_around(const Piece& p, uint64_t bit) {
+        if (p.start.bit == UINT64_MAX || bit <= p.start.bit) return {0, 0};
+        gi::Start st = p.start;
+        bool first = p.stream_start;
+        for (;;) {
+            // a stored block is copied whole: a stop inside its data stops right after it
+            gi::Result q = dec.run(in, size, st, nullptr, 0, scratch.data(), (uint32_t)scratch.size(), first, bit);
+            first = false;
+            if (q.status == gi::ERR_OVERFLOW) {
+                st = q.resume;
+                continue;
+            }
+            uint64_t h = q.last_block_bit;
+            if (q.status != gi::STOPPED || h == UINT64_MAX || ((bits64(in, h) >> 1) & 3) != 0) return {0, 0};
+            uint64_t at = (h + 3 + 7) / 8, from = at + 4, to = from + (in[at] | in[at + 1] << 8);
+            if (bit < from * 8 || bit >= to * 8 || q.end_bit != to * 8) return {0, 0};
+            return {from, to};
+        }
+    }
+
+    // Does a block of piece p's decode begin at bit?
+    bool block_start_of(const Piece& p, uint64_t bit) {
+        if (p.start.bit == UINT64_MAX || bit <= p.start.bit) return bit == p.start.bit;
+        gi::Start st = p.start;
+        bool first = p.stream_start;
+        for (;;) {
+            gi::Result q = dec.run(in, size, st, nullptr, 0, scratch.data(), (uint32_t)scratch.size(), first, bit);
+            first = false;
+            if (q.status == gi::ERR_OVERFLOW) {
+                st = q.resume;
+                continue;
+            }
+            return q.status == gi::STOPPED && q.resume.mode == gi::AT_BLOCK && q.resume.bit == bit;
+        }
+    }
+
     // Decoding from headers[s], landing from header to header: does the chain reach headers[j]
     // (1), end cleanly before it with a final block (0: an embedded Deflate stream, such as a
     // .gz inside a tar, whose headers are not this stream's), or break with an error (-1: damage)?
-    int chain_outcome(const std::vector<gi::Start>& headers, size_t s, size_t j) {
+    // An embedded stream that the encoder stored lies in the data of stored blocks, and each
+    // block's 5-byte header breaks it: a chain that breaks only past the end of the stored block
+    // of p's decode it started in ran into the next one's header (measured, 24 false flags on an
+    // undamaged Python-3.14.0.tgz). One that breaks inside it went through damage there, in
+    // stored data that nothing else checks (-2). And a block of such a stream that ends where one
+    // of p's stored blocks begins reads its header (a zero byte, then the length) as a stored block
+    // of its own, and from there decodes as p does, landing where p lands: that says nothing of p
+    // (seen in a tar holding a .gz of 127-symbol blocks). Every chain among the headers passed
+    // over is followed, the next from where the one before ended.
+    int chain_outcome(const std::vector<gi::Start>& headers, size_t s, size_t j, const Piece& p) {
+        auto from_bit = [&](uint64_t bit) {
+            bit = std::max(bit, headers[s].bit + 1);
+            while (s < j && headers[s].bit < bit) s++;
+        };
         while (s < j) {
             gi::Start st = headers[s];
             for (;;) {
@@ -680,13 +757,25 @@ struct Rescuer {
                     continue;
                 }
                 if (q.status == gi::OK && q.landed >= 0) {
+                    size_t began = s;
                     s = s + 1 + q.landed;
+                    if (s < j) break;
+                    bool merged = stored_around(p, headers[began].bit).second && q.last_block_bit != UINT64_MAX &&
+                                  block_start_of(p, q.last_block_bit);
+                    return merged ? 0 : 1;
+                }
+                if (q.status == gi::OK) {
+                    from_bit(q.end_bit);
                     break;
                 }
-                return q.status == gi::OK ? 0 : -1;
+                auto [from, to] = stored_around(p, headers[s].bit);
+                if (to == 0) return -1;
+                if (q.end_bit + MAX_SYMBOL_BITS < to * 8) return -2;
+                from_bit(std::max(q.end_bit, to * 8));
+                break;
             }
         }
-        return 1;
+        return 0;
     }
 
     // Literals and matches in the block at bit, up to its end-of-block code or where it fails
@@ -844,6 +933,71 @@ struct Rescuer {
         return out;
     }
 
+    // Bit rot: a flipped bit makes the decoder read a wrong code, and it breaks soon after (or
+    // falls back in step: the block's count shows it, or nothing does, a flipped literal). Does
+    // one flipped bit in the FLIP_BITS before where piece p broke mend its block, landing on the
+    // next header with a count that fits the stream's habit? Then the damage is bit rot, which
+    // elsewhere may have changed nothing a decoder sees. Damage of many bytes (other data written
+    // over a cluster, a gap, a stretch twice) is not mended by one bit. buf: the input, which
+    // each trial flips a bit of and puts back.
+    bool one_flip_mends(const Piece& p, const std::vector<gi::Start>& headers, uint8_t* buf, const Habit& habit) {
+        if (p.start.mode != gi::AT_BLOCK || p.start.bit == UINT64_MAX || p.status != gi::ERR_DATA) return false;
+        auto t = std::upper_bound(headers.begin(), headers.end(), p.start.bit, [](uint64_t b, const gi::Start& s) { return b < s.bit; });
+        if (t == headers.end()) return false;
+        const gi::Start* targets = &*t;
+        int ntargets = (int)(headers.end() - t);
+        uint64_t e = std::min(p.in_bit_end, nbits), lo = e > p.start.bit + FLIP_BITS ? e - FLIP_BITS : p.start.bit;
+        // where a trial decodes from: the block's start, and symbol boundaries about every 64 bits
+        // from lo on, with the symbols and blocks before each (a flip after a boundary leaves what
+        // came before it as it was; one in a block's header is read again from any boundary in a
+        // block before it)
+        struct Snap {
+            gi::Start at;
+            uint32_t symbols, blocks;
+        };
+        std::vector<Snap> snaps{{p.start, 0, 0}};
+        gi::Start st = p.start;
+        uint32_t syms = 0, blocks = 0;
+        bool first = p.stream_start;
+        for (uint64_t stop = lo; stop < e;) {
+            gi::Result q = dec.run(in, size, st, nullptr, 0, scratch.data(), (uint32_t)scratch.size(), first, stop);
+            first = false;
+            syms += q.symbols;
+            blocks += q.blocks;
+            if (q.status == gi::ERR_OVERFLOW) {
+                st = q.resume;
+                continue;
+            }
+            if (q.status != gi::STOPPED) break;
+            if (q.resume.bit > snaps.back().at.bit) snaps.push_back({q.resume, syms, blocks});
+            st = q.resume;
+            stop = q.resume.bit + 64;
+        }
+        for (uint64_t f = e; f-- > lo;) {
+            size_t k = snaps.size() - 1;
+            while (k > 0 && snaps[k].at.bit > f) k--;
+            buf[f >> 3] ^= (uint8_t)(1u << (f & 7));
+            gi::Start s2 = snaps[k].at;
+            uint32_t sy = snaps[k].symbols, bl = snaps[k].blocks;
+            bool from_start = k == 0 && p.stream_start, mended = false;
+            for (;;) {
+                gi::Result q = dec.run(in, size, s2, targets, ntargets, scratch.data(), (uint32_t)scratch.size(), from_start);
+                from_start = false;
+                sy += q.symbols;
+                bl += q.blocks;
+                if (q.status == gi::ERR_OVERFLOW) {
+                    s2 = q.resume;
+                    continue;
+                }
+                mended = q.status == gi::OK && q.landed == 0 && habit.fits(sy, bl);
+                break;
+            }
+            buf[f >> 3] ^= (uint8_t)(1u << (f & 7));
+            if (mended) return true;
+        }
+        return false;
+    }
+
     // Damage that writes zeros (or erases to 0xFF) begins where the run of them begins. A damaged
     // piece that decoded cleanly from a start in step up to such a run, and broke only within it
     // or after it, holds exact bytes up to it and suspect ones from it on: it is split there. A
@@ -862,8 +1016,10 @@ struct Rescuer {
                 // MAX_SYMBOL_BITS past that) or landed, and before any header it passed over:
                 // a decode in step lands on every real header
                 uint64_t limit = p.in_bit_end + (p.status == gi::OK ? 0 : MAX_SYMBOL_BITS);
+                // (a header in the data of one of its stored blocks is an embedded stream's)
                 auto h = std::upper_bound(headers.begin(), headers.end(), p.in_bit_start,
                                           [](uint64_t b, const gi::Start& s) { return b < s.bit; });
+                while (h != headers.end() && h->bit < p.in_bit_end && stored_around(p, h->bit).second) h++;
                 if (h != headers.end() && h->bit < p.in_bit_end) limit = std::min(limit, h->bit);
                 at = first_run(p.in_bit_start / 8, (limit + 7) / 8, n, v);
             } else if (runs_out) {
@@ -883,6 +1039,7 @@ struct Rescuer {
             t.in_bit_end = p.in_bit_end;
             t.suspect = true;
             t.by_crc = p.by_crc;
+            t.length_exact = p.length_exact;
             t.status = p.status;
             t.landed = p.landed;
             t.blocks = 1;
@@ -1011,8 +1168,19 @@ struct Rescuer {
                 // passed over headers: real ones, missed because the decode went through damage,
                 // or an embedded stream's, which this stream never lands on
                 size_t j = t0 + r.landed;
-                if (chain_outcome(headers, t0, j) == 0) {
+                int chain = chain_outcome(headers, t0, j, p);
+                if (chain == 0) {
                     commit(p, k, false, true);
+                    cur = headers[j];
+                    t0 = j;
+                    in_step = true;
+                    continue;
+                }
+                if (chain == -2) {
+                    // the decode itself stayed in step: it goes on from where it landed
+                    p.suspect = p.length_exact = true;
+                    p.why = "a Deflate stream embedded in its stored data breaks inside it: the stored bytes are damaged";
+                    commit(p, k, false, false);
                     cur = headers[j];
                     t0 = j;
                     in_step = true;
@@ -1078,34 +1246,126 @@ struct Rescuer {
     }
 };
 
-// zlib fills every block with the same number of symbols (16,383 by default); other encoders
-// have their habits too. Pieces of one block whose count stands out from a clear majority are
-// damaged in a way landing cannot see. Returns their start bits.
-std::set<uint64_t> symbol_count_anomalies(const Outcome& o, std::string& note, uint32_t& regular) {
-    regular = 0;
-    std::map<uint32_t, int> freq;
-    int considered = 0;
+// A member's CRC and length over what a pass decoded: 1 right, 0 wrong, -1 not checkable (no
+// trailer, a damaged piece, unknown bytes)
+int member_crc(const Outcome& o, const Member& m) {
+    if (!m.trailer || m.last_piece >= o.pieces.size() || o.pieces[m.last_piece].status != gi::OK) return -1;
+    uint64_t len = 0;
+    for (size_t k = m.first_piece; k <= m.last_piece; k++) {
+        const Piece& p = o.pieces[k];
+        if (p.suspect || !p.all_exact) return -1;
+        len += p.len;
+    }
+    bool size_ok = !m.size_known || (uint32_t)len == m.isize;
+    if (m.has_crc) return m.out_crc == m.crc && size_ok;
+    return m.size_known && !size_ok ? 0 : -1;
+}
+
+// Encoders end their blocks by habit. zlib fills every block to 2^k - 1 symbols (16,383 by
+// default); pigz, which compresses its input in chunks with zlib (128 KiB by default), also ends
+// one at the end of each chunk, most often followed by empty blocks that mark it (measured:
+// linux-6.6.tar.gz from kernel.org, where 1,373 of 3,976 blocks of one piece end a chunk). GNU
+// gzip fills its blocks to 32,767 but may end one early at any multiple of 4,096 symbols, where
+// it checks whether that compresses better (trees.c, ct_tally): in a .tar.gz from python.org a
+// quarter of the blocks do, and counting them as damaged flagged 175 blocks of an undamaged
+// Python-3.14.0.tgz. Pieces of one block whose count does not fit the stream's habit are damaged
+// in a way landing cannot see. A known encoder's habit is believed when half the blocks fit it,
+// a quarter in a file that went through a CR LF to LF transfer (two blocks in five lost a CR
+// there: 280 of 687 in Python-3.14.0.tgz); any other count when 70% of the blocks have it.
+// `whole`: pieces of members whose CRC checked on this pass, not flagged (their counts are the
+// encoder's). Returns the start bits of the pieces to flag; habit: the one the stream has (NONE
+// when no habit shows).
+std::set<uint64_t> symbol_count_anomalies(const Outcome& o, const std::vector<char>& whole, bool cr_stripped, std::string& note,
+                                          Habit& habit) {
+    habit = Habit{};
+    size_t n = o.pieces.size();
+    std::vector<char> last(n, 0), chunk_end(n, 0);
+    std::vector<uint64_t> end(n, 0);  // where each piece's output ends, in its member's
+    for (const Member& m : o.members) {
+        if (m.last_piece < n) last[m.last_piece] = 1;
+        uint64_t at = 0;
+        for (size_t k = m.first_piece; k <= m.last_piece && k < n; k++) end[k] = at += o.pieces[k].len;
+    }
     auto eligible = [&](size_t k) {
         const Piece& p = o.pieces[k];
-        bool last = false;
-        for (const Member& m : o.members) last |= k == m.last_piece;
-        return p.blocks == 1 && p.landed && !last && !p.suspect;
+        return p.blocks == 1 && p.landed && !last[k] && !p.suspect;
     };
-    for (size_t k = 0; k < o.pieces.size(); k++)
+    std::map<uint32_t, int> freq;
+    int considered = 0;
+    for (size_t k = 0; k < n; k++)
         if (eligible(k)) {
             freq[o.pieces[k].symbols]++;
             considered++;
         }
     std::set<uint64_t> out;
     if (considered < 10) return out;
+    // pigz's chunk: the commonest distance in output between the marked chunk ends (pieces of
+    // several blocks), when it is a multiple of 1 KiB that half the distances are. A piece of one
+    // block that ends a whole number of chunks after one, with nothing damaged between, ends one.
+    std::map<uint64_t, int> gaps;
+    int ngaps = 0;
+    for (const Member& m : o.members) {
+        uint64_t prev = 0;
+        for (size_t k = m.first_piece; k <= m.last_piece && k < n; k++) {
+            if (o.pieces[k].suspect) prev = UINT64_MAX;
+            if (o.pieces[k].suspect || o.pieces[k].blocks < 2 || last[k]) continue;
+            if (prev != UINT64_MAX) {
+                gaps[end[k] - prev]++;
+                ngaps++;
+            }
+            prev = end[k];
+        }
+    }
+    uint64_t chunk = 0;
+    if (!gaps.empty()) {
+        auto g = std::max_element(gaps.begin(), gaps.end(), [](auto& a, auto& b) { return a.second < b.second; });
+        if (g->first >= 32768 && g->first % 1024 == 0 && 2 * g->second >= ngaps) chunk = g->first;
+    }
+    if (chunk)
+        for (const Member& m : o.members) {
+            uint64_t base = 0;
+            for (size_t k = m.first_piece; k <= m.last_piece && k < n; k++) {
+                const Piece& p = o.pieces[k];
+                if (p.suspect) base = UINT64_MAX;
+                else if (base != UINT64_MAX && (end[k] - base) % chunk == 0) chunk_end[k] = 1;
+                if (!p.suspect && p.blocks >= 2) base = end[k];
+            }
+        }
+    // the habits: GNU gzip's; zlib's 2^k - 1, with pigz's chunk ends; one count for most blocks
+    auto gnu = [](uint32_t s) { return s == 32767 || (s < 32768 && s % 4096 == 0); };
+    int gnu_fit = 0, zlib_fit = 0;
+    for (auto& [s, c] : freq) gnu_fit += gnu(s) ? c : 0;
+    uint32_t zlib = 0;
+    for (int b = 7; b <= 15; b++) {
+        auto f = freq.find((1u << b) - 1);
+        if (f != freq.end() && f->second > zlib_fit) {
+            zlib = f->first;
+            zlib_fit = f->second;
+        }
+    }
+    int ends = 0;
+    for (size_t k = 0; k < n; k++) ends += eligible(k) && o.pieces[k].symbols != zlib && chunk_end[k];
+    if (zlib) zlib_fit += ends;
     auto best = std::max_element(freq.begin(), freq.end(), [](auto& a, auto& b) { return a.second < b.second; });
-    if (best->second < considered * 7 / 10) return out;
-    regular = best->first;
-    for (size_t k = 0; k < o.pieces.size(); k++)
-        if (eligible(k) && o.pieces[k].symbols != best->first) out.insert(o.pieces[k].in_bit_start);
+    int need = cr_stripped ? (considered + 3) / 4 : (considered + 1) / 2;
+    using H = Habit;
+    if (freq.count(32767) && gnu_fit >= need && gnu_fit >= zlib_fit) habit = {H::GNU, 32767};
+    else if (zlib && zlib_fit >= need) habit = {H::ZLIB, zlib};
+    else if (best->second >= considered * 7 / 10) habit = {H::ONE, best->first};
+    if (habit.kind == H::NONE) return out;
+    uint32_t regular = habit.regular;
+    int fit = habit.kind == H::GNU ? gnu_fit : habit.kind == H::ZLIB ? zlib_fit : best->second;
+    auto fits = [&](size_t k) { return habit.fits(o.pieces[k].symbols, 1) || (habit.kind == H::ZLIB && chunk_end[k]); };
+    for (size_t k = 0; k < n; k++)
+        if (eligible(k) && !whole[k] && !fits(k)) out.insert(o.pieces[k].in_bit_start);
     if (!out.empty())
-        note = std::to_string(out.size()) + " block(s) with a symbol count other than the stream's regular " +
-               std::to_string(best->first) + " (" + std::to_string(best->second) + " of " + std::to_string(considered) + " blocks)";
+        note = std::to_string(out.size()) + " block(s) with a symbol count " +
+               (habit.kind == H::GNU ? std::string("GNU gzip never writes (it ends a block at 32767 symbols or a multiple of 4096: ")
+                                     : "other than the stream's regular " + std::to_string(regular) +
+                                           (habit.kind == H::ZLIB && chunk ? " that do not end one of pigz's " + std::to_string(chunk >> 10) + " KiB chunks"
+                                                                           : std::string()) +
+                                           " (") +
+               std::to_string(fit) + " of " + std::to_string(considered) + " blocks fit that)";
     return out;
 }
 
@@ -1638,7 +1898,10 @@ bool undo_lf_to_crlf(std::vector<uint8_t>& in, uint64_t& size) {
 
 // The other way, Windows to Unix, every CR LF became LF: bytes were removed and nothing marks
 // where. Compressed data is close to random, so CR LF occurs about once in 65,536 positions; a
-// file with none of them where chance would put several dozen went through such a transfer.
+// file with none of them where chance would put several dozen went through such a transfer. Or
+// with a few: CR CR LF became CR LF, about one in 256 of those removed (measured: 1 left of 422
+// in Python-3.14.0.tgz, 14 of 3,457 in linux-6.6.tar.gz, where "none" missed both); a sixteenth
+// of what chance would put there at most.
 bool looks_cr_stripped(const uint8_t* in, uint64_t size) {
     uint64_t lf = 0, cr = 0, pairs = 0;
     for (uint64_t i = 0; i < size; i++) {
@@ -1649,7 +1912,8 @@ bool looks_cr_stripped(const uint8_t* in, uint64_t size) {
             cr++;
         }
     }
-    return size && pairs == 0 && (double)lf * (double)cr / (double)size >= 8.0;
+    double chance = size ? (double)lf * (double)cr / (double)size : 0;
+    return chance >= 8.0 && 16.0 * (double)pairs <= chance;
 }
 
 // Putting the CRs back. Every removed CR stood right before an LF byte of the input, so the
@@ -2018,9 +2282,50 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         rs.max_output = max_output;
         Outcome o = rs.rescue(headers, gzip, hlen, {}, expected_size, has_crc, expected_crc);
         std::string anomaly_note;
-        uint32_t regular = 0;
+        Habit habit;
         std::map<uint64_t, std::string> forced;
-        for (uint64_t b : symbol_count_anomalies(o, anomaly_note, regular)) forced[b] = "its symbol count differs from the stream's regular one";
+        bool crs_lost = cr_stripped && !crs_restored;
+        std::vector<char> whole(o.pieces.size(), 0);
+        std::set<uint64_t> odd = symbol_count_anomalies(o, whole, crs_lost, anomaly_note, habit);
+        // A member whose CRC checks over this pass is whole: counts that stand out in it are its
+        // encoder's. One of several pieces whose CRC fails, every block in step, holds damage the
+        // blocks flagged for their count may not be all of (measured: linux-6.6.tar.gz with three
+        // zeroed sectors, one flagged so, the others in step with a count that fits; 43 wrong
+        // files would have been called intact); a member of one piece is placed by crc_misses.
+        bool crc_failed = false;
+        if (!odd.empty()) {
+            bool any = false;
+            for (const Member& m : o.members) {
+                int c = member_crc(o, m);
+                crc_failed |= c == 0 && m.last_piece > m.first_piece;
+                if (c == 1) {
+                    for (size_t k = m.first_piece; k <= m.last_piece && k < whole.size(); k++) whole[k] = 1;
+                    any = true;
+                }
+            }
+            if (any) {
+                anomaly_note.clear();
+                odd = symbol_count_anomalies(o, whole, crs_lost, anomaly_note, habit);
+            }
+        }
+        // Damage that keeps the decoder in step shows, when at all, in a block's count: a flipped
+        // bit, a lost byte. Where it showed with no run of zeros or 0xFF bytes in the block to
+        // account for it (bit rot, not a zeroed sector), damage of the same kind may lie in blocks
+        // whose count it left as it was (measured: 5 of 8 flipped bits in Python-3.14.0.tgz); a
+        // transfer that removed CRs leaves blocks like that too (40 of the 280 that lost one).
+        // Other data written over a cluster can decode in step too, and is taken the same way.
+        std::string hidden;  // what showed such damage
+        if (crs_lost && gzip) hidden = "CRs removed by an ASCII-mode transfer";
+        else if (crc_failed) hidden = "the CRC fails on the stream as decoded, every block in step";
+        auto no_run = [&](const Piece& p) {
+            uint64_t n = 0;
+            uint8_t v = 0;
+            return rs.first_run(p.in_bit_start / 8, (p.in_bit_end + 7) / 8 + 8, n, v) == UINT64_MAX;
+        };
+        for (const Piece& p : o.pieces)
+            if (hidden.empty() && odd.count(p.in_bit_start) && no_run(p))
+                hidden = "a block decoded in step with a symbol count its encoder never writes, and no run of zeros in it";
+        for (uint64_t b : odd) forced[b] = "its symbol count differs from the stream's regular one";
         if (!forced.empty() && !o.too_big) {
             o = {};
             o = rs.rescue(headers, gzip, hlen, forced, expected_size, has_crc, expected_crc);
@@ -2036,14 +2341,22 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         if (o.too_big) return GR_ERR_TOO_BIG;
         if (!anomaly_note.empty()) o.notes.push_back(anomaly_note);
         o.notes.insert(o.notes.end(), crc_notes.begin(), crc_notes.end());
-        rs.suspect_overfull_tail(o, regular);
+        // bit rot that broke a decode: one flipped bit mends the block
+        int looked = 0;
+        for (const Piece& p : o.pieces) {
+            if (!hidden.empty() || looked >= FLIP_PIECES) break;
+            if (!p.suspect || p.by_crc || p.status != gi::ERR_DATA || !no_run(p)) continue;
+            looked++;
+            if (rs.one_flip_mends(p, headers, in.data(), habit)) hidden = "a damaged block that one flipped bit mends";
+        }
+        rs.suspect_overfull_tail(o, habit.regular);
         rs.localize(o, headers);
         if (ascii_undone) o.notes.push_back("the file had gone through an ASCII-mode transfer (every LF became CR LF): undone");
         if (crs_restored)
             o.notes.push_back(std::to_string(crs_restored) + " CR" + (crs_restored == 1 ? "" : "s") +
                               " put back that an ASCII-mode transfer had removed; the CRC confirms it");
         else if (cr_stripped && gzip)
-            o.notes.push_back("the file went through an ASCII-mode transfer that removed the CR of every CR LF (it has no CR LF "
+            o.notes.push_back("the file went through an ASCII-mode transfer that removed the CR of every CR LF (it has almost no CR LF "
                               "pair where chance would put dozens): the blocks it broke are flagged; the CRs cannot be put back "
                               "here, with one CRC for the whole file to judge them. A copy transferred in binary mode is whole");
         if (zero_tail)
@@ -2076,26 +2389,30 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         // modulo 4 GiB; the difference is believed when the damaged blocks could plausibly hold it.
         for (Member& m : o.members) {
             uint64_t good = 0, suspect_bits = 0, sus_decoded = 0;
-            int nsus = 0;
+            uint64_t sized = 0;  // bytes of suspect pieces whose length is right
+            int nsus = 0, nspread = 0;
             for (size_t k = m.first_piece; k <= m.last_piece && k < pieces.size(); k++) {
                 const Piece& p = pieces[k];
-                if (p.suspect) {
-                    nsus++;
+                if (p.suspect) nsus++;
+                if (p.suspect && !p.length_exact) {
+                    nspread++;
                     sus_decoded += p.len;
                     suspect_bits += p.in_bit_end > p.in_bit_start ? p.in_bit_end - p.in_bit_start : 0;
+                } else if (p.suspect) {
+                    sized += p.len;
                 } else {
                     good += p.len;
                 }
             }
-            uint32_t missing = m.isize - (uint32_t)good;
-            if (m.trailer && nsus > 0 && missing <= 4 * sus_decoded + (64u << 20)) {
+            uint32_t missing = m.isize - (uint32_t)(good + sized);
+            if (m.trailer && nspread > 0 && missing <= 4 * sus_decoded + (64u << 20)) {
                 uint64_t given = 0;
                 int seen = 0;
                 for (size_t k = m.first_piece; k <= m.last_piece && k < pieces.size(); k++) {
-                    if (!pieces[k].suspect) continue;
+                    if (!pieces[k].suspect || pieces[k].length_exact) continue;
                     seen++;
                     uint64_t bits = pieces[k].in_bit_end > pieces[k].in_bit_start ? pieces[k].in_bit_end - pieces[k].in_bit_start : 0;
-                    pieces[k].true_len = seen == nsus ? missing - given : (suspect_bits ? (uint64_t)missing * bits / suspect_bits : 0);
+                    pieces[k].true_len = seen == nspread ? missing - given : (suspect_bits ? (uint64_t)missing * bits / suspect_bits : 0);
                     given += pieces[k].true_len;
                 }
             }
@@ -2125,11 +2442,16 @@ static int rescue_common(const uint8_t* in_, uint64_t size, bool gzip, uint64_t 
         if (res->stats.crc_check == -1) {
             bool damaged = false;
             for (const Piece& p : pieces) damaged |= p.suspect && !p.by_crc;
-            if (damaged)
+            if (damaged && !hidden.empty())
+                o.notes.push_back("with damaged blocks in it, the stream's CRC cannot be checked, and its damage is of a kind that can "
+                                  "keep the decoder in step (" + hidden + "): damage like that elsewhere would not show, so the bytes "
+                                  "marked exact outside the flagged blocks are not vouched for");
+            else if (damaged)
                 o.notes.push_back("with damaged blocks in it, the stream's CRC cannot be checked: bytes marked exact are exact as far as "
                                   "decoding can tell, and damage that kept the decoder in step (a flipped bit that changed a literal "
                                   "or a match length) would not show");
         }
+        res->stats.hidden_damage = !hidden.empty() && res->stats.crc_check != 1;
         uint64_t out_size = 0;
         for (const Piece& p : pieces) out_size += p.suspect && p.true_len ? p.true_len : p.len;
         if (max_output && out_size > max_output) return GR_ERR_TOO_BIG;

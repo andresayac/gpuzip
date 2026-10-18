@@ -78,6 +78,10 @@ typedef struct {
     int32_t ascii_undone; /* the input had gone through an ASCII-mode transfer (LF to CR LF), undone */
     uint32_t cr_restored; /* CRs put back where a CR LF to LF transfer had removed them */
     uint64_t cr_decoded;  /* input bytes the search for them decoded (a caller's budget for a whole file) */
+    int32_t hidden_damage; /* 1: some damage kept the decoder in step (a block in step with a symbol count its encoder never
+                            * writes and no run of zeros or 0xFF bytes in it, a broken block one flipped bit mends, CRs a
+                            * transfer removed, a CRC that fails with every block in step) and no CRC vouches for the rest:
+                            * damage like it may lie where nothing shows, the bytes marked exact are not vouched for */
 } gr_stats;
 
 /* Receives the output in order. Return nonzero to stop. */

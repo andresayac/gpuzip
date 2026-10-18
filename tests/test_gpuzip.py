@@ -18,6 +18,7 @@ Archives that need 7-Zip are skipped when it is not installed (7zz, 7z or 7za on
 
 import gzip
 import hashlib
+import io
 import json
 import os
 import random
@@ -187,6 +188,57 @@ def build_gzips(src, work):
         g["gzip by 7-Zip -mx7"] = (p, {"seven.txt": (digest(one), 0)})
     return g
 
+def habit_archives(work):
+    """.tar.gz files whose blocks follow their encoder's habit: {label: (path, files)}. The text is
+    this repository's source, three times over where it must make enough blocks to show a habit
+    (each copy lies farther back than Deflate's window reaches, so it compresses as the first)."""
+    root = os.path.join(HERE, "..")
+    text = {}
+    for sub in ("rust/src", "gpuinflate", "research/recovery", "docs", "tests"):
+        d = os.path.join(root, sub)
+        for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if n.endswith((".rs", ".cpp", ".cu", ".cuh", ".h", ".py", ".md")):
+                text[f"{sub}/{n}"] = open(os.path.join(d, n), "rb").read()
+
+    def tar_of(files):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as t:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size, info.mtime = len(data), 0
+                t.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    made = {}
+    # a .gz inside: its compressed bytes go into the outer stream's stored blocks, whose headers
+    # break it up; its own block headers are not the outer stream's (blocks of 127 symbols, zlib's
+    # with memLevel 1: several fit in one stored block, so their headers are found)
+    c = zlib.compressobj(6, zlib.DEFLATED, 31, 1)
+    files = {**{f"a/{k}": v for k, v in text.items()}, "inner.txt.gz": c.compress(b"".join(text.values())) + c.flush(),
+             **{f"b/{k}": v for k, v in text.items()}}
+    made["with a .gz inside (zlib)"] = (gzip.compress(tar_of(files), 6, mtime=0), files)
+    # pigz: zlib on 128 KiB chunks, each ended by a sync marker (an empty stored block) or, when
+    # the block already ends on a byte boundary, by nothing
+    files = {f"copy{c}/{k}": v for c in range(3) for k, v in text.items()}
+    tar = tar_of(files)
+    c = zlib.compressobj(6, zlib.DEFLATED, 31)
+    chunks = [tar[i:i + 131072] for i in range(0, len(tar), 131072)]
+    z = b"".join(c.compress(ch) + c.flush(zlib.Z_FINISH if i + 1 == len(chunks) else zlib.Z_BLOCK if i % 8 == 7 else zlib.Z_SYNC_FLUSH)
+                 for i, ch in enumerate(chunks))
+    made["in 128 KiB chunks (as pigz)"] = (z, files)
+    gz = shutil.which("gzip") or next((p for p in (r"C:\Program Files\Git\usr\bin\gzip.exe",) if os.path.isfile(p)), None)
+    if gz:  # GNU gzip ends some blocks at a multiple of 4096 symbols
+        made["from GNU gzip"] = (subprocess.run([gz, "-6", "-n", "-c"], input=tar, capture_output=True, check=True).stdout, files)
+    else:
+        SKIPPED.append("rescue of a GNU gzip tar.gz: gzip not found")
+    out = {}
+    for k, (label, (data, files)) in enumerate(made.items()):
+        path = os.path.join(work, f"habit{k}.tar.gz")
+        open(path, "wb").write(data)
+        out[label] = (path, files)
+    return out
+
+
 def run_gpuzip(*args):
     r = subprocess.run([*GPUZIP, *args, "--json"], capture_output=True, text=True)
     try:
@@ -203,6 +255,7 @@ def main():
     expected = tree(src)
     archives = build_archives(src, work)
     gzips = build_gzips(src, work)
+    habits = habit_archives(work) if os.environ.get("GPUZIP_BIN") else {}
     failures = 0
     gpu = has_gpu()
     modes = ("cpu", "gpu", "gpu-batches", "auto") if gpu else ("cpu", "auto")
@@ -351,6 +404,59 @@ def main():
         ok = r.returncode == 0 and os.path.isfile(got) and os.path.getsize(got) == 64 << 20
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} rescue of the same with --max-output 0: exit {r.returncode}, every byte back")
+
+    # rescue of tar.gz files whose blocks follow their encoder's habit (Rust only). Undamaged, each
+    # must come back whole with no block flagged: a .gz inside one (its block headers lie in the
+    # outer stream's stored blocks), pigz's short blocks at the end of its chunks, GNU gzip's at a
+    # multiple of 4096 symbols. Damaged (zeros, flipped bits, every CR LF made LF, zeros inside
+    # the .gz inside), no file called intact may differ, and the damage must be reported: damage
+    # that can keep the decoder in step (flipped bits, lost CRs) leaves no file vouched for.
+    for label, (path, files) in habits.items():
+        data = open(path, "rb").read()
+        mid = len(data) // 2
+        flipped = bytearray(data)
+        rng = random.Random(label)
+        for _ in range(8):
+            flipped[rng.randrange(len(flipped))] ^= 1 << rng.randrange(8)
+        damages = [("undamaged", data), ("2 KB zeroed", data[:mid] + bytes(2048) + data[mid + 2048:]),
+                   ("8 bits flipped", bytes(flipped)), ("CR LF made LF", data.replace(b"\r\n", b"\n"))]
+        if "inner.txt.gz" in files:  # in the stored data, where only the stream inside can tell
+            inner = files["inner.txt.gz"]
+            at = next((a for f in (0.5, 0.4, 0.6, 0.3, 0.7) if (a := data.find(inner[int(len(inner) * f):][:64])) > 0), -1)
+            if at > 0:
+                damages.append(("1 KB zeroed in the .gz inside", data[:at] + bytes(1024) + data[at + 1024:]))
+            else:
+                print("skip  rescue of a tar.gz with zeros in a .gz inside: the encoder did not store it as it is")
+        for how, bad_data in damages:
+            bad = os.path.join(work, "habit_damaged.tar.gz")
+            open(bad, "wb").write(bad_data)
+            out = os.path.join(work, "rescued_habit")
+            shutil.rmtree(out, ignore_errors=True)
+            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                rep = {}
+            got = {k: v[0] for k, v in tree(out).items()}
+            want = {k: hashlib.sha256(v).hexdigest() for k, v in files.items()}
+            identical = sum(1 for k, v in want.items() if got.get(k) == v)
+            t = rep.get("tar") or {}
+            intact, unverified = t.get("intact", -1), t.get("unverified", 0)
+            flagged = set(t.get("inferred", [])) | set(t.get("suspect", [])) | set(t.get("partial", []))
+            intact_wrong = [] if unverified else [k for k, v in want.items() if k in got and got[k] != v and k not in flagged]
+            if how == "undamaged":
+                ok = r.returncode == 0 and rep.get("damaged_blocks") == 0 and intact == len(files) == identical
+            elif bad_data == data:
+                continue  # no CR LF in it
+            else:
+                reported = rep.get("damaged_blocks", 0) >= 1 or rep.get("crc_check") == 0
+                ok = r.returncode == 2 and reported and not intact_wrong
+                if "inside" in how:  # stored data: only the CRC tells, and then no file is vouched for
+                    ok = ok and ("inner.txt.gz" in flagged or unverified > 0)
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} rescue of a tar.gz {label}, {how}: {identical} of {len(files)} identical, "
+                  f"{intact} called intact, {unverified} unverifiable, {rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}"
+                  + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
 
     # rescue of gzip files of one Deflate block (Rust only): a small text, and repetitive data that
     # packs megabytes into one block, with zeros written over the middle. Zeros decode as valid

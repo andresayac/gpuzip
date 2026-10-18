@@ -72,6 +72,9 @@ pub struct Stats {
     pub cr_restored: u32,
     /// input bytes the search for them decoded
     pub cr_decoded: u64,
+    /// some damage kept the decoder in step (a flipped bit, a lost CR) and no checksum vouches for
+    /// the rest: damage like it may lie where nothing shows
+    pub hidden_damage: i32,
 }
 
 #[derive(Clone, Debug)]

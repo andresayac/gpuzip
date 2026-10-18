@@ -20,8 +20,12 @@ often decodes damage as plausible garbage that only the trailer's CRC reveals, w
 location. gzrescue (`gpuinflate/rescue.cpp`, the method and measurements in
 [research/recovery](../research/recovery)) finds every block header in the file with the finder
 from gpuinflate, decodes block by block and knows a block went through damage when its decode
-does not land exactly on the next header, or holds a number of symbols other than the
-encoder's regular one. The damaged block is kept but flagged, decoding restarts at the next
+does not land exactly on the next header, or holds a number of symbols its encoder never
+writes: zlib fills every block to the same count (16,383 by default), pigz (kernel.org's
+tarballs) too but for the block that ends each 128 KiB chunk, GNU gzip (python.org's) ends blocks
+at 32,767 symbols or at a multiple of 4,096. A `.gz` stored inside the tar, whose block headers
+lie in the outer stream's stored data, is told apart from the outer stream's own blocks, and a
+stream whose CRC checks is never flagged. The damaged block is kept but flagged, decoding restarts at the next
 header, bytes that copied from a damaged block are marked unknown (written as `--fill`), and
 the block's true length comes from the trailer so the offsets after it stay right. A file that
 went through an FTP transfer in ASCII mode (every LF made CR LF) is put back first, for every
@@ -40,8 +44,15 @@ Every file is classified: intact (every byte exact), with inferred bytes (below)
 damaged (inside a flagged block, behind a repaired header, or followed by a header out of place),
 partial (unknown bytes or cut short). When the checksum fails and no block can be blamed (damage
 inside raw stored data, such as an already compressed file, or a flipped bit that kept the
-decoder in step), no file is called intact: they are all "unverified", because any of them may
-be the one. On a 128 MB tar of source code with a 4 KB stretch zeroed,
+decoder in step), no file is called intact: they are all "unverified" (shown as decoded cleanly,
+but not confirmed by the archive's checksum, and written like any other), because any of them may
+be the one. The same holds when the damage found is of a kind that can keep the decoder in step
+and the checksum cannot vouch for the rest: bit rot (a block in step with a symbol count its
+encoder never writes and no zeros in it, or a broken block that one flipped bit mends), a
+transfer that removed CRs, or a checksum that fails though every block stayed in step (zeroed
+sectors the decoder went through, not all of them caught by their count). Such damage elsewhere
+may have changed nothing a decoder sees, so the flagged blocks are not all there is; a cluster
+overwritten with other data can look the same and is treated the same. On a 128 MB tar of source code with a 4 KB stretch zeroed,
 7,398 of 7,411 files come back intact (and identical to the originals, checked), 3 possibly
 damaged, 2 partial, 8 lost, where gzip gives the first 42% of the archive and nothing else.
 
@@ -119,10 +130,11 @@ crash during a copy, bit rot. Some of the 66 results, against what people reach 
 | the same, every CR LF turned into LF | 3 entries | **3,429** (233 CRs put back) |
 | docx, xlsx, pptx, all eleven failures | 1 of 33 still opens | **32 rebuilt that open clean in Word, Excel, PowerPoint** (the 33rd lost its document whole) |
 
-Silent errors (bytes or files called exact that are not) appear only under bit rot, where a
-flipped bit that kept the decoder in step changed a letter while other damage made the checksum
-uncheckable, and in one file of the CR-stripped tar; the report says when the checksum could
-not be checked. Every rebuilt document was opened in Word, Excel and PowerPoint (through COM,
+Silent errors (bytes or files called exact that are not) remain only in the bit-rotted log, a
+single .gz whose bytes outside the flagged blocks stay marked exact: a flipped bit that kept the
+decoder in step changed a letter while other damage made the checksum uncheckable, and the
+report says so. In a tar.gz that finding leaves no file called intact: the bit-rotted,
+CR-stripped and twice-resumed tars give their files back decoded cleanly but unconfirmed. Every rebuilt document was opened in Word, Excel and PowerPoint (through COM,
 read only), and none needed their repair. The cases also taught gpuzip most of the handling
 described above.
 

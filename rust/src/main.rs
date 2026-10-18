@@ -491,11 +491,13 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
     let unconverted = if zip_in_place { None } else { rescue::undo_lf_to_crlf(mapped) };
     let data: &[u8] = unconverted.as_deref().unwrap_or(mapped);
     rescue::set_ascii_note(unconverted.is_some());
-    // the reverse transfer removed CRs: a ZIP's entries are too short to tell on their own
-    rescue::set_cr_lost(unconverted.is_none() && rescue::looks_cr_stripped(data));
     if ziprescue::is_office_name(&archive) || (!gz::is_gzip(data) && ziprescue::looks_like_zip(data)) {
+        // the reverse transfer removed CRs: a ZIP's entries are too short to tell on their own
+        rescue::set_cr_lost(unconverted.is_none() && rescue::looks_cr_stripped(data));
         return rescue_zip_file(&archive, data, lib, out_root, fill, opts);
     }
+    // a gzip file is one stream: gzrescue tells from all of it, where a few dozen CR LF pairs are due
+    rescue::set_cr_lost(false);
     let tar = gz::is_tar_name(&archive);
     let t0 = std::time::Instant::now();
     let mut failed: Vec<(String, String)> = Vec::new();
@@ -523,6 +525,14 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         // it (raw stored data, a flipped bit that stayed in step), so no file can be vouched for
         if report.stats.crc_check == 0 && report.stats.damaged == 0 {
             t.unverified = t.intact;
+            t.intact = 0;
+        }
+        // Damage that kept the decoder in step was found (a flipped bit, a lost CR, a zeroed
+        // sector), and no checksum vouches for the rest: the same damage may lie where it changed
+        // nothing a decoder sees, in any file (measured: 57 wrong files of Python-3.14.0.tgz with 8
+        // flipped bits would have been called intact, the 3 blocks they showed in flagged)
+        if report.stats.hidden_damage != 0 {
+            t.unverified += t.intact;
             t.intact = 0;
         }
         (report, Some(t), None)
@@ -574,7 +584,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
             "archive": archive, "command": "rescue", "format": if tar { "tar.gz" } else { "gz" },
             "input_bytes": s.input_size, "output_bytes": s.output_size,
             "exact_bytes": s.exact_bytes, "inferred_bytes": s.inferred_bytes, "crs_restored": s.cr_restored, "suspect_bytes": s.suspect_bytes, "unknown_bytes": s.unknown_bytes,
-            "block_headers": s.headers, "damaged_blocks": s.damaged, "crc_check": s.crc_check, "length_off": s.length_off,
+            "block_headers": s.headers, "damaged_blocks": s.damaged, "crc_check": s.crc_check, "hidden_damage": s.hidden_damage != 0, "length_off": s.length_off,
             "truncated": s.truncated != 0, "header_damaged": s.header_damaged != 0, "clean": clean,
             "seconds": (secs * 1e4).round() / 1e4,
             "damaged": damaged.iter().map(|p| json!({
@@ -608,15 +618,31 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         } else if clean {
             paint(GOOD, "intact: every byte checked")
         } else if s.crc_check == 0 {
-            paint(WARN, format!("{:.1}% decoded, but the CRC does not match: some of it is wrong", pct(s.exact_bytes)))
+            paint(WARN, format!("{:.1}% decoded cleanly, but the CRC does not match: some of it is wrong", pct(s.exact_bytes)))
+        } else if s.hidden_damage != 0 {
+            format!("{} of the data decoded cleanly; the checksum cannot confirm it", paint(BOLD, format!("{:.1}%", pct(s.exact_bytes))))
         } else {
             format!("{} of the data exact", paint(BOLD, format!("{:.1}%", pct(s.exact_bytes))))
         }
     );
     if let Some(t) = &tar_out {
+        // files that decoded cleanly but nothing confirms come first, plainly, when no file is
+        // confirmed; they are written like every other
+        let unconfirmed = (
+            t.unverified,
+            INFO,
+            "decoded cleanly",
+            if s.hidden_damage != 0 {
+                "but the archive's checksum cannot confirm them: some damage did not stop the decoder".to_string()
+            } else {
+                "but the archive's checksum fails and cannot say which of them is wrong".to_string()
+            },
+        );
+        let intact = (t.intact, GOOD, "files intact", String::new());
+        let (first, second) = if t.unverified > 0 && t.intact == 0 { (unconfirmed, intact) } else { (intact, unconfirmed) };
         let rows: Vec<(u64, ui::Style, &str, String)> = vec![
-            (t.intact, GOOD, "files intact", String::new()),
-            (t.unverified, WARN, "unverifiable", "the checksum fails and the damage could not be located: any of them may be the damaged one".into()),
+            first,
+            second,
             (t.inferred.len() as u64, INFO, "with inferred bytes", "likely right, not certain".into()),
             (t.suspect.len() as u64, WARN, "possibly damaged", "inside a damaged block or after a repaired header".into()),
             (t.partial.len() as u64, BAD, "partial", format!("unknown bytes written as {fill:#04x}")),
@@ -642,9 +668,10 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         }
     } else {
         say!(
-            "  {} written: {:.2}% exact, {:.2}% inferred, {:.2}% unknown, {:.2}% in {} damaged block{}",
+            "  {} written: {:.2}% {}, {:.2}% inferred, {:.2}% unknown, {:.2}% in {} damaged block{}",
             human(s.output_size),
             pct(s.exact_bytes),
+            if s.hidden_damage != 0 { "decoded cleanly (unconfirmed)" } else { "exact" },
             pct(s.inferred_bytes),
             pct(s.unknown_bytes),
             pct(s.suspect_bytes),
@@ -662,6 +689,8 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
     }
     if s.crc_check == 0 {
         say!("  {}", paint(WARN, "The CRC does not match: an error the decoder could not place remains somewhere"));
+    } else if s.hidden_damage != 0 {
+        say!("  {}", paint(DIM, "Some of the damage did not stop the decoder (a flipped bit, a lost CR, a zeroed sector it read through), so more of it may lie where nothing shows, and the checksum, which could rule that out, cannot be checked. What decoded cleanly is written; compare it with another copy if there is one"));
     } else if s.crc_check < 0 && s.damaged > 0 {
         say!("  {}", paint(DIM, "With damaged blocks the checksum cannot be checked: \"exact\" and \"intact\" mean every byte decoded cleanly"));
     } else if s.crc_check < 0 && s.truncated != 0 {
