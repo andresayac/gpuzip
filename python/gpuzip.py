@@ -5,8 +5,10 @@ Each entry in a .zip file is compressed on its own, so the GPU can decode thousa
 Deflate entries at once. A single large entry, though, is decoded by one GPU thread and
 runs far slower there than on a CPU core. So the work is split: a GPU helper process takes
 batches of the smallest Deflate entries while CPU threads take the largest ones, until the
-two meet. Stored, bzip2, LZMA and Zstandard entries are read on the CPU; encrypted,
-Deflate64 and PPMd entries, and every non-ZIP archive (.rar, .7z, .tar.gz...), go to 7-Zip.
+two meet; in auto mode the helper is started only when the CPU threads, timed on their first
+entries, would be slower alone. Stored, bzip2, LZMA and Zstandard entries are read on the CPU;
+encrypted, Deflate64 and PPMd entries, and every non-ZIP archive (.rar, .7z, .tar.gz...), go
+to 7-Zip.
 
 Usage:
   gpuzip x ARCHIVE... [-o DIR]   extract
@@ -49,6 +51,19 @@ METHOD_NAMES = {0: "stored", 8: "deflate", 9: "deflate64", 12: "bzip2", 14: "lzm
 TAR_SUFFIXES = (".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
                 ".tar.zst", ".tzst", ".tar.lz", ".tar.lzma")
 _WIN_BAD = str.maketrans({c: "_" for c in ':<>|"?*'})
+# auto mode starts the GPU helper only when it and the CPU threads together would finish sooner
+# than the CPU threads alone, start-up included. The CPU threads' speed is measured on the first
+# entries they decode; the GPU's figures are the helper process's own (RTX 5080, nvCOMP 6).
+NVCOMP_RATE = 1.5e9  # bytes/s, small entries in 64 MB batches, CRCs checked
+GPU_START = 0.5  # s: a new Python process, numpy, nvCOMP, the CUDA context, the pinned buffers
+GPU_EXIT = 0.1  # s, the helper process unloading CUDA when it is done
+MEASURE = 0.005  # s of CPU decode time to see before deciding
+MEASURE_MAX = 0.020  # s, decide anyway after this long
+CPU_RATE_BUSY = 0.4e9  # bytes/s, one thread while every thread decodes, if none has finished yet
+# auto mode's GPU batches: smaller than gpu mode's 256 MB, so less memory to pin when the helper
+# starts and to free when it ends (0.1 s each), and a shorter last batch for the CPU threads to
+# wait on, for about 10% less GPU speed
+AUTO_BATCH_MB = 64
 
 
 def align(n):
@@ -155,6 +170,17 @@ def plan(zf, mm):
     return entries
 
 
+def nvcomp_pays(small, rest, cpu):
+    """auto mode: whether the GPU helper joining the CPU threads would finish sooner than they
+    would alone. small: bytes the GPU could take, rest: bytes only the CPU takes, cpu: bytes/s of
+    all the CPU threads together."""
+    total = small + rest
+    # from the moment it is ready the GPU takes its share at NVCOMP_RATE, but no more than the
+    # small entries; the CPU threads take everything else
+    shared = max(rest / cpu, (total + NVCOMP_RATE * GPU_START) / (cpu + NVCOMP_RATE))
+    return shared + GPU_EXIT < total / cpu
+
+
 def batch_layout(spans):
     """Where each entry of a GPU batch sits, compressed and decoded. Both processes compute
     this, so replies through the pipe stay tiny: two processes writing large messages into
@@ -168,29 +194,37 @@ def batch_layout(spans):
     return coffs, uoffs, cpos, upos
 
 
+class DeviceBuffer:
+    """GPU memory as nvCOMP takes it (the CUDA Array Interface), without CuPy's arrays."""
+
+    def __init__(self, ptr, size):
+        self.__cuda_array_interface__ = {"shape": (size,), "typestr": "|u1", "data": (ptr, False), "version": 3}
+
+
 def gpu_helper(conn, archive, slot_names, slot_bytes):
     """Decodes batches of raw Deflate streams on the GPU, in its own process: the nvCOMP
     Python binding holds the GIL while it works, which would stall the CPU threads."""
     t0 = time.perf_counter()
     try:
+        import ctypes
         import numpy as np
-        import cupy as cp
-        import cupyx
+        # CuPy's CUDA runtime binding alone: importing all of CuPy adds 0.3 s to the start-up
+        from cupy_backends.cuda.api import runtime as rt
         from nvidia import nvcomp
 
-        rt = cp.cuda.runtime
         codec = nvcomp.Codec(algorithm="Deflate", bitstream_kind=nvcomp.BitstreamKind.RAW)
         shms = [shared_memory.SharedMemory(name=n) for n in slot_names]
         slots = [np.ndarray((slot_bytes,), np.uint8, buffer=s.buf) for s in shms]
         for a in slots:  # pinned memory: copies from the GPU run ~5x faster
             rt.hostRegister(a.ctypes.data, slot_bytes, 0)
-        staging = cupyx.empty_pinned((slot_bytes,), np.uint8)
-        dev_in, dev_out = cp.empty(slot_bytes, cp.uint8), cp.empty(slot_bytes, cp.uint8)
-        nv_in, nv_out = nvcomp.as_array(dev_in), nvcomp.as_array(dev_out)
+        staging = np.ctypeslib.as_array((ctypes.c_uint8 * slot_bytes).from_address(rt.hostAlloc(slot_bytes, 0)))
+        dev_in, dev_out = rt.malloc(slot_bytes), rt.malloc(slot_bytes)
+        nv_in = nvcomp.as_array(DeviceBuffer(dev_in, slot_bytes))
+        nv_out = nvcomp.as_array(DeviceBuffer(dev_out, slot_bytes))
         f = open(archive, "rb")
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         src = np.frombuffer(mm, np.uint8)
-        name = cp.cuda.runtime.getDeviceProperties(0)["name"].decode()
+        name = rt.getDeviceProperties(0)["name"].decode()
     except Exception as ex:
         conn.send(("fail", f"{type(ex).__name__}: {ex}"))
         return
@@ -205,11 +239,11 @@ def gpu_helper(conn, archive, slot_names, slot_bytes):
             coffs, uoffs, cpos, upos = batch_layout(spans)
             for (off, cs, _), co in zip(spans, coffs):
                 staging[co:co + cs] = src[off:off + cs]
-            rt.memcpy(dev_in.data.ptr, staging.ctypes.data, cpos, rt.memcpyHostToDevice)
+            rt.memcpy(dev_in, staging.ctypes.data, cpos, rt.memcpyHostToDevice)
             res = codec.decode(nvcomp.as_arrays(nv_in, coffs, [s[1] for s in spans]),
                                out=nvcomp.as_arrays(nv_out, uoffs, [s[2] for s in spans]))
             res[0]  # waits for the decode to finish
-            rt.memcpy(slots[slot].ctypes.data, dev_out.data.ptr, upos, rt.memcpyDeviceToHost)
+            rt.memcpy(slots[slot].ctypes.data, dev_out, upos, rt.memcpyDeviceToHost)
             conn.send(("done", slot, time.perf_counter() - t))
         except Exception as ex:
             conn.send(("error", slot, f"{type(ex).__name__}: {ex}"[:500]))
@@ -231,7 +265,8 @@ class Run:
         self.pending = collections.deque(deflate)  # GPU eats from the left, CPU from the right
         self.gpu_max_entry = args.gpu_max_entry_kb * 1024 if args.mode == "auto" else float("inf")
         eligible = sum(align(e.size) for e in deflate if e.size <= self.gpu_max_entry)
-        self.slot_bytes = max(MiB, min(args.batch_mb * MiB, align(eligible)))
+        batch_mb = args.batch_mb if args.batch_mb is not None else AUTO_BATCH_MB if args.mode == "auto" else 256
+        self.slot_bytes = max(MiB, min(batch_mb * MiB, align(eligible)))
         self.use_gpu = args.mode == "gpu" or (args.mode == "auto" and eligible >= args.gpu_min_mb * MiB)
         if args.mode == "auto" and not self.use_gpu and deflate:
             self.info.append(f"GPU skipped: only {human(eligible)} of small Deflate data, the CPU is faster below "
@@ -241,6 +276,7 @@ class Run:
             (self.notes if args.mode == "gpu" else self.info).append(
                 f"GPU libraries not installed ({missing}); used the CPU. Install them with: pip install \"gpuzip[gpu]\"")
         self.steal = args.mode != "gpu"  # in gpu mode the CPU only takes what the GPU cannot
+        self.cpu_bytes, self.cpu_seconds = 0, 0.0  # Deflate entries the CPU threads decoded, and the time they took
 
     # --- output -----------------------------------------------------------------------
     def deliver(self, e, data, route):
@@ -265,7 +301,13 @@ class Run:
     # --- CPU path ---------------------------------------------------------------------
     def decode_cpu(self, e):
         if e.method == zipfile.ZIP_DEFLATED:
-            return zlib.decompress(self.mv[e.offset:e.offset + e.csize], -15, max(e.size, 1))
+            t = time.perf_counter()
+            data = zlib.decompress(self.mv[e.offset:e.offset + e.csize], -15, max(e.size, 1))
+            secs = time.perf_counter() - t
+            with self.lock:
+                self.cpu_bytes += e.size
+                self.cpu_seconds += secs
+            return data
         if e.method == zipfile.ZIP_STORED:
             return self.mv[e.offset:e.offset + e.size]
         return self.zf.read(e.info)
@@ -330,7 +372,32 @@ class Run:
         for c in chunks:
             self.io_pool.submit(work, c)
 
+    def gpu_worth_starting(self):
+        """auto mode: watch the CPU threads for a moment, then say whether starting the GPU pays off."""
+        t0 = time.perf_counter()
+        while True:
+            time.sleep(0.001)
+            if not self.pending:
+                self.info.append("GPU not started: the CPU threads took every entry first")
+                return False
+            if self.cpu_seconds >= MEASURE or time.perf_counter() - t0 >= MEASURE_MAX:
+                break
+        with self.lock:
+            nbytes, secs = self.cpu_bytes, self.cpu_seconds
+            small = sum(e.size for e in self.pending if e.size <= self.gpu_max_entry)
+            rest = sum(e.size for e in self.pending) - small
+        # every thread still on its first entry (large ones come first): assume the usual speed
+        per_thread, how = (nbytes / secs, "") if nbytes else (CPU_RATE_BUSY, "about ")
+        cpu = per_thread * self.args.threads
+        go = nvcomp_pays(small, rest, cpu)
+        self.info.append(f"GPU {'started' if go else 'not started, the CPU is faster'}: the CPU threads decode at "
+                         f"{how}{cpu / 1e9:.1f} GB/s and would need {(small + rest) / cpu:.2f} s "
+                         f"for the {human(small + rest)} left")
+        return go
+
     def gpu_feeder(self):
+        if self.steal and not self.gpu_worth_starting():
+            return
         ctx = mp.get_context("spawn")
         shms = [shared_memory.SharedMemory(create=True, size=self.slot_bytes) for _ in range(2)]
         free = [threading.Event(), threading.Event()]
@@ -644,7 +711,7 @@ def build_parser():
                    help="auto: GPU and CPU share the work (default) · gpu: all Deflate on the GPU · cpu: no GPU")
     o.add_argument("--threads", type=int, default=os.cpu_count() or 4, help="CPU decode threads (default: all)")
     o.add_argument("--io-threads", type=int, default=min(32, os.cpu_count() or 4), help="threads writing GPU results")
-    o.add_argument("--batch-mb", type=int, default=256, help="max uncompressed MB per GPU batch (default 256)")
+    o.add_argument("--batch-mb", type=int, help="max uncompressed MB per GPU batch (default 256, in auto mode 64)")
     o.add_argument("--gpu-max-entry-kb", type=int, default=1024, help="auto: larger entries stay on the CPU (1024)")
     o.add_argument("--gpu-min-mb", type=int, default=64, help="auto: skip the GPU below this much small-entry data (64)")
     o.add_argument("--password", help="password for encrypted entries (passed to 7-Zip)")

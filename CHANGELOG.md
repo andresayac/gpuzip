@@ -42,6 +42,10 @@
 - `auto` starts nvCOMP only when the CPU threads, timed on the archive's first entries, would
   be slower alone than with the GPU, start-up included: on a strong CPU it is as fast as
   `--mode cpu`, on a weak one the GPU still takes the small entries.
+- The Python version decides the same way, with its GPU helper process's own figures (about
+  0.5 s to start, 1.5 GB/s, 0.1 s to exit). The helper loads only CuPy's CUDA runtime binding
+  instead of all of CuPy (0.3 s sooner ready), and `auto` mode's GPU batches are 64 MB instead
+  of 256 MB (less memory to pin and free, a shorter last batch); `--batch-mb` still sets them.
 - Large ZIP entries go to gpuinflate by its speed on each entry's compression ratio (about
   3.5 GB/s on text, 1 GB/s on streams that hardly compress) and by when a CPU thread would be
   free for them: a ROM ZIP of nine 750 MB parts tests in 2.48 s instead of 2.93 s, and with
