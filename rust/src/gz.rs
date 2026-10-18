@@ -4,10 +4,10 @@
 
 use crate::extract::{Count, GpuInfo, Outcome, Via};
 use crate::inflate;
+use crate::outfile::OutFile;
 use crate::zip;
 use crate::{Mode, Opts};
 use crossbeam_channel::{Receiver, bounded};
-use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -267,9 +267,79 @@ struct Untarred {
     error: Option<String>,
 }
 
+/// Where a tar entry goes below the output folder: where unpack_in would put it, or with a `_`
+/// before a part that names a Windows device (safe_relpath). None: it would leave the folder.
+/// An empty path (only slashes or dots) is Some(""), which unpack_in writes nothing for either.
+fn tar_path<R: Read>(e: &mut tar::Entry<'_, R>, name: &str) -> io::Result<Option<PathBuf>> {
+    if zip::device_renamed(name) {
+        return Ok(zip::safe_relpath(name));
+    }
+    let mut rel = PathBuf::new();
+    for c in e.path()?.components() {
+        match c {
+            std::path::Component::Prefix(..) | std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => return Ok(None),
+            std::path::Component::Normal(p) => rel.push(p),
+        }
+    }
+    Ok(Some(rel))
+}
+
+/// Create `dir` and the folders above it that are missing, each only once the folder it goes in
+/// is inside the output folder with links resolved (a link an earlier entry made must not carry
+/// a file out of it), as the tar crate's unpack_in does
+fn make_dirs_inside(canon_root: &Path, dir: &Path) -> io::Result<()> {
+    let inside = |p: &Path| -> io::Result<()> {
+        if p.canonicalize()?.starts_with(canon_root) {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("{} lies outside the output folder", p.display())))
+        }
+    };
+    let mut missing = Vec::new();
+    let mut a = dir;
+    while a.symlink_metadata().is_err() {
+        missing.push(a);
+        match a.parent() {
+            Some(p) => a = p,
+            None => break,
+        }
+    }
+    for m in missing.into_iter().rev() {
+        if let Some(p) = m.parent() {
+            inside(p)?;
+        }
+        std::fs::create_dir_all(m)?;
+    }
+    inside(dir)
+}
+
+/// A tar's regular file, written whole or not at all, with its time and permissions as the tar
+/// crate sets them (a time of 0 as 1; on Windows, read-only when the owner may not write)
+fn write_tar_file<R: Read>(e: &mut tar::Entry<'_, R>, dst: &Path) -> io::Result<()> {
+    let mode = e.header().mode().unwrap_or(0o644);
+    let mtime = e.header().mtime().ok().map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(1)));
+    let mut f = OutFile::create(dst)?;
+    io::copy(e, &mut f)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.file().set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+    }
+    f.finish(mtime)?;
+    #[cfg(windows)]
+    if mode & 0o200 == 0 {
+        let mut p = std::fs::metadata(dst)?.permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(dst, p)?;
+    }
+    Ok(())
+}
+
 /// Extract (root given) or read through (none) a tar stream; with `list`, print each entry
 fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
     let mut u = Untarred::default();
+    let canon_root = root.map_or(Ok(PathBuf::new()), |r| r.canonicalize());
     let mut ar = tar::Archive::new(reader);
     ar.set_preserve_mtime(true);
     ar.set_overwrite(true);
@@ -295,26 +365,36 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
             crate::ui::say!("{:>12}  {name}", if file { crate::commas(size) } else { String::new() });
         }
         let kind = e.header().entry_type();
+        let device = zip::device_renamed(&name);
         match root {
-            // a name of a Windows device goes where safe_relpath puts it (CON to _CON): under its
-            // own name a file's data would go to the device
-            Some(r) if zip::device_renamed(&name) && (kind.is_file() || kind.is_dir()) => match zip::safe_relpath(&name) {
-                Some(rel) => {
+            // regular files are written here, to take their names only once whole (OutFile)
+            Some(r) if kind.is_file() || (device && kind.is_dir()) => match tar_path(&mut e, &name) {
+                Ok(Some(rel)) if rel.as_os_str().is_empty() => {}
+                Ok(Some(rel)) => {
                     let dst = r.join(&rel);
-                    let made = dst.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| e.unpack(&dst).map(|_| ()));
+                    let made = match &canon_root {
+                        Ok(c) => make_dirs_inside(c, if kind.is_dir() { &dst } else { dst.parent().unwrap_or(r) }),
+                        Err(x) => Err(io::Error::new(x.kind(), x.to_string())),
+                    };
+                    let made = made.and_then(|_| if kind.is_dir() { Ok(()) } else { write_tar_file(&mut e, &dst) });
                     match made {
-                        Ok(()) => u.renamed.push(format!(
+                        Ok(()) if device => u.renamed.push(format!(
                             "{name} uses a name this Windows takes for a device (what is written to one is lost): written as {}",
                             rel.display()
                         )),
+                        Ok(()) => {}
                         Err(x) => {
                             u.failed.push((name, x.to_string()));
                             continue;
                         }
                     }
                 }
-                None => {
+                Ok(None) => {
                     u.failed.push((name, "path leaves the output folder; skipped".into()));
+                    continue;
+                }
+                Err(x) => {
+                    u.failed.push((name, x.to_string()));
                     continue;
                 }
             },
@@ -388,7 +468,7 @@ pub fn run(cmd: char, archive: &str, data: &[u8], out_root: Option<PathBuf>, opt
             let mut file = match &target {
                 Some(p) => {
                     let _ = std::fs::create_dir_all(p.parent().unwrap());
-                    match File::create(p) {
+                    match OutFile::create(p) {
                         Ok(f) => Some(f),
                         Err(x) => {
                             failed.push((p.display().to_string(), x.to_string()));
@@ -407,12 +487,16 @@ pub fn run(cmd: char, archive: &str, data: &[u8], out_root: Option<PathBuf>, opt
                 _ => true,
             };
             let r = decode(data, mode, &mut sink, &mut d);
-            if let (Some(f), Ok(m)) = (&file, std::fs::metadata(archive).and_then(|m| m.modified())) {
-                let _ = f.set_modified(m);
-            }
             files = 1;
-            match (r, write_err) {
+            let r = match (r, write_err) {
                 (Err(Fail::Stopped), Some(e)) => Err(Fail::Corrupt(format!("could not write the output: {e}"))),
+                (r, _) => r,
+            };
+            // whole and checked: the output takes its name; else it goes (a damaged .gz: rescue)
+            match (r, file) {
+                (Ok(()), Some(f)) => f
+                    .finish(std::fs::metadata(archive).and_then(|m| m.modified()).ok())
+                    .map_err(|x| Fail::Corrupt(format!("could not write the output: {x}"))),
                 (r, _) => r,
             }
         };

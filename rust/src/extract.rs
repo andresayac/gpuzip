@@ -6,12 +6,12 @@
 
 use crate::gpu::{self, Api, Decoder, MAX_BATCH_ENTRIES};
 use crate::inflate;
+use crate::outfile::OutFile;
 use crate::sevenzip;
 use crate::zip::{self, DEFLATED, Entry, Route, STORED};
 use crate::{Mode, Opts};
 use crossbeam_channel::{Sender, bounded, unbounded};
 use std::collections::{BTreeSet, VecDeque};
-use std::fs::File;
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -271,11 +271,9 @@ impl<'a> Run<'a> {
             return Ok(false);
         }
         if let Some(path) = self.target(e) {
-            let mut f = File::create(&path).map_err(|x| x.to_string())?;
+            let mut f = OutFile::create(&path).map_err(|x| x.to_string())?;
             f.write_all(data).map_err(|x| x.to_string())?;
-            if let Some(t) = zip::dos_time(e.dos_date, e.dos_time) {
-                let _ = f.set_modified(t);
-            }
+            f.finish(zip::dos_time(e.dos_date, e.dos_time)).map_err(|x| x.to_string())?;
         }
         self.add(via, e);
         Ok(true)
@@ -286,7 +284,7 @@ impl<'a> Run<'a> {
         let src = &self.data[e.data_offset as usize..(e.data_offset + e.csize) as usize];
         let mut dec = flate2::read::DeflateDecoder::new(src);
         let mut out = match self.target(e) {
-            Some(p) => Some(File::create(&p).map_err(|x| x.to_string())?),
+            Some(p) => Some(OutFile::create(&p).map_err(|x| x.to_string())?),
             None => None,
         };
         let (mut crc, mut total, mut buf) = (crc32fast::Hasher::new(), 0u64, vec![0u8; 4 << 20]);
@@ -302,10 +300,10 @@ impl<'a> Run<'a> {
             }
         }
         if total != e.size || crc.finalize() != e.crc {
-            return Ok(false);
+            return Ok(false); // the file written goes with `out`
         }
-        if let (Some(f), Some(t)) = (out.as_ref(), zip::dos_time(e.dos_date, e.dos_time)) {
-            let _ = f.set_modified(t);
+        if let Some(f) = out {
+            f.finish(zip::dos_time(e.dos_date, e.dos_time)).map_err(|x| x.to_string())?;
         }
         self.add(Via::Cpu, e);
         Ok(true)
@@ -315,7 +313,7 @@ impl<'a> Run<'a> {
     fn deliver_inflate(&self, g: &inflate::Gpu, e: &Entry) -> Result<Inflated, String> {
         let src = &self.data[e.data_offset as usize..(e.data_offset + e.csize) as usize];
         let mut out = match self.target(e) {
-            Some(p) => Some(File::create(&p).map_err(|x| x.to_string())?),
+            Some(p) => Some(OutFile::create(&p).map_err(|x| x.to_string())?),
             None => None,
         };
         let (mut crc, mut total, mut write_err) = (crc32fast::Hasher::new(), 0u64, None);
@@ -340,8 +338,8 @@ impl<'a> Run<'a> {
             Ok(_) if total != e.size || crc.finalize() != e.crc => return Ok(Inflated::Wrong),
             Ok(_) => {}
         }
-        if let (Some(f), Some(t)) = (out.as_ref(), zip::dos_time(e.dos_date, e.dos_time)) {
-            let _ = f.set_modified(t);
+        if let Some(f) = out {
+            f.finish(zip::dos_time(e.dos_date, e.dos_time)).map_err(|x| x.to_string())?;
         }
         self.add(Via::Gpu, e);
         Ok(Inflated::Done)

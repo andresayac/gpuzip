@@ -8,6 +8,7 @@ mod gpu;
 mod gz;
 mod inflate;
 mod officefix;
+mod outfile;
 mod rescue;
 mod sevenzip;
 mod sheetfix;

@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 import zlib
 
@@ -721,6 +722,85 @@ def main():
             failures += not ok
             print(f"{'ok  ' if ok else 'FAIL'} {cmd} of a {label} holding device names: {len(written)} of {len(expect)} files back, "
                   f"renamed here: {ascii(renamed)}" + ("" if ok else f"; wrote {ascii(sorted(written))}, notes {ascii(rep.get('notes'))}"))
+
+    # an extraction killed while it writes a large file leaves no part of it under its name:
+    # every file there must be whole (measured before: 184 MB of 400 left as big.bin in the
+    # tar.gz, 344 of 400 from the .gz, 296 of 600 of the ZIP's entry). The ZIP's is past the
+    # 512 MiB above which an entry is written as it is decoded
+    class Pattern:
+        """`size` bytes that compress, read in pieces"""
+        block = b"".join(b"line %07d of a file that compresses well\n" % i for i in range(30000))[:1 << 20]
+
+        def __init__(self, size):
+            self.size, self.pos = size, 0
+
+        def read(self, n=-1):
+            n = self.size - self.pos if n < 0 else min(n, self.size - self.pos)
+            out = bytearray()
+            while len(out) < n:
+                at = (self.pos + len(out)) % len(self.block)
+                out += self.block[at:at + n - len(out)]
+            self.pos += n
+            return bytes(out)
+
+    def pattern_digest(size):
+        h, p = hashlib.sha256(), Pattern(size)
+        while chunk := p.read(1 << 20):
+            h.update(chunk)
+        return h.hexdigest()
+
+    big, huge = 300 << 20, 540 << 20
+    small = hashlib.sha256(b"small\n").hexdigest()
+    kill_tgz, kill_gz, kill_zip = (os.path.join(work, n) for n in ("kill.tar.gz", "big.bin.gz", "kill.zip"))
+    with gzip.open(kill_tgz, "wb", compresslevel=1) as g, tarfile.open(fileobj=g, mode="w|") as t:
+        for name, size, f in (("small.txt", 6, io.BytesIO(b"small\n")), ("big.bin", big, Pattern(big))):
+            info = tarfile.TarInfo(name)
+            info.size = size
+            t.addfile(info, f)
+    with gzip.open(kill_gz, "wb", compresslevel=1) as g:
+        src = Pattern(big)
+        while chunk := src.read(1 << 20):
+            g.write(chunk)
+    with zipfile.ZipFile(kill_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+        z.writestr("small.txt", b"small\n")
+        with z.open("huge.bin", "w", force_zip64=True) as f:
+            src = Pattern(huge)
+            while chunk := src.read(1 << 20):
+                f.write(chunk)
+    big_digest = pattern_digest(big)
+    for label, path, files, target in (("tar.gz", kill_tgz, {"small.txt": small, "big.bin": big_digest}, "big.bin"),
+                                       (".gz", kill_gz, {"big.bin": big_digest}, "big.bin"),
+                                       ("zip", kill_zip, {"small.txt": small, "huge.bin": pattern_digest(huge)}, "huge.bin")):
+        out = os.path.join(work, "killed_out")
+        shutil.rmtree(out, ignore_errors=True)
+        os.makedirs(out)
+        proc = subprocess.Popen([*GPUZIP, "x", path, "-o", out, "--mode", "cpu"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        t0 = time.time()
+        while proc.poll() is None and time.time() - t0 < 120:
+            if any(n.startswith(target) for n in os.listdir(out)):
+                time.sleep(0.03)  # into writing it (an empty file left under its name fails too)
+                break
+            time.sleep(0.005)
+        killed = proc.poll() is None
+        proc.kill()
+        proc.wait()
+        left = sorted(os.listdir(out))
+        wrong = []
+        for n in left:
+            if n.endswith(".gpuzip-part"):
+                continue  # not a final name: what a kill leaves on Linux and macOS
+            h = hashlib.sha256()
+            with open(os.path.join(out, n), "rb") as f:
+                while chunk := f.read(1 << 20):
+                    h.update(chunk)
+            if files.get(n) != h.hexdigest():
+                wrong.append(f"{n}: {os.path.getsize(os.path.join(out, n)):,} bytes")
+        failures += bool(wrong)
+        print(f"{'ok  ' if not wrong else 'FAIL'} x of a {label} killed while writing {target} ({'it was' if killed else 'it had ended'}): "
+              f"left {left}" + (f"; NOT WHOLE: {wrong}" if wrong else ""))
+    shutil.rmtree(os.path.join(work, "killed_out"), ignore_errors=True)
+    for p in (kill_tgz, kill_gz, kill_zip):
+        os.remove(p)
 
     # a docx (a ZIP of XML parts) with zeros inside its document: the text comes back, the
     # repaired part is well-formed XML, and the rebuilt document opens

@@ -78,6 +78,14 @@
   `nul`'s with no error. It is written with a `_` before the name, as 7-Zip does, and a note
   says so: in ZIP and tar.gz extraction, a `.gz` named `nul.gz`, and rescue. Only the names this
   Windows takes for a device are renamed (Windows 11 keeps `CON.txt` or `aux.c` as they are).
+- An extraction stopped part way (Ctrl-C, a kill, a crash) no longer leaves half a file under
+  its name: a file takes its name only once it is whole and its CRC checked. On Windows it is
+  created under its name marked to be deleted when closed, and unmarked when whole (a rename per
+  file would have made 20,000 small files take 60-116% longer; the mark costs nothing that
+  shows). On Linux and macOS it is written as `NAME.gpuzip-part` and renamed. A ZIP entry over
+  512 MiB, a file of a .tar.gz and a .gz were the ones written as they decode: killed part way,
+  they left 184 of 400 MB, 296 of 600 and 344 of 400 under their names. Nor does a wrong CRC
+  leave its output any more (`gpuzip rescue` keeps what can be saved).
 
 ### Removed
 - The Python version (`python/`), the first implementation, kept as a reference. It was never

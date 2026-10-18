@@ -118,7 +118,7 @@ v0.1.1, 14.1 s and then 7.7 s with the combined branch.
 | 9 | Overlapping ZIP entries are not detected: 100 KB extract to 2 GB | extraction | to fix (Info-ZIP's unzip refuses them) |
 | 10 | The Unix executable bit is not restored from ZIP entries (it is from tar) | extraction, Linux, macOS | to fix |
 | 11 | Names from Japanese, Chinese or Russian Windows come out garbled; no way to name the code page (7-Zip has -mcp) | extraction | to add |
-| 12 | An interrupted extraction leaves partial files under their final names | extraction | to fix: write under a temporary name |
+| 12 | An interrupted extraction leaves partial files under their final names | extraction | fixed: a file takes its name once whole (Windows: created under it marked delete-on-close, unmarked when whole, since a rename per file cost 260-320 µs here, +60-116% on 20,000 small files; Linux and macOS: `NAME.gpuzip-part`, renamed). `tests/test_gpuzip.py` kills `x` while it writes a tar.gz's file, a .gz and a ZIP entry over 512 MiB: before, 184 of 400 MB, 344 of 400 and 296 of 600 stayed under their names; now nothing. Rescue still writes under the final names |
 | 13 | Info-ZIP's extended time is ignored (the local DOS time is used); folder times and the read-only attribute are not restored | extraction | to fix |
 | 14 | `--mode gpu` on a gzip of thousands of small members (bgzip) takes 35 s against 0.6 s on the CPU | extraction | to fix |
 | 15 | auto mode used nvCOMP and gpuinflate where the CPU was faster (the ROM: 3.75 s, CPU 2.98 s) | extraction | fixed on a branch: 2.37 s |
