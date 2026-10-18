@@ -465,8 +465,9 @@ def main():
     # the same .gz inside, undamaged, at 120 places in the tar: whether its block headers, found in
     # the outer stream's stored blocks, were taken for the stream's own hung on where the blocks
     # fell (the archive above failed so on CI after an edit to this file changed its text; before
-    # the fix, 8 of 200 such places flagged with zlib, 15 with zlib-ng). None may be: 120 places
-    # miss that regression less than once in a hundred runs, in about 50 s
+    # the fix, 8 of 200 such places flagged with zlib, 15 with zlib-ng; after it, 1 of 120 with
+    # zlib-ng, a header found in a stored block's length field). None may be: 120 places miss
+    # that regression less than once in a hundred runs, in about 50 s
     text = repo_text()
     c = zlib.compressobj(6, zlib.DEFLATED, 31, 1)
     inner = c.compress(b"".join(text.values())) + c.flush()

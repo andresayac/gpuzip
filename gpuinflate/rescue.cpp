@@ -714,8 +714,9 @@ struct Rescuer {
     }
 
     // The stored block of piece p's decode whose data holds input bit `bit`: the input bytes of
-    // its data, [first, second). {0, 0}: bit lies in no stored block's data.
-    std::pair<uint64_t, uint64_t> stored_around(const Piece& p, uint64_t bit) {
+    // its data, [first, second). {0, 0}: bit lies in no stored block's data. `with_len`: in its
+    // length fields too (anywhere past the first bit of its header).
+    std::pair<uint64_t, uint64_t> stored_around(const Piece& p, uint64_t bit, bool with_len = false) {
         if (p.start.bit == UINT64_MAX || bit <= p.start.bit) return {0, 0};
         gi::Start st = p.start;
         bool first = p.stream_start;
@@ -730,7 +731,7 @@ struct Rescuer {
             uint64_t h = q.last_block_bit;
             if (q.status != gi::STOPPED || h == UINT64_MAX || ((bits64(in, h) >> 1) & 3) != 0) return {0, 0};
             uint64_t at = (h + 3 + 7) / 8, from = at + 4, to = from + (in[at] | in[at + 1] << 8);
-            if (bit < from * 8 || bit >= to * 8 || q.end_bit != to * 8) return {0, 0};
+            if (bit < (with_len ? h + 1 : from * 8) || bit >= to * 8 || q.end_bit != to * 8) return {0, 0};
             return {from, to};
         }
     }
@@ -1189,15 +1190,19 @@ struct Rescuer {
                 // or an embedded stream's, which this stream never lands on
                 size_t j = t0 + r.landed;
                 int chain = chain_outcome(headers, t0, j, p);
-                // Headers that all lie in the data of stored blocks this decode went through are
-                // not this stream's: a block header never sits inside a stored block's bytes, and
-                // the decode, having copied them, landed on a header of its own. However the chain
+                // Headers that all lie in stored blocks this decode went through are not this
+                // stream's: a block header never sits inside a stored block's bytes, and the
+                // decode, having copied them, landed on a header of its own. However the chain
                 // from them goes, they are the data's (measured: a tar holding a .gz of 127-symbol
                 // blocks whose chain went on to land where p lands, as if p had missed them; the
                 // same tar with other file contents did not, so it hung on where blocks fell).
+                // Their length fields count too: the search can find a header that begins there
+                // and reads on into the data (measured: one such in a stored block's NLEN, at 1 of
+                // 120 places of that .gz, with zlib-ng; the decode then restarted inside the .gz,
+                // and its 127-symbol blocks, taken for this stream's habit, flagged 18 real ones).
                 if (chain == 1) {
                     bool all_stored = true;
-                    for (size_t q = t0; q < j && all_stored; q++) all_stored = stored_around(p, headers[q].bit).second != 0;
+                    for (size_t q = t0; q < j && all_stored; q++) all_stored = stored_around(p, headers[q].bit, true).second != 0;
                     if (all_stored) chain = 0;
                 }
                 if (chain == 0) {
