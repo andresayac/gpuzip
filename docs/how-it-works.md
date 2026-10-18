@@ -9,7 +9,7 @@ So:
 
 | Data | Where it is decoded |
 |---|---|
-| ZIP: Deflate, small | GPU with nvCOMP, in batches of up to 256 MB |
+| ZIP: Deflate, small | GPU with nvCOMP, in batches of up to 256 MB (Python `auto` mode: 64 MB) |
 | ZIP: Deflate, large | CPU threads (Rust: libdeflate · Python: zlib-ng), or in Rust gpuinflate when that is faster (below) |
 | ZIP: stored | CPU threads |
 | ZIP: bzip2, LZMA, Zstandard | Python: CPU threads · Rust: 7-Zip |
