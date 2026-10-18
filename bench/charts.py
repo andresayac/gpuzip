@@ -192,7 +192,8 @@ def zip_speed_chart(t):
     H = top + group * len(rows) + 54
     s = Svg(W, H, t, "Testing ZIP archives, no GPU needed",
             "Seconds to decompress and check every file of four ZIP archives: 7-Zip 24.09 against gpuzip on the CPU.")
-    header(s, "Testing ZIP archives: 14-20x faster than 7-Zip, no GPU needed",
+    x = [seven / ours for _, seven, ours in rows]
+    header(s, f"Testing ZIP archives: {min(x):.0f}-{max(x):.0f}x faster than 7-Zip, no GPU needed",
            "Seconds to decompress and check every CRC (process start included; lower is better)")
     s.legend(24, 86, [("swatch", "other", "7-Zip 24.09"), ("swatch", "accent", "gpuzip, CPU only")])
     y_end = top + group * len(rows) - 8
@@ -208,8 +209,9 @@ def zip_speed_chart(t):
             s.bar(x0, yy, pw * v / xmax, 18, fill, f"{name}: {who} {v:.2f} s")
             s.text(x0 + pw * v / xmax + 6, yy + 13, f"{v:.2f} s" + (f"  ({seven / ours:.0f}x)" if fill == "accent" else ""),
                    11.5, "ink2" if fill == "other" else "ink", weight=400 if fill == "other" else 600)
-    s.text(24, H - 16, "Ryzen 7 9700X (8 cores), Windows 11, median of 3. With the GPU (the default auto mode) "
-           "0.22-0.39 s. Data: bench/results.json.", 11, "muted")
+    auto = [get[(k, "rust auto")] for k in names]
+    s.text(24, H - 16, f"Ryzen 7 9700X (8 cores), Windows 11, median of 3. The default auto mode (GPU only when faster): "
+           f"{min(auto):.2f}-{max(auto):.2f} s. Data: bench/results.json.", 11, "muted")
     return s
 
 

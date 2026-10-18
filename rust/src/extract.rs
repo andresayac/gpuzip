@@ -1,7 +1,8 @@
 //! Extracting or testing one ZIP archive. CPU threads and the GPU share the Deflate entries
-//! (nvCOMP takes batches of the smallest, the CPU threads the largest, until they meet),
-//! writer threads save nvCOMP's results, gpuinflate decodes the largest entries one at a time
-//! when that beats a CPU thread, and 7-Zip takes the entries none of them reads.
+//! (nvCOMP takes batches of the smallest, the CPU threads the largest, until they meet; in auto
+//! mode nvCOMP starts only if the CPU threads, timed on their first entries, would be slower
+//! alone), writer threads save nvCOMP's results, gpuinflate decodes the largest entries one at a
+//! time when that beats a CPU thread, and 7-Zip takes the entries none of them reads.
 
 use crate::gpu::{self, Api, Decoder, MAX_BATCH_ENTRIES};
 use crate::inflate;
@@ -13,7 +14,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -21,12 +22,66 @@ const MIB: u64 = 1 << 20;
 const WRITE_CHUNK: usize = 64; // GPU results go to the writer threads this many files at a time
 const STREAM_ABOVE: u64 = 512 * MIB; // larger entries are decoded in pieces, not in one buffer
 // Rough speeds for giving large entries to gpuinflate: an entry goes to it when the GPU, after
-// starting up and finishing the entries it already has, would be done before one CPU thread.
+// starting up and finishing the entries it already has, would be done before a CPU thread.
 const BIG_MIN: u64 = 32 * MIB;
 const BIG_MIN_GPU_MODE: u64 = MIB; // gpu mode: nvCOMP keeps only the small ones
-const CPU_RATE: f64 = 1.0e9; // bytes/s, one thread with libdeflate
-const GPU_RATE: f64 = 4.0e9; // bytes/s, gpuinflate on one stream
-const GPU_START: f64 = 0.15; // s
+const CPU_RATE: f64 = 0.6e9; // bytes/s, one thread on a large entry of text or a ROM image
+const GPU_START: f64 = 0.15; // s, the driver and gpuinflate
+// gpuinflate on one stream (RTX 5080): text and the like at 3.5 GB/s, but streams that hardly
+// compress (ROM images, data compressed before) only at about 1 GB/s; in between, by the ratio
+const GI_RATE: f64 = 3.5e9; // bytes/s, compressed to half its size or better
+const GI_RATE_FLAT: f64 = 1.0e9; // bytes/s, compressed to 0.9 of its size or worse
+const GI_STREAM: f64 = 0.04; // s, each stream's own start-up
+// auto mode starts nvCOMP only when it and the CPU threads together would finish sooner than the
+// CPU threads alone, start-up included. The CPU threads' speed is measured on the first entries
+// they decode; the GPU's figures are rough (RTX 5080).
+const NVCOMP_RATE: f64 = 2.5e9; // bytes/s, batches of small entries
+const NVCOMP_START: f64 = 0.15; // s, the driver, nvCOMP and the pinned buffers
+const GPU_EXIT: f64 = 0.05; // s, what a loaded CUDA driver adds when the program ends
+const MEASURE: Duration = Duration::from_millis(5); // CPU decode time to see before deciding
+const MEASURE_MAX: Duration = Duration::from_millis(20); // decide anyway after this long
+const CPU_RATE_BUSY: f64 = 0.5e9; // bytes/s, one thread while every thread decodes, if not measured
+
+/// Rough time gpuinflate takes for one entry.
+fn gpuinflate_seconds(size: u64, csize: u64) -> f64 {
+    let ratio = csize as f64 / size.max(1) as f64;
+    let rate = GI_RATE - (GI_RATE - GI_RATE_FLAT) * ((ratio - 0.5) / 0.4).clamp(0.0, 1.0);
+    GI_STREAM + size as f64 / rate
+}
+
+/// auto mode: the largest Deflate entries for gpuinflate, largest first, taken out of `deflate`
+/// (sorted by size). Each goes to it if the GPU, started and done with the entries it already
+/// has, would finish it before a CPU thread could. A CPU thread decodes one entry at a time, so
+/// with more large entries than threads the later ones wait their turn.
+fn pick_for_gpuinflate(entries: &[Entry], deflate: &mut Vec<usize>, threads: usize) -> VecDeque<usize> {
+    let (mut big, mut keep) = (VecDeque::new(), Vec::new());
+    let mut gpu_done = GPU_START + GPU_EXIT;
+    while deflate.last().is_some_and(|&i| entries[i].size >= BIG_MIN) {
+        let i = deflate.pop().unwrap();
+        let e = &entries[i];
+        let gpu = gpu_done + gpuinflate_seconds(e.size, e.csize);
+        let cpu = (keep.len() / threads + 1) as f64 * e.size as f64 / CPU_RATE;
+        if gpu < cpu {
+            gpu_done = gpu;
+            big.push_back(i);
+        } else {
+            keep.push(i);
+        }
+    }
+    deflate.extend(keep.into_iter().rev()); // still smallest first
+    big
+}
+
+/// auto mode: whether nvCOMP joining the CPU threads would finish sooner than they would alone.
+/// `small`: bytes nvCOMP could take, `rest`: bytes only the CPU takes, `cpu`: bytes/s of all the
+/// CPU threads together.
+fn nvcomp_pays(small: f64, rest: f64, cpu: f64) -> bool {
+    let all = small + rest;
+    // from the moment it is running the GPU takes its share at NVCOMP_RATE, but no more than the
+    // small entries; the CPU threads take everything else
+    let shared = (rest / cpu).max((all + NVCOMP_RATE * NVCOMP_START) / (cpu + NVCOMP_RATE));
+    shared + GPU_EXIT < all / cpu
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Via {
@@ -83,6 +138,17 @@ struct GpuBatch {
     free: Sender<usize>,
 }
 
+/// What gpuinflate made of one entry
+enum Inflated {
+    Done,
+    /// the output fails the size or CRC check
+    Wrong,
+    /// gpuinflate found the data invalid: the CPU will say how
+    Refused,
+    /// a GPU error: gpuinflate is not used again in this run
+    GpuError(String),
+}
+
 struct WriteJob {
     batch: Arc<GpuBatch>,
     range: std::ops::Range<usize>,
@@ -99,7 +165,10 @@ pub struct Run<'a> {
     cpu_queue: Mutex<VecDeque<usize>>,
     counts: Mutex<[Count; 3]>,
     failed: Mutex<Vec<(String, String)>>,
-    retry: Mutex<Vec<usize>>,
+    retry: Mutex<Vec<usize>>, // nvCOMP's failures, redone once the GPU is done
+    redone: AtomicUsize,      // entries the GPU failed on, redone on the CPU
+    wrong: AtomicUsize,       // ... of them because the output failed the CRC check
+    refused: AtomicUsize,     // ... because the GPU decoder found the data invalid
     notes: Mutex<Vec<String>>,
     info: Mutex<Vec<String>>,
     gpu: Mutex<GpuInfo>,
@@ -107,26 +176,31 @@ pub struct Run<'a> {
     slot_bytes: usize,
     use_gpu: bool,
     steal: bool, // in gpu mode the CPU only takes what the GPU cannot
+    threads: usize,
+    cpu_bytes: AtomicU64, // Deflate entries the CPU threads decoded, and the time they took
+    cpu_nanos: AtomicU64,
 }
 
 impl<'a> Run<'a> {
     pub fn new(opts: &'a Opts, archive: &'a str, data: &'a [u8], entries: &'a [Entry], out_root: Option<PathBuf>) -> Self {
         let mut deflate: Vec<usize> = (0..entries.len()).filter(|&i| entries[i].route == Route::Deflate).collect();
         deflate.sort_by_key(|&i| entries[i].size);
+        let threads = opts.threads.unwrap_or_else(crate::cpu_threads).max(1);
         let mut big = VecDeque::new();
-        if opts.mode != Mode::Cpu && inflate::available() {
-            let mut queued = 0.0;
-            while let Some(&i) = deflate.last() {
-                let size = entries[i].size as f64;
-                let take = match opts.mode {
-                    Mode::Gpu => entries[i].size >= BIG_MIN_GPU_MODE,
-                    _ => entries[i].size >= BIG_MIN && GPU_START + (queued + size) / GPU_RATE < size / CPU_RATE,
-                };
-                if !take {
-                    break; // smaller entries would not qualify either
-                }
-                queued += size;
+        let mut info = Vec::new();
+        if opts.mode == Mode::Gpu && inflate::available() {
+            while deflate.last().is_some_and(|&i| entries[i].size >= BIG_MIN_GPU_MODE) {
                 big.push_back(deflate.pop().unwrap());
+            }
+        } else if opts.mode == Mode::Auto && inflate::available() {
+            let large = deflate.iter().filter(|&&i| entries[i].size >= BIG_MIN).count();
+            big = pick_for_gpuinflate(entries, &mut deflate, threads);
+            if large > big.len() {
+                info.push(format!(
+                    "gpuinflate takes {} of the {large} entries of {} MB or more: the CPU threads would finish the others first",
+                    big.len(),
+                    BIG_MIN / MIB
+                ));
             }
         }
         let gpu_max_entry = if opts.mode == Mode::Auto { opts.gpu_max_entry_kb * 1024 } else { u64::MAX };
@@ -138,7 +212,6 @@ impl<'a> Run<'a> {
         let slot_bytes = (opts.batch_mb * MIB).min(gpu::align(eligible as usize) as u64).max(MIB) as usize;
         // nvCOMP: only for what gpuinflate did not take
         let use_gpu = (opts.mode == Mode::Gpu && !deflate.is_empty()) || (opts.mode == Mode::Auto && eligible >= opts.gpu_min_mb * MIB);
-        let mut info = Vec::new();
         if opts.mode == Mode::Auto && !use_gpu && !deflate.is_empty() {
             info.push(format!(
                 "GPU skipped: only {} of small Deflate data, the CPU is faster below {} MB",
@@ -158,6 +231,9 @@ impl<'a> Run<'a> {
             counts: Mutex::new([Count::default(); 3]),
             failed: Mutex::new(Vec::new()),
             retry: Mutex::new(Vec::new()),
+            redone: AtomicUsize::new(0),
+            wrong: AtomicUsize::new(0),
+            refused: AtomicUsize::new(0),
             notes: Mutex::new(Vec::new()),
             info: Mutex::new(info),
             gpu: Mutex::new(GpuInfo::default()),
@@ -165,6 +241,9 @@ impl<'a> Run<'a> {
             slot_bytes,
             use_gpu,
             steal: opts.mode != Mode::Gpu,
+            threads,
+            cpu_bytes: AtomicU64::new(0),
+            cpu_nanos: AtomicU64::new(0),
         }
     }
 
@@ -232,8 +311,8 @@ impl<'a> Run<'a> {
         Ok(true)
     }
 
-    /// A large Deflate entry on gpuinflate, written as it comes. Ok(false): redo it on the CPU.
-    fn deliver_inflate(&self, g: &inflate::Gpu, e: &Entry) -> Result<bool, String> {
+    /// A large Deflate entry on gpuinflate, written as it comes.
+    fn deliver_inflate(&self, g: &inflate::Gpu, e: &Entry) -> Result<Inflated, String> {
         let src = &self.data[e.data_offset as usize..(e.data_offset + e.csize) as usize];
         let mut out = match self.target(e) {
             Some(p) => Some(File::create(&p).map_err(|x| x.to_string())?),
@@ -254,14 +333,26 @@ impl<'a> Run<'a> {
         if let Some(x) = write_err {
             return Err(x);
         }
-        if r.is_err() || total != e.size || crc.finalize() != e.crc {
-            return Ok(false);
+        match r {
+            Err(inflate::Error::Gpu(x)) => return Ok(Inflated::GpuError(x)),
+            Err(inflate::Error::Data(_) | inflate::Error::Truncated(_)) => return Ok(Inflated::Refused),
+            Err(inflate::Error::Aborted) => return Ok(Inflated::Wrong), // more than the directory says
+            Ok(_) if total != e.size || crc.finalize() != e.crc => return Ok(Inflated::Wrong),
+            Ok(_) => {}
         }
         if let (Some(f), Some(t)) = (out.as_ref(), zip::dos_time(e.dos_date, e.dos_time)) {
             let _ = f.set_modified(t);
         }
         self.add(Via::Gpu, e);
-        Ok(true)
+        Ok(Inflated::Done)
+    }
+
+    /// Entries for the CPU threads to take next, ahead of everything else.
+    fn to_cpu_now(&self, todo: impl IntoIterator<Item = usize>) {
+        let mut q = self.cpu_queue.lock().unwrap();
+        for i in todo {
+            q.push_front(i);
+        }
     }
 
     fn big_thread(&self) {
@@ -271,7 +362,8 @@ impl<'a> Run<'a> {
             Err(x) => {
                 let msg = format!("gpuinflate unavailable ({x}); large entries used the CPU");
                 if self.opts.mode == Mode::Gpu { self.note(msg) } else { self.info.lock().unwrap().push(msg) }
-                self.retry_all_big();
+                let rest: Vec<usize> = self.big.lock().unwrap().drain(..).collect();
+                self.to_cpu_now(rest.into_iter().rev());
                 return;
             }
         };
@@ -285,14 +377,32 @@ impl<'a> Run<'a> {
             let Some(i) = self.big.lock().unwrap().pop_front() else { break };
             let e = &self.entries[i];
             match self.deliver_inflate(g, e) {
-                Ok(true) => {
+                Ok(Inflated::Done) => {
                     n += 1;
                     bytes += e.size;
                     self.gpu.lock().unwrap().batches += 1;
+                    continue;
                 }
-                Ok(false) => self.retry.lock().unwrap().push(i),
-                Err(x) => self.fail(e, x),
-            }
+                Ok(Inflated::Wrong) => self.wrong.fetch_add(1, Ordering::Relaxed),
+                Ok(Inflated::Refused) => self.refused.fetch_add(1, Ordering::Relaxed),
+                Ok(Inflated::GpuError(x)) => {
+                    // the GPU may be in a bad state now: the CPU threads take the rest too
+                    let rest: Vec<usize> = self.big.lock().unwrap().drain(..).collect();
+                    self.note(format!(
+                        "gpuinflate failed on {} ({x}); it and the {} large entries after it were decoded on the CPU",
+                        e.name,
+                        rest.len()
+                    ));
+                    self.to_cpu_now(rest.into_iter().rev());
+                    0
+                }
+                Err(x) => {
+                    self.fail(e, x);
+                    continue;
+                }
+            };
+            self.redone.fetch_add(1, Ordering::Relaxed);
+            self.to_cpu_now([i]);
         }
         if n > 0 {
             let secs = t.elapsed().as_secs_f64();
@@ -305,11 +415,6 @@ impl<'a> Run<'a> {
         }
     }
 
-    fn retry_all_big(&self) {
-        let rest: Vec<usize> = self.big.lock().unwrap().drain(..).collect();
-        self.retry.lock().unwrap().extend(rest);
-    }
-
     fn run_cpu(&self, i: usize, d: &mut libdeflater::Decompressor) {
         let e = &self.entries[i];
         let start = e.data_offset as usize;
@@ -317,9 +422,14 @@ impl<'a> Run<'a> {
             STORED => self.deliver(e, &self.data[start..start + e.size as usize], Via::Cpu),
             DEFLATED if e.size > STREAM_ABOVE => self.deliver_streamed(e),
             DEFLATED => {
+                let t = Instant::now();
                 let mut out = vec![0u8; e.size as usize];
                 match d.deflate_decompress(&self.data[start..start + e.csize as usize], &mut out) {
-                    Ok(n) if n == out.len() => self.deliver(e, &out, Via::Cpu),
+                    Ok(n) if n == out.len() => {
+                        self.cpu_nanos.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        self.cpu_bytes.fetch_add(e.size, Ordering::Relaxed);
+                        self.deliver(e, &out, Via::Cpu)
+                    }
                     Ok(_) => Ok(false),
                     Err(x) => Err(format!("Deflate error: {x:?}")),
                 }
@@ -367,7 +477,43 @@ impl<'a> Run<'a> {
         batch
     }
 
+    /// auto mode: watch the CPU threads for a moment, then say whether starting nvCOMP pays off.
+    fn nvcomp_worth_starting(&self) -> bool {
+        let t0 = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(1));
+            if self.pending.lock().unwrap().is_empty() {
+                self.info.lock().unwrap().push("GPU not started: the CPU threads took every entry first".into());
+                return false;
+            }
+            if Duration::from_nanos(self.cpu_nanos.load(Ordering::Relaxed)) >= MEASURE || t0.elapsed() >= MEASURE_MAX {
+                break;
+            }
+        }
+        let (bytes, nanos) = (self.cpu_bytes.load(Ordering::Relaxed), self.cpu_nanos.load(Ordering::Relaxed));
+        // every thread still on its first entry (large ones come first): assume the usual speed
+        let (per_thread, how) = if bytes == 0 { (CPU_RATE_BUSY, "about ") } else { (bytes as f64 * 1e9 / nanos as f64, "") };
+        let cpu = per_thread * self.threads as f64;
+        let (mut small, mut rest) = (0u64, 0u64);
+        for &i in self.pending.lock().unwrap().iter() {
+            let size = self.entries[i].size;
+            if size <= self.gpu_max_entry { small += size } else { rest += size }
+        }
+        let go = nvcomp_pays(small as f64, rest as f64, cpu);
+        self.info.lock().unwrap().push(format!(
+            "GPU {}: the CPU threads decode at {how}{:.1} GB/s and would need {:.2} s for the {} left",
+            if go { "started" } else { "not started, the CPU is faster" },
+            cpu / 1e9,
+            (small + rest) as f64 / cpu,
+            crate::human(small + rest)
+        ));
+        go
+    }
+
     fn gpu_thread(&self, jobs: Sender<WriteJob>) {
+        if self.steal && !self.nvcomp_worth_starting() {
+            return;
+        }
         let t0 = Instant::now();
         let api = match gpu_api() {
             Ok(a) => a,
@@ -436,6 +582,7 @@ impl<'a> Run<'a> {
                 }
                 Err(x) => {
                     self.note(format!("GPU batch failed ({x}); redone on the CPU"));
+                    self.redone.fetch_add(batch.len(), Ordering::Relaxed);
                     self.retry.lock().unwrap().extend(batch);
                     free_tx.send(slot).unwrap();
                 }
@@ -457,13 +604,19 @@ impl<'a> Run<'a> {
                 let i = b.entries[k];
                 let e = &self.entries[i];
                 if !b.ok[k] {
+                    self.refused.fetch_add(1, Ordering::Relaxed);
+                    self.redone.fetch_add(1, Ordering::Relaxed);
                     self.retry.lock().unwrap().push(i);
                     continue;
                 }
                 let data = unsafe { std::slice::from_raw_parts(b.base.0.add(b.offsets[k]), e.size as usize) };
                 match self.deliver(e, data, Via::Gpu) {
                     Ok(true) => {}
-                    Ok(false) => self.retry.lock().unwrap().push(i),
+                    Ok(false) => {
+                        self.wrong.fetch_add(1, Ordering::Relaxed);
+                        self.redone.fetch_add(1, Ordering::Relaxed);
+                        self.retry.lock().unwrap().push(i);
+                    }
                     Err(x) => self.fail(e, x),
                 }
             }
@@ -542,7 +695,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        let threads = self.opts.threads.unwrap_or_else(crate::cpu_threads).max(1);
+        let threads = self.threads;
         let io_threads = self.opts.io_threads.unwrap_or_else(|| crate::cpu_threads().min(32)).max(1);
         let stop = &AtomicBool::new(false);
         let show_progress = !(self.opts.quiet || self.opts.json) && std::io::stderr().is_terminal();
@@ -581,13 +734,18 @@ impl<'a> Run<'a> {
                 h.join().unwrap();
             }
             // what the GPU could not take or got wrong (should be nothing) is redone on the CPU
-            let retried = this.retry.lock().unwrap().len();
-            if retried > 0 {
-                this.note(format!("{retried} GPU results failed the CRC check and were redone on the CPU"));
+            let (wrong, refused) = (this.wrong.load(Ordering::Relaxed), this.refused.load(Ordering::Relaxed));
+            if wrong > 0 {
+                this.note(format!("{wrong} GPU results failed the CRC check and were redone on the CPU"));
             }
-            let mut rest: VecDeque<usize> = this.pending.lock().unwrap().drain(..).collect();
-            rest.extend(this.retry.lock().unwrap().iter().copied());
-            *this.cpu_queue.lock().unwrap() = rest;
+            if refused > 0 {
+                this.note(format!("the GPU found {refused} entries invalid; they were decoded again on the CPU"));
+            }
+            let rest: Vec<usize> = this.pending.lock().unwrap().drain(..).collect();
+            let mut q = this.cpu_queue.lock().unwrap();
+            q.extend(rest);
+            q.extend(this.retry.lock().unwrap().iter().copied());
+            drop(q);
             let again: Vec<_> = (0..threads).map(|_| sc.spawn(move || this.cpu_worker())).collect();
             for h in again {
                 h.join().unwrap();
@@ -605,7 +763,7 @@ impl<'a> Run<'a> {
                 _ => {}
             }
         }
-        let retried = self.retry.lock().unwrap().len();
+        let retried = self.redone.load(Ordering::Relaxed);
         Outcome {
             seconds: t0.elapsed().as_secs_f64(),
             counts: *self.counts.lock().unwrap(),
@@ -617,5 +775,61 @@ impl<'a> Run<'a> {
             retried,
             stream: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Entry, Route, nvcomp_pays, pick_for_gpuinflate};
+
+    fn entries(sizes: &[(u64, f64)]) -> Vec<Entry> {
+        let entry = |&(size, ratio): &(u64, f64)| Entry {
+            name: String::new(),
+            path: None,
+            method: 8,
+            flags: 0,
+            crc: 0,
+            csize: (size as f64 * ratio) as u64,
+            size,
+            data_offset: 0,
+            dos_time: 0,
+            dos_date: 0,
+            route: Route::Deflate,
+        };
+        sizes.iter().map(entry).collect()
+    }
+
+    fn picked(sizes: &[(u64, f64)], threads: usize) -> usize {
+        let e = entries(sizes);
+        let mut deflate: Vec<usize> = (0..e.len()).collect();
+        deflate.sort_by_key(|&i| e[i].size);
+        let big = pick_for_gpuinflate(&e, &mut deflate, threads);
+        assert_eq!(big.len() + deflate.len(), e.len());
+        assert!(deflate.windows(2).all(|w| e[w[0]].size <= e[w[1]].size));
+        big.len()
+    }
+
+    #[test]
+    fn gpuinflate_for_what_it_finishes_first() {
+        const MB: u64 = 1 << 20;
+        // one 2 GB text entry: the GPU (0.8 s) beats a CPU thread (2 s)
+        assert_eq!(picked(&[(2048 * MB, 0.4)], 16), 1);
+        // eight 128 MB entries, one CPU thread each: the CPU
+        assert_eq!(picked(&[(128 * MB, 0.4); 8], 16), 0);
+        // with 2 threads the CPU would do them four at a time per thread: the GPU takes some
+        assert!(picked(&[(128 * MB, 0.4); 8], 2) >= 2);
+        // nine 750 MB ROM image parts that hardly compress (about 1.6 GB/s on the GPU): it takes
+        // two, a thread each does the rest; with 4 threads it takes more
+        assert_eq!(picked(&[(750 * MB, 0.8); 9], 16), 2);
+        assert!(picked(&[(750 * MB, 0.8); 9], 4) >= 3);
+    }
+
+    #[test]
+    fn nvcomp_only_when_the_cpu_is_slow() {
+        // 1 GB of small entries: 16 Zen 5 threads (6 GB/s) finish before the GPU helps, 2 do not
+        assert!(!nvcomp_pays(1e9, 0.0, 6e9));
+        assert!(nvcomp_pays(1e9, 0.0, 1.2e9));
+        // too little the GPU could take: the CPU has the large entries to do anyway
+        assert!(!nvcomp_pays(0.02e9, 2e9, 1.2e9));
     }
 }

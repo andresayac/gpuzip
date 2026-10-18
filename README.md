@@ -19,7 +19,7 @@ survived, and says exactly which bytes are certain and which are not.
   sectors, interrupted or wrongly resumed downloads, FTP transfers in ASCII mode, bit rot. Every
   file comes out marked intact, inferred, possibly damaged or partial, and the report says what
   could not be checked. Office documents are rebuilt so that Word, Excel and PowerPoint open them.
-- **Extract and test** ZIP, `.gz` and `.tar.gz` on every CPU core, 14-20x faster than 7-Zip,
+- **Extract and test** ZIP, `.gz` and `.tar.gz` on every CPU core, 13-20x faster than 7-Zip,
   every CRC checked, paths that would escape the output folder refused. RAR, 7z and the rest go
   to 7-Zip.
 - **On an NVIDIA GPU**, one large `.gz` is decoded in parallel by thousands of GPU threads with
@@ -62,7 +62,7 @@ How it works, what each status means and every measurement: [docs/rescue.md](doc
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/zip-speed-dark.svg">
-  <img alt="Testing ZIP archives: gpuzip on the CPU is 14-20x faster than 7-Zip" src="docs/img/zip-speed-light.svg">
+  <img alt="Testing ZIP archives: gpuzip on the CPU is 13-20x faster than 7-Zip" src="docs/img/zip-speed-light.svg">
 </picture>
 
 <picture>
@@ -72,7 +72,8 @@ How it works, what each status means and every measurement: [docs/rescue.md](doc
 
 Where gpuzip does not win, and why: writing many small files is limited by the file system
 (and on Windows by Defender), on small `.gz` files rapidgzip still starts faster, and for ZIP
-files the CPU beats nvCOMP on the GPU on this machine. All the numbers and how to reproduce them:
+files the CPU beats nvCOMP on the GPU on this machine (so `auto` leaves the GPU off; with fewer
+CPU threads it turns it on). All the numbers and how to reproduce them:
 [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Install

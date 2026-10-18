@@ -15,14 +15,14 @@ every dataset.
 
 | Dataset | Job | 7-Zip | Python CPU | Python GPU | Python auto | Rust CPU | Rust GPU | Rust auto |
 |---|---|---|---|---|---|---|---|---|
-| 40,000 small files, 1.1 GB | test | 4.78 s | 0.87 s | 1.79 s | 1.00 s | **0.28 s** | 0.61 s | 0.39 s |
-| | extract | 26.81 s | **9.86 s** | - | 11.20 s | 19.56 s* | - | 19.77 s* |
-| 2,000 medium files, 1.4 GB | test | 5.08 s | 0.46 s | 2.03 s | 0.48 s | **0.26 s** | 0.86 s | 0.35 s |
-| | extract | 7.31 s | **1.08 s** | - | 1.53 s | 1.56 s* | - | 1.87 s* |
-| 8 large files, 1.1 GB | test | 3.66 s | 0.45 s | 42.23 s | 0.45 s | **0.27 s** | 21.16 s | **0.27 s** |
-| | extract | 4.01 s | 0.67 s | - | 0.66 s | **0.62 s** | - | 1.45 s |
-| Mixed, 10,304 files, 0.8 GB | test | 2.80 s | 0.46 s | 11.93 s | 0.51 s | **0.19 s** | 5.77 s | 0.22 s |
-| | extract | 9.07 s | **2.89 s** | - | 3.24 s | 5.38 s* | - | 5.21 s* |
+| 40,000 small files, 1.1 GB | test | 4.34 s | 0.81 s | 1.64 s | 0.93 s | **0.26 s** | 0.57 s | **0.26 s** |
+| | extract | 25.54 s | **9.29 s** | - | 9.30 s | 18.80 s* | - | 19.36 s* |
+| 2,000 medium files, 1.4 GB | test | 5.02 s | 0.43 s | 1.96 s | 0.47 s | **0.26 s** | 2.36 s | **0.26 s** |
+| | extract | 7.12 s | **1.10 s** | - | 1.11 s | 1.48 s* | - | 1.58 s* |
+| 8 large files, 1.1 GB | test | 3.63 s | 0.44 s | 43.29 s | 0.43 s | **0.26 s** | 0.48 s | **0.26 s** |
+| | extract | 3.90 s | 0.64 s | - | 0.67 s | **0.48 s** | - | **0.48 s** |
+| Mixed, 10,304 files, 0.8 GB | test | 2.83 s | 0.43 s | 12.22 s | 0.52 s | 0.22 s | 0.85 s | **0.20 s** |
+| | extract | 9.59 s | **2.83 s** | - | 3.09 s | 5.41 s* | - | 5.29 s* |
 
 \* Windows Defender inspects every file the Rust build writes, at about 0.35 ms a file, far more
 than it charges Python's signed interpreter. The same `gpuzip.exe` run from `%TEMP%` (which this
@@ -40,15 +40,45 @@ What this shows:
   at 0.2-0.3 GB/s here; Rust with libdeflate at up to 5.6 GB/s, process start included.
 - Extracting many files is limited by creating them, and on Windows by how Defender treats
   the program. A code-signed release with some reputation should behave like the `%TEMP%` column.
-- With nvCOMP the GPU never beats the CPU on these ZIP files: it decodes small entries at
-  several GB/s once running, but 8 Zen 5 cores with libdeflate are faster still, and it gives
-  a large entry to one GPU thread (8 files of 128 MB: 21-42 s on the GPU, 0.27 s on the CPU).
-  These numbers predate gpuinflate; with it, `--mode gpu` tests those 8 files in 0.43 s, and
-  `auto` rightly leaves them to the CPU threads. A ZIP with one 2.1 GB entry tests in 0.70 s
-  with gpuinflate (`auto` picks it) and 3.84 s on the CPU.
+- With nvCOMP the GPU does not beat 16 CPU threads on these ZIP files. Once running it decodes
+  small entries at about 2.5-3 GB/s; 8 Zen 5 cores with libdeflate reach 6-8 GB/s, and the
+  GPU's start-up (about 0.15 s, and about 0.05 s more to unload the driver at exit) is most of
+  the CPU's whole time. So `auto` times the CPU threads on their first entries and leaves the
+  GPU off here, and matches `--mode cpu`. It used to start nvCOMP anyway and was 19-36% slower
+  on the small, medium and mixed files (0.39, 0.35 and 0.22 s against 0.28, 0.26 and 0.19 s).
+- On a weaker CPU the GPU does pay, and `auto` uses it. `--threads N` stands in for a smaller CPU
+  with the same GPU (test, median of 9, process start included):
 
-Where the GPU could still pay off for ZIP: decoding straight into GPU memory for
-machine-learning data loading (no files written, no copy back), machines with a weak CPU, and
+  | CPU threads | Data | `--mode cpu` | `auto` | GPU in `auto` |
+  |---|---|---|---|---|
+  | 2 | small | 0.92 s | **0.50 s** | yes |
+  | 2 | medium | 1.11 s | **0.70 s** | yes |
+  | 2 | mixed | 0.63 s | **0.47 s** | yes |
+  | 4 | small | 0.56 s | **0.49 s** | yes |
+  | 4 | medium | 0.64 s | **0.55 s** | yes |
+  | 4 | mixed | 0.35 s | 0.35 s | no (with it: 0.31-0.41 s) |
+
+- Large entries go to gpuinflate when it would finish them before a CPU thread, counting its
+  speed by how well each entry compresses and the CPU threads' turns. A 5.8 GB Android ROM ZIP
+  (54 entries; nine parts of about 750 MB, compressed only to 0.77-0.91 of their size, which
+  gpuinflate decodes at 1.1-1.7 GB/s) and the 8 large files, test, median of 5-7:
+
+  | Archive | CPU threads | `--mode cpu` | `auto` | gpuinflate in `auto` |
+  |---|---|---|---|---|
+  | ROM, 7.4 GB | 16 | 2.80 s | **2.48 s** | 2 entries |
+  | | 4 | 4.47 s | **3.31 s** | 3 entries |
+  | | 2 | 6.95 s | **4.29 s** | 4 entries |
+  | 8 large files | 16 | 0.29 s | 0.29 s | none |
+  | | 2 | 0.81 s | **0.49 s** | 4 entries |
+
+- `--mode gpu` gives every entry of 1 MB or more to gpuinflate, one at a time, and the rest to
+  nvCOMP: 0.48 s for the 8 files of 128 MB (nvCOMP alone gives a large entry to one GPU thread:
+  43 s in the Python version, which has no gpuinflate), but 2.36 s for 2,000 files of up to
+  2 MB. A ZIP with one 2.1 GB entry tests in 0.70 s with gpuinflate (`auto` picks it) and
+  3.84 s on the CPU.
+
+Where the GPU could still pay off for ZIP: machines with a weak CPU (above), decoding straight
+into GPU memory for machine-learning data loading (no files written, no copy back), and
 NVIDIA's data-center Blackwell GPUs, whose hardware decompression engine handles Deflate.
 
 ## gzip
