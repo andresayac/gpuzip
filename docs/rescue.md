@@ -83,6 +83,24 @@ statistics, and takes one only when the evidence is overwhelming (99.9% right in
 measurements; the misses were true ambiguities, `operator.lt` for `operator.le`). They are
 reported as inferred, never as exact; `--no-infer` in gzrescue leaves them unknown.
 
+## Memory and time
+
+A rescue's memory does not grow with the file. gzrescue keeps the first 128 MB of the output in
+memory and, of the rest, only what inferring lost bytes needs (each lost window byte's places
+with the bytes around them, and the exact bytes near the damage its model learns from); the rest
+is decoded a second time, the same way, as it is written out, and a `.tar.gz` is extracted as the
+output comes. What it holds grows with the damage instead, about 40 bytes for each place a lost
+byte was copied to: under 1 GB for linux-6.6.tar.gz (1.4 GB of output) damaged in any of the
+eleven ways below, 7.5 GB for enwik9.zip with 1,835 damaged blocks of Wikipedia text, whose lost
+bytes were copied 237 million times. The search for block headers and the scoring of lost bytes
+use every CPU core.
+
+`--max-output` stops a rescue whose output would grow past a limit (by default 100 times the
+input, at least 4 GB), as a decompression bomb's would, with a message and no file left behind;
+`--max-output 0` removes the limit. Putting back the CRs an FTP transfer removed costs one decode
+of the rest of the entry for each place a CR may go, at most 1 GB of input per entry and 16 GB
+per file.
+
 ## Tested on damage as it happens
 
 [research/recovery](../research/recovery) breaks six files (a

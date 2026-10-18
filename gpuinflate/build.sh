@@ -21,7 +21,7 @@ else
     rescue_lib=libgzrescue.so
     shared=-shared
 fi
-"$CXX" -O2 -std=c++20 -fPIC -fvisibility=hidden $shared $CXXFLAGS -DGR_BUILD rescue.cpp -o "$rescue_lib"
+"$CXX" -O2 -std=c++20 -fPIC -fvisibility=hidden -pthread $shared $CXXFLAGS -DGR_BUILD rescue.cpp -o "$rescue_lib"
 echo "built $rescue_lib"
 
 [ "$1" = rescue ] && exit 0

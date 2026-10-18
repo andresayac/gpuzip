@@ -308,6 +308,50 @@ def main():
                   f"{rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}"
                   + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
 
+    # The rescue holds the first part of the output in memory and decodes the rest again to write
+    # it out (GR_HOLD: how many bytes it holds). Holding none of it, or 64 KB, must give the same
+    # files and the same report, inferred bytes and their model included.
+    if os.environ.get("GPUZIP_BIN"):
+        bad = os.path.join(work, "damaged85.tar.gz")
+        runs = {}
+        for hold in (None, "0", "65536"):
+            out = os.path.join(work, f"rescued_hold{hold}")
+            shutil.rmtree(out, ignore_errors=True)
+            env = dict(os.environ)
+            if hold is not None:
+                env["GR_HOLD"] = hold
+            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8", env=env)
+            try:
+                rep = json.loads(r.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                rep = {}
+            rep.pop("seconds", None)
+            runs[hold] = (r.returncode, rep, tree(out))
+        for hold in ("0", "65536"):
+            ok = runs[hold] == runs[None] and runs[None][1].get("damaged_blocks", 0) >= 1
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} rescue holding {hold} bytes of the output: the same files and report as holding it all")
+
+    # A decompression bomb: the rescue stops at --max-output, says so and leaves no file; with no
+    # limit it gives back every byte
+    if os.environ.get("GPUZIP_BIN"):
+        bomb = os.path.join(work, "zeros.gz")
+        with gzip.open(bomb, "wb", compresslevel=9) as g:
+            for _ in range(64):
+                g.write(bytes(1 << 20))
+        out = os.path.join(work, "rescued_bomb")
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "rescue", bomb, "-o", out, "--max-output", "1M"], capture_output=True, text=True, encoding="utf-8")
+        left = os.listdir(out) if os.path.isdir(out) else []
+        ok = r.returncode == 1 and "--max-output" in r.stderr and not left
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of a gzip bomb stopped at --max-output 1M: exit {r.returncode}, {len(left)} files left")
+        r = subprocess.run([*GPUZIP, "rescue", bomb, "-o", out, "--max-output", "0", "--json"], capture_output=True, text=True, encoding="utf-8")
+        got = os.path.join(out, "zeros")
+        ok = r.returncode == 0 and os.path.isfile(got) and os.path.getsize(got) == 64 << 20
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of the same with --max-output 0: exit {r.returncode}, every byte back")
+
     # rescue of gzip files of one Deflate block (Rust only): a small text, and repetitive data that
     # packs megabytes into one block, with zeros written over the middle. Zeros decode as valid
     # codes: the decoder may fall back in step after them (only the CRC tells), or run on to the

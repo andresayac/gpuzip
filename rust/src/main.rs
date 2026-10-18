@@ -87,6 +87,10 @@ enum Command {
         /// Byte written where the data cannot be known
         #[arg(long, default_value_t = 0)]
         fill: u8,
+        /// Stop when a file's output would be larger than this (a decompression bomb): bytes, or
+        /// with K, M, G or T; 0 for no limit [default: 100 times the input, at least 4G]
+        #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+        max_output: Option<u64>,
         #[command(flatten)]
         opts: Opts,
     },
@@ -143,6 +147,23 @@ pub struct Opts {
 
 pub fn cpu_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+}
+
+/// A size: bytes, or a number with K, M, G or T after it (powers of 1024)
+fn parse_size(s: &str) -> Result<u64, String> {
+    let t = s.trim();
+    let (num, mult) = match t.chars().last().map(|c| c.to_ascii_uppercase()) {
+        Some('K') => (&t[..t.len() - 1], 1u64 << 10),
+        Some('M') => (&t[..t.len() - 1], 1 << 20),
+        Some('G') => (&t[..t.len() - 1], 1 << 30),
+        Some('T') => (&t[..t.len() - 1], 1 << 40),
+        _ => (t, 1),
+    };
+    let v: f64 = num.trim().parse().map_err(|_| format!("not a size: {s} (a number of bytes, or 64G, 1.5T, ...)"))?;
+    if !(v >= 0.0) {
+        return Err(format!("not a size: {s}"));
+    }
+    Ok((v * mult as f64) as u64)
 }
 
 pub fn human(n: u64) -> String {
@@ -479,11 +500,10 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
     let t0 = std::time::Instant::now();
     let mut failed: Vec<(String, String)> = Vec::new();
     let (report, tar_out, target) = if tar {
-        let mut out = Vec::with_capacity(data.len().saturating_mul(4));
-        let mut mask = Vec::with_capacity(data.len().saturating_mul(4));
+        // the files are written as the output comes, none of it held
+        let mut reader = rescue::TarReader::new(Some(&out_root), true);
         let report = lib.rescue(data, fill, |d, m| {
-            out.extend_from_slice(d);
-            mask.extend_from_slice(m);
+            reader.feed(d, m);
             true
         });
         let report = match report {
@@ -497,7 +517,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
             eprintln!("{}: {e}", out_root.display());
             return 1;
         }
-        let mut t = rescue::untar(&out, &mask, Some(&out_root), true);
+        let mut t = reader.finish();
         failed.extend(t.failed.iter().cloned());
         // a checksum failure with no block to blame: the damage is somewhere no decoder can see
         // it (raw stored data, a flipped bit that stayed in step), so no file can be vouched for
@@ -534,6 +554,9 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         let report = match report {
             Ok(r) => r,
             Err(e) => {
+                // nothing, or not all of it, was written (no Deflate data, a decompression bomb)
+                drop(f);
+                let _ = std::fs::remove_file(&target);
                 eprintln!("{path}: {e}");
                 return 1;
             }
@@ -903,7 +926,10 @@ fn main() {
         Command::X { archives, output, opts } => run_all('x', archives, output.clone(), opts),
         Command::T { archives, opts } => run_all('t', archives, None, opts),
         Command::L { archives, opts } => run_all('l', archives, None, opts),
-        Command::Rescue { archives, output, fill, opts } => run_rescue(archives, output.clone(), *fill, opts),
+        Command::Rescue { archives, output, fill, max_output, opts } => {
+            rescue::set_max_output(*max_output);
+            run_rescue(archives, output.clone(), *fill, opts)
+        }
     };
     std::process::exit(rc);
 }

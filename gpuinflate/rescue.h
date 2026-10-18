@@ -35,9 +35,9 @@ extern "C" {
 #define GR_API
 #endif
 
-#define GR_ABI_VERSION 3
+#define GR_ABI_VERSION 4
 
-enum { GR_OK = 0, GR_ERR_NO_DEFLATE = 1, GR_ERR_ABORTED = 2, GR_ERR_ARG = 3, GR_ERR_MEMORY = 4 };
+enum { GR_OK = 0, GR_ERR_NO_DEFLATE = 1, GR_ERR_ABORTED = 2, GR_ERR_ARG = 3, GR_ERR_MEMORY = 4, GR_ERR_TOO_BIG = 5, GR_ERR_INTERNAL = 6 };
 /* GR_INFERRED: a byte that copied from data lost with a damaged block, its value inferred from
  * every place that copy appears and the file's own statistics; likely right, not certain */
 enum { GR_UNKNOWN = 0, GR_EXACT = 1, GR_SUSPECT = 2, GR_INFERRED = 3 };
@@ -50,6 +50,9 @@ typedef struct {
                        * data, 1 it did (a ZIP entry, too short to tell, of a file that did), 2 never */
     uint8_t crs_expected; /* with cr_lost 1, a raw stream: how many CRs it lost, when the caller knows
                            * (a ZIP entry's size against the room it has): 1-8; 255 none; 0 unknown */
+    uint64_t max_output;  /* the rescue stops, returning GR_ERR_TOO_BIG and no result, when its output
+                           * would be larger than this many bytes (a gzip bomb): 0 no limit */
+    uint64_t cr_budget;   /* with cr_lost: input bytes the search for the lost CRs may decode; 0: 1 GiB */
 } gr_options;
 
 typedef struct {
@@ -74,6 +77,7 @@ typedef struct {
     uint64_t inferred_bytes;
     int32_t ascii_undone; /* the input had gone through an ASCII-mode transfer (LF to CR LF), undone */
     uint32_t cr_restored; /* CRs put back where a CR LF to LF transfer had removed them */
+    uint64_t cr_decoded;  /* input bytes the search for them decoded (a caller's budget for a whole file) */
 } gr_stats;
 
 /* Receives the output in order. Return nonzero to stop. */

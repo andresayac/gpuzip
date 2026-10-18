@@ -116,6 +116,7 @@ gpuzip doctor                     check the GPU, nvCOMP and 7-Zip
 | `-v`, `-q` | more detail (every damaged file and block, GPU timings) · print only failures |
 | `--json` | one JSON report per archive, for scripts |
 | `--fill N` | `rescue`: the byte written where the data cannot be known (default 0) |
+| `--max-output SIZE` | `rescue`: stop when a file's output would be larger (a decompression bomb); `0` for no limit (default: 100 times the input, at least 4G) |
 
 `x`, `t` and `l` also answer to `extract`, `test` and `list`. Exit codes: 0 ok · 1 missing file
 or setup problem · 2 something failed, was damaged or lost.
