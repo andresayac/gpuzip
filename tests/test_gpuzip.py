@@ -698,11 +698,12 @@ def main():
 
     # names from a Windows in another language say no code page, and are written in that Windows'
     # OEM one: read in another they come out garbled, so gpuzip reads them in this system's (as
-    # Explorer and 7-Zip do), says so when they look written in a CJK or Cyrillic one, and
+    # Explorer and 7-Zip do; 437 off Windows) and says so when they look written in another, and
     # --codepage reads them right, in x, l and rescue. 850 is Western Europe's: its capitals with
-    # accents are not in DOS's 437, and those names must not look foreign
-    for cp, enc, name, foreign in (("932", "shift_jis", "日本語/説明.txt", True), ("936", "gbk", "中文/说明.txt", True),
-                                   ("866", "cp866", "привет/файл.txt", True), ("850", "cp850", "ADMINISTRACIÓN/ÍNDICE Año.txt", False)):
+    # accents are not in DOS's 437. With no --codepage a name comes out right with no note, or
+    # garbled with one
+    for cp, enc, name in (("932", "shift_jis", "日本語/説明.txt"), ("936", "gbk", "中文/说明.txt"),
+                          ("866", "cp866", "привет/файл.txt"), ("850", "cp850", "ADMINISTRACIÓN/ÍNDICE Año.txt")):
         zpath = os.path.join(work, f"cp{cp}.zip")
         data = f"{enc} ".encode() * 2000
         open(zpath, "wb").write(raw_zip([(name.encode(enc), 0, data), (b"plain.txt", 0, b"plain " * 100)]))
@@ -714,21 +715,19 @@ def main():
             said, what = r.stdout + r.stderr, " ".join([args[0], *args[2:]])
             got = os.path.join(out, *name.split("/"))
             right = name in said if args[0] == "l" else os.path.exists(got) and open(got, "rb").read() == data
-            hint = "--codepage 932" in said
+            hint = "--codepage" in said
             if r.returncode != 0:
                 problems.append(f"{what} exited {r.returncode}")
-            if len(args) == 2:  # this system's code page: the right names, or else the hint if they look foreign
-                if not right and foreign and not hint:
-                    problems.append(f"{what}: neither the right name nor the hint")
-                if hint and not foreign:
-                    problems.append(f"{what}: the hint for a Western name")
+            if len(args) == 2:  # this system's code page: the right name and no note, or else the note
+                if right == hint:
+                    problems.append(f"{what}: {'the note though the name came out right' if right else 'neither the right name nor the note'}")
             elif hint or not right:
                 problems.append(f"{what}: {'the hint given' if hint else ''} {'' if right else 'no ' + ascii(name)}"
                                 + ("" if right or args[0] == "l" else f", got {ascii(sorted(os.listdir(out)) if os.path.isdir(out) else [])}"))
         ok = not problems
         failures += not ok
-        print(f"{'ok  ' if ok else 'FAIL'} names in code page {cp} ({enc}): {'the hint' if foreign else 'no hint'} without --codepage, "
-              f"the right names with it in x, l and rescue" + ("" if ok else f": {'; '.join(problems)}"))
+        print(f"{'ok  ' if ok else 'FAIL'} names in code page {cp} ({enc}): right or noted without --codepage, "
+              f"right with it in x, l and rescue" + ("" if ok else f": {'; '.join(problems)}"))
     r = subprocess.run([*GPUZIP, "x", zpath, "--codepage", "klingon", "-o", out], capture_output=True, text=True, encoding="utf-8")
     ok = r.returncode != 0 and "unknown code page" in r.stderr
     failures += not ok
