@@ -92,6 +92,10 @@
   512 MiB, a file of a .tar.gz and a .gz were the ones written as they decode: killed part way,
   they left 184 of 400 MB, 296 of 600 and 344 of 400 under their names. Nor does a wrong CRC
   leave its output any more (`gpuzip rescue` keeps what can be saved).
+- `--mode gpu` sent every member of a gzip file to the GPU, about 10 ms each: a bgzip file of
+  3,200 members of 64 KB took 28-34 s, against 0.3 s on one CPU thread. Members of less than
+  1 MB now go to the CPU, as small ZIP entries do, with a note; a BGZF file says each member's
+  size in its header, so not even `auto` starts the GPU for it. 0.27-0.41 s now.
 - A tar's symbolic links failed on Windows ("failed to unpack", exit 2: 63 in linux-6.6.tar.gz),
   where only an administrator or Developer Mode may make them. They are now made once what they
   name is written: real links where allowed, else a hard link to the file they name (which

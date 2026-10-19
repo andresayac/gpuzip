@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const GPU_MIN: u64 = 8 << 20; // auto: below this much compressed data one CPU thread is faster
+// --mode gpu: a member smaller than this goes to the CPU, as a ZIP entry does to nvCOMP; each
+// call to gpuinflate costs about 10 ms (a bgzip file, 3,200 members of 64 KB: 30.6 s, 0.3 s on
+// one CPU thread)
+const GPU_MODE_MIN: u64 = 1 << 20;
 const PIPE_CHUNK: usize = 4 << 20; // the tar extractor gets the output in pieces this big
 
 pub fn is_gzip(d: &[u8]) -> bool {
@@ -50,6 +54,8 @@ pub fn output_file(path: &str) -> (String, Option<String>) {
 
 struct Header {
     len: usize,
+    /// the whole member's size, when its header says (BGZF, bgzip's: the BC extra subfield)
+    member: Option<usize>,
 }
 
 /// A member header (RFC 1952): its length, after checking what can be checked
@@ -66,9 +72,20 @@ fn parse_header(d: &[u8]) -> Result<Header, String> {
     }
     let short = || "the file ends inside a member header".to_string();
     let mut p = 10;
+    let mut member = None;
     if flg & 4 != 0 {
-        // FEXTRA
+        // FEXTRA: subfields of 2 id bytes, a 2-byte length, the data; BGZF's "BC" holds the
+        // member's size less one
         let n = *d.get(p).ok_or_else(short)? as usize | (*d.get(p + 1).ok_or_else(short)? as usize) << 8;
+        let extra = d.get(p + 2..p + 2 + n).ok_or_else(short)?;
+        let mut x = 0;
+        while x + 4 <= extra.len() {
+            let len = extra[x + 2] as usize | (extra[x + 3] as usize) << 8;
+            if &extra[x..x + 2] == b"BC" && len == 2 && x + 6 <= extra.len() {
+                member = Some((extra[x + 4] as usize | (extra[x + 5] as usize) << 8) + 1);
+            }
+            x += 4 + len;
+        }
         p += 2 + n;
     }
     for flag in [8u8, 16] {
@@ -89,7 +106,7 @@ fn parse_header(d: &[u8]) -> Result<Header, String> {
     if p > d.len() {
         return Err(short());
     }
-    Ok(Header { len: p })
+    Ok(Header { len: p, member })
 }
 
 pub enum Fail {
@@ -137,6 +154,7 @@ fn cpu_member(body: &[u8], sink: &mut dyn FnMut(&[u8]) -> bool) -> Result<u64, F
 pub fn decode(data: &[u8], mode: Mode, sink: &mut (dyn FnMut(&[u8]) -> bool + Send), d: &mut Decoded) -> Result<(), Fail> {
     let mut pos = 0usize;
     let mut prefer_gpu = mode != Mode::Cpu;
+    let mut small_on_cpu = 0u64; // --mode gpu: members too small for it
     while pos < data.len() {
         let rest = &data[pos..];
         if pos > 0 && !is_gzip(rest) {
@@ -149,11 +167,16 @@ pub fn decode(data: &[u8], mode: Mode, sink: &mut (dyn FnMut(&[u8]) -> bool + Se
         }
         let h = parse_header(rest).map_err(Fail::Corrupt)?;
         let body = &rest[h.len..];
+        // the member's Deflate data: as large as its header says (BGZF), else all that is left
+        let packed = h.member.map_or(body.len(), |m| m.saturating_sub(h.len + 8)) as u64;
         let want_gpu = match mode {
             Mode::Cpu => false,
-            Mode::Gpu => true,
-            Mode::Auto => prefer_gpu && body.len() as u64 >= GPU_MIN,
+            Mode::Gpu => prefer_gpu && packed >= GPU_MODE_MIN,
+            Mode::Auto => prefer_gpu && packed >= GPU_MIN,
         };
+        if mode == Mode::Gpu && !want_gpu {
+            small_on_cpu += 1;
+        }
         let gpu = if want_gpu {
             let t = Instant::now();
             match inflate::get() {
@@ -198,7 +221,7 @@ pub fn decode(data: &[u8], mode: Mode, sink: &mut (dyn FnMut(&[u8]) -> bool + Se
                         d.stats.segments += s.segments;
                         d.stats.rounds += s.rounds;
                         d.stats.jobs += s.jobs;
-                        if s.in_used < GPU_MIN {
+                        if s.in_used < if mode == Mode::Gpu { GPU_MODE_MIN } else { GPU_MIN } {
                             prefer_gpu = false; // small members: the next ones go to the CPU
                         }
                         s.in_used
@@ -228,6 +251,13 @@ pub fn decode(data: &[u8], mode: Mode, sink: &mut (dyn FnMut(&[u8]) -> bool + Se
     }
     if d.members == 0 {
         return Err(Fail::Corrupt("no gzip member".into()));
+    }
+    if small_on_cpu > 0 {
+        d.notes.push(format!(
+            "{} of {} members, of less than 1 MB, were decoded on the CPU: the GPU takes about 10 ms a member",
+            crate::commas(small_on_cpu),
+            crate::commas(d.members as u64)
+        ));
     }
     d.packed = data.len() as u64;
     Ok(())

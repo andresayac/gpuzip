@@ -826,6 +826,34 @@ def main():
           f"exit {r.returncode}" + (f"; WRONG: {wrong[:5]} {r.stderr.strip()[-200:]}" if wrong else ""))
     shutil.rmtree(out, ignore_errors=True)
 
+    # a BGZF file (bgzip's: members of 64 KB, each one's size in its BC extra subfield, an empty
+    # member at the end) comes out whole in every mode; --mode gpu sends its small members to the
+    # CPU, saying so (each call to the GPU costs about 10 ms: 3,200 members took 28.5 s, now 0.3)
+    def bgzf_member(data):
+        c = zlib.compressobj(6, zlib.DEFLATED, -15)
+        z = c.compress(data) + c.flush()
+        head = struct.pack("<BBBBIBBH", 0x1F, 0x8B, 8, 4, 0, 0, 0xFF, 6) + b"BC" + struct.pack("<HH", 2, 18 + len(z) + 8 - 1)
+        return head + z + struct.pack("<II", zlib.crc32(data), len(data))
+    rnd = random.Random(11)
+    blocks = [" ".join(rnd.choice(words) for _ in range(9000)).encode()[:65280] for _ in range(300)]
+    bgzf = os.path.join(work, "reads.txt.gz")
+    open(bgzf, "wb").write(b"".join(bgzf_member(b) for b in blocks) + bgzf_member(b""))
+    for mode in ("cpu", "auto") + (("gpu",) if gpu else ()):
+        out = os.path.join(work, "bgzf_out")
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "x", bgzf, "-o", out, "--mode", mode, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            notes = json.loads(r.stdout.strip().splitlines()[-1]).get("notes", [])
+        except (json.JSONDecodeError, IndexError):
+            notes = []
+        p = os.path.join(out, "reads.txt")
+        whole = os.path.isfile(p) and open(p, "rb").read() == b"".join(blocks)
+        to_cpu = any("decoded on the CPU" in n for n in notes)
+        ok = r.returncode == 0 and whole and (to_cpu if mode == "gpu" else not to_cpu)
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} x of a BGZF file of 301 members, --mode {mode}: whole {whole}, small members to the CPU noted {to_cpu}")
+    shutil.rmtree(os.path.join(work, "bgzf_out"), ignore_errors=True)
+
     # a ZIP made on Unix keeps each file's permissions, the executable bit among them: restored
     # on Unix and macOS. Not from a ZIP made on DOS, whose high attribute bits mean nothing, and
     # never setuid
