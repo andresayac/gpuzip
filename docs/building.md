@@ -28,9 +28,12 @@ look before PATH: a DLL left beside an archive must not run inside gpuzip. The N
 | gpuinflate | `gpuinflate.dll` | `libgpuinflate.so` | | `GPUZIP_INFLATE_DIR` | `.gz`, `.tar.gz` and large ZIP entries on the GPU |
 | gzrescue | `gzrescue.dll` | `libgzrescue.so` | `libgzrescue.dylib` | `GPUZIP_RESCUE_DIR` | `gpuzip rescue` |
 
-- nvCOMP is NVIDIA's own library, not in this repository. It comes with
-  `pip install nvidia-libnvcomp-cu13` (in `site-packages/nvidia/libnvcomp`, under `bin` on
-  Windows and `lib64` on Linux) or NVIDIA's nvCOMP download. gpuzip needs version 6.
+- nvCOMP is NVIDIA's own library, not in this repository. `gpuzip doctor --get-nvcomp` fetches
+  version 6 from PyPI (NVIDIA's package `nvidia-libnvcomp-cu13`), checks it against the SHA-256
+  PyPI gives and puts it in the folder GPUZIP_NVCOMP_DIR names, else the user's own
+  (`%LOCALAPPDATA%\gpuzip`, `$XDG_DATA_HOME/gpuzip` or `~/.local/share/gpuzip`), which is looked
+  in after the program's folder. It also comes with `pip install nvidia-libnvcomp-cu13` (in
+  `site-packages/nvidia/libnvcomp`) or NVIDIA's nvCOMP download. gpuzip needs version 6.
 - gpuinflate: `gpuinflate\build.cmd release` on Windows, `gpuinflate/build.sh release` on Linux.
   Both need the CUDA toolkit (see [gpuinflate/README.md](../gpuinflate/README.md)).
 - gzrescue is CPU only: `gpuinflate\build.cmd rescue` builds it with the Visual Studio C++

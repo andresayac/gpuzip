@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `gpuzip doctor --get-nvcomp` downloads NVIDIA's nvCOMP 6 from PyPI (the wheel pip would take,
+  20 to 30 MB), checks its size and SHA-256 against what PyPI gives, and puts its library and
+  NVIDIA's license in the folder GPUZIP_NVCOMP_DIR names, else the user's own
+  (`%LOCALAPPDATA%\gpuzip`, `~/.local/share/gpuzip`), which gpuzip now looks in: no Python, no
+  administrator, and an update of gpuzip's folder leaves it. Before, adding nvCOMP took Python,
+  pip and copying a file by hand, which only the package's GPU.md told.
+
+### Changed
+- `gpuzip doctor` says nvCOMP is optional when it is missing, and whether it would pay here: auto
+  mode gives ZIP entries to the GPU only where that beats the CPU threads (with 2 to 4 of them,
+  not with 16). Without an NVIDIA GPU it says so, and nothing of nvCOMP. Before: "GPU: not
+  usable", as if something were broken.
+
+### Fixed
+- An nvCOMP that is there but does not load is said so, with the system's reason (on Windows,
+  with a link to Microsoft's Visual C++ runtime when that is what it lacks), not "not found".
+
 ## 0.2.0 (2026-10-19)
 
 Extraction that hostile or odd archives cannot fool: entries whose bytes overlap are refused,

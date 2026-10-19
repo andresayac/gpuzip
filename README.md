@@ -136,8 +136,18 @@ On an NVIDIA GPU (Turing, RTX 20, or newer) gpuzip decodes large .gz and .tar.gz
 gpuinflate, which is in the package and needs only the NVIDIA driver. For ZIP files it can also
 use NVIDIA's nvCOMP, which is not in the package (it is NVIDIA's library). Most machines do not
 need it: gpuzip gives ZIP entries to the GPU only when that beats the CPU threads, which it does
-with 2 to 4 of them and not on an 8-core desktop CPU ([benchmarks](docs/benchmarks.md)). To add
-it, take it from pip (version 6) and copy its library next to gpuzip:
+with 2 to 4 of them and not on an 8-core desktop CPU ([benchmarks](docs/benchmarks.md));
+`gpuzip doctor` says which this machine is. To add it, from gpuzip 0.2.1 on:
+
+```
+gpuzip doctor --get-nvcomp
+```
+
+It downloads NVIDIA's package of nvCOMP 6 from PyPI (20 to 30 MB), checks it against the SHA-256
+PyPI gives, and puts the library and NVIDIA's license in your own folder (`%LOCALAPPDATA%\gpuzip`
+on Windows, `~/.local/share/gpuzip` on Linux), where gpuzip looks for it: no administrator, and
+an update of gpuzip leaves it there. With gpuzip 0.2.0, take it from pip and copy its library
+next to gpuzip:
 
 ```powershell
 python -m pip install "nvidia-libnvcomp-cu13<7"

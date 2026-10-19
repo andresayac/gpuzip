@@ -1361,6 +1361,66 @@ def main():
     failures += not ok
     print(f"{'ok  ' if ok else 'FAIL'} zip slip entry refused, safe entry extracted")
 
+    # doctor --get-nvcomp against a PyPI of this test's own, on this machine: the newest wheel of
+    # nvCOMP 6 for this system is fetched, its SHA-256 checked, its library and NVIDIA's license
+    # put in GPUZIP_NVCOMP_DIR (else the user's own folder); one whose SHA-256 is not PyPI's is
+    # refused, and nothing written. (The library here is a stand-in: it is not loaded.)
+    import http.server, platform, threading
+    lib = {"nt": "nvcomp64_6.dll"}.get(os.name, "libnvcomp.so.6")
+    tag = {"nt": "win_amd64"}.get(os.name, "manylinux_2_28_x86_64" if platform.machine() in ("x86_64", "AMD64") else "manylinux_2_28_aarch64")
+    wheel = io.BytesIO()
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"nvidia/libnvcomp/{'bin' if os.name == 'nt' else 'lib64'}/{lib}", b"nvCOMP stand-in " * 5000)
+        z.writestr("nvidia/libnvcomp/LICENSE", "NVIDIA's license, stand-in\n")
+    wheel = wheel.getvalue()
+    pages = {}
+
+    class PyPI(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = pages.get(self.path)
+            self.send_response(200 if body is not None else 404)
+            self.send_header("Content-Length", str(len(body or b"")))
+            self.end_headers()
+            self.wfile.write(body or b"")
+
+        def log_message(self, *a):
+            pass
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), PyPI)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def listing(sha):
+        entry = lambda v, s: {"filename": f"nvidia_libnvcomp_cu13-{v}-py3-none-{tag}.whl", "url": f"{base}/files/{v}.whl",
+                              "size": len(wheel), "digests": {"sha256": s}, "yanked": False}
+        return json.dumps({"releases": {"6.0.0.12": [entry("6.0.0.12", sha)], "5.3.0.16": [entry("5.3.0.16", "00")]}}).encode()
+    pages["/files/6.0.0.12.whl"] = wheel
+    for label, sha, by_var in (("into GPUZIP_NVCOMP_DIR", hashlib.sha256(wheel).hexdigest(), True),
+                               ("into the user's folder", hashlib.sha256(wheel).hexdigest(), False),
+                               ("with a SHA-256 not PyPI's", "0" * 64, True)):
+        pages["/pypi/nvidia-libnvcomp-cu13/json"] = listing(sha)
+        home = os.path.join(work, "nvcomp_home")
+        shutil.rmtree(home, ignore_errors=True)
+        os.makedirs(home)
+        dest = os.path.join(home, "dest") if by_var else os.path.join(home, *(["gpuzip"] if os.name == "nt" else [".local", "share", "gpuzip"]))
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GPUZIP_") and k != "XDG_DATA_HOME"}
+        env.update({"GPUZIP_PYPI_URL": f"{base}/pypi", "LOCALAPPDATA": home, "HOME": home})
+        if by_var:
+            env["GPUZIP_NVCOMP_DIR"] = dest
+        r = subprocess.run([*GPUZIP, "doctor", "--get-nvcomp"], capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+        got = os.path.join(dest, lib)
+        placed = os.path.isfile(got) and open(got, "rb").read() == b"nvCOMP stand-in " * 5000 \
+            and os.path.isfile(os.path.join(dest, "nvcomp-LICENSE.txt"))
+        if sys.platform == "darwin":
+            ok = r.returncode == 1 and "Windows and Linux" in r.stderr and not os.path.exists(got)
+        elif sha == "0" * 64:
+            ok = r.returncode == 1 and "SHA-256" in r.stderr and not os.path.exists(got)
+        else:
+            ok = placed and "6.0.0.12" in r.stdout and "installed as" in r.stdout
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} doctor --get-nvcomp from a PyPI of its own, {label}: exit {r.returncode}, placed {placed}"
+              + ("" if ok else f"; {ascii((r.stdout + r.stderr)[-300:])}"))
+    server.shutdown()
+
     # Windows: gpuzip.exe without its libraries beside it, run in a folder that holds one (a
     # download's, say), must not load it: Windows looks in the current folder for a bare name
     # before PATH. The folder named by GPUZIP_RESCUE_DIR, and PATH's folders, still serve.

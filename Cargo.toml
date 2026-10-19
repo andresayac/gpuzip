@@ -32,7 +32,10 @@ memmap2 = "0.9.11"
 ruzstd = "0.9.1" # rescue of Zstandard ZIP entries (a decoder in Rust)
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.0" # doctor --get-nvcomp: the download checked against the SHA-256 PyPI gives
 tar = "0.4"
+# doctor --get-nvcomp: nvCOMP from PyPI over HTTPS, TLS in Rust (no OpenSSL to find at run time)
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 
 [profile.release]
 lto = "thin"

@@ -22,6 +22,21 @@ pub fn exe_name() -> String {
     format!("gpuzip{}", std::env::consts::EXE_SUFFIX)
 }
 
+/// The user's own folder for gpuzip, where `doctor --get-nvcomp` puts nvCOMP: %LOCALAPPDATA%\gpuzip
+/// on Windows, $XDG_DATA_HOME/gpuzip (~/.local/share/gpuzip) elsewhere. It needs no administrator,
+/// and an update that replaces gpuzip's own folder leaves it.
+pub fn user_dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
+    };
+    base.filter(|p| p.is_absolute()).map(|b| b.join("gpuzip"))
+}
+
 /// The variable that lists the system's library folders: PATH on Windows, LD_LIBRARY_PATH on
 /// Linux, DYLD_LIBRARY_PATH on macOS.
 fn search_var() -> &'static str {
@@ -83,6 +98,25 @@ pub fn load_first(candidates: Vec<PathBuf>) -> Option<(Library, String)> {
         };
         unsafe { open(&p) }.ok().map(|l| (l, p.display().to_string()))
     })
+}
+
+/// Why the library at `p` does not load (an empty string if it does)
+pub fn load_error(p: &Path) -> String {
+    match unsafe { open(p) } {
+        Ok(lib) => {
+            drop(lib);
+            String::new()
+        }
+        Err(e) => {
+            let mut text = e.to_string();
+            let mut src = std::error::Error::source(&e);
+            while let Some(s) = src {
+                text = format!("{text}: {s}");
+                src = s.source();
+            }
+            text
+        }
+    }
 }
 
 #[cfg(windows)]

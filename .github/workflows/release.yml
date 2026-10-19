@@ -131,9 +131,14 @@ jobs:
           - gpuinflate, included here (gpuinflate.dll, libgpuinflate.so): one large .gz or
             .tar.gz decoded in parallel on the GPU. It needs only the NVIDIA driver.
           - NVIDIA's nvCOMP 6, not included (it is NVIDIA's library): small ZIP entries in batches
-            on the GPU. `pip install nvidia-libnvcomp-cu13`, then copy nvcomp64_6.dll (Windows,
-            from site-packages/nvidia/libnvcomp/bin) or libnvcomp.so.6 (Linux, from
-            site-packages/nvidia/libnvcomp/lib64) next to gpuzip, or point GPUZIP_NVCOMP_DIR at
+            on the GPU. Optional, and seldom used on a CPU of 8 cores or more, where the CPU is
+            faster for ZIP files; `gpuzip doctor` says which this machine is. To add it:
+
+                gpuzip doctor --get-nvcomp
+
+            which downloads it from PyPI (20 to 30 MB, checked against PyPI's SHA-256) into your
+            own folder (%LOCALAPPDATA%\gpuzip, ~/.local/share/gpuzip), where gpuzip looks for it.
+            Or put nvcomp64_6.dll / libnvcomp.so.6 next to gpuzip, or point GPUZIP_NVCOMP_DIR at
             its folder.
 
           `gpuzip doctor` shows what was found and where it looked.

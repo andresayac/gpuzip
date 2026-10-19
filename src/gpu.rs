@@ -71,7 +71,7 @@ unsafe impl Send for Api {}
 unsafe impl Sync for Api {}
 
 /// The nvCOMP major version these bindings were written for: its interface changes between them
-const NVCOMP_MAJOR: u32 = 6;
+pub const NVCOMP_MAJOR: u32 = 6;
 
 /// The NVIDIA driver's library, loaded from the system's own place (none on macOS)
 const CUDA_DRIVER: Option<&str> = if cfg!(windows) {
@@ -83,7 +83,7 @@ const CUDA_DRIVER: Option<&str> = if cfg!(windows) {
 };
 
 /// nvCOMP's file names here, in order of preference
-fn nvcomp_names() -> Vec<String> {
+pub fn nvcomp_names() -> Vec<String> {
     if !dylib::CUDA {
         Vec::new()
     } else if cfg!(windows) {
@@ -93,9 +93,45 @@ fn nvcomp_names() -> Vec<String> {
     }
 }
 
-/// Places nvCOMP is looked for, in order.
+/// Whether nvCOMP's file is in one of the places it is looked for (loadable or not)
+pub fn nvcomp_present() -> bool {
+    dylib::present("GPUZIP_NVCOMP_DIR", &nvcomp_names()) || nvcomp_candidates().iter().any(|p| p.is_absolute() && p.is_file())
+}
+
+/// Why nvCOMP was not loaded: not there, or there and refused. On Windows that is mostly
+/// Microsoft's Visual C++ runtime missing (MSVCP140.dll, VCRUNTIME140_1.dll), which nvCOMP needs
+/// and a fresh Windows may lack; "not found" said nothing of it.
+fn nvcomp_missing() -> String {
+    match nvcomp_candidates().into_iter().find(|p| p.is_absolute() && p.is_file()) {
+        Some(p) => {
+            let why = dylib::load_error(&p);
+            let runtime = cfg!(windows) && why.contains("126");
+            format!(
+                "nvCOMP at {} could not be loaded ({why}){}",
+                p.display(),
+                if runtime { "; it needs Microsoft's Visual C++ runtime: https://aka.ms/vs/17/release/vc_redist.x64.exe" } else { "" }
+            )
+        }
+        None => format!(
+            "nvCOMP not found ({}): `gpuzip doctor --get-nvcomp` downloads it, or put it next to {} or set GPUZIP_NVCOMP_DIR",
+            nvcomp_names().join(", "),
+            dylib::exe_name()
+        ),
+    }
+}
+
+/// Places nvCOMP is looked for, in order: as every library is (dylib::candidates), with the
+/// user's own folder, where `doctor --get-nvcomp` puts it, after the program's
 pub fn nvcomp_candidates() -> Vec<PathBuf> {
-    dylib::candidates("GPUZIP_NVCOMP_DIR", &nvcomp_names())
+    let names = nvcomp_names();
+    let mut places = dylib::candidates("GPUZIP_NVCOMP_DIR", &names);
+    if let Some(dir) = dylib::user_dir() {
+        let at = places.iter().position(|p| !p.is_absolute()).unwrap_or(places.len());
+        for (i, n) in names.iter().enumerate() {
+            places.insert(at + i, dir.join(n));
+        }
+    }
+    places
 }
 
 /// Whether the NVIDIA driver is there and sees a GPU gpuinflate is built for (Turing, compute
@@ -148,13 +184,7 @@ impl Api {
         unsafe {
             let driver = CUDA_DRIVER.ok_or("no CUDA on this system")?;
             let cuda = dylib::system_library(driver).map_err(|_| format!("NVIDIA driver not found ({driver})"))?;
-            let (nvcomp, nvcomp_path) = dylib::load_first(nvcomp_candidates()).ok_or_else(|| {
-                format!(
-                    "nvCOMP not found ({}): put it next to {} or set GPUZIP_NVCOMP_DIR",
-                    nvcomp_names().join(", "),
-                    dylib::exe_name()
-                )
-            })?;
+            let (nvcomp, nvcomp_path) = dylib::load_first(nvcomp_candidates()).ok_or_else(nvcomp_missing)?;
 
             let cu_init: unsafe extern "C" fn(u32) -> CuResult = sym(&cuda, b"cuInit\0")?;
             let cu_device_get: unsafe extern "C" fn(*mut CuDevice, i32) -> CuResult = sym(&cuda, b"cuDeviceGet\0")?;

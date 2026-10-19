@@ -5,6 +5,7 @@
 mod dospages;
 mod dylib;
 mod extract;
+mod getnvcomp;
 mod gpu;
 mod gz;
 mod inflate;
@@ -98,6 +99,9 @@ enum Command {
     },
     /// Check the GPU, nvCOMP and 7-Zip setup
     Doctor {
+        /// Download NVIDIA's nvCOMP from PyPI first (for ZIP files on the GPU; optional, about 25 MB)
+        #[arg(long)]
+        get_nvcomp: bool,
         #[command(flatten)]
         opts: Opts,
     },
@@ -938,10 +942,31 @@ fn doctor(opts: &Opts) -> i32 {
     let api = match extract::gpu_api() {
         Ok(a) => a,
         Err(e) => {
-            say!("GPU:    not usable ({e}); ZIP files are extracted on the CPU");
-            let places: Vec<String> = gpu::nvcomp_candidates().iter().map(|p| p.display().to_string()).collect();
-            if !places.is_empty() {
-                say!("        nvCOMP was looked for in: {}", places.join(", "));
+            // nvCOMP is optional: say so, and whether it would pay on this CPU, rather than
+            // "not usable" as if something were broken (auto mode gives ZIP entries to the GPU
+            // only where that beats the CPU threads: with 2 to 4 of them, not with 16; measured
+            // in docs/benchmarks.md)
+            let threads = cpu_threads();
+            match gpu::driver_sees_gpu() {
+                Err(why) => say!("GPU:    none for ZIP files ({why}): they are extracted on the CPU"),
+                Ok(()) if !gpu::nvcomp_present() => {
+                    if threads >= 8 {
+                        say!(
+                            "GPU:    nvCOMP not installed: optional, for ZIP files on the GPU, which with {threads} CPU threads \
+                             auto mode would seldom use (the CPU is faster for them here)"
+                        );
+                    } else {
+                        say!("GPU:    nvCOMP not installed: optional; with {threads} CPU threads it can speed up ZIP files of many entries");
+                    }
+                    say!("        `gpuzip doctor --get-nvcomp` downloads it from PyPI (NVIDIA's library, about 25 MB)");
+                }
+                Ok(()) => say!("GPU:    not usable ({e}); ZIP files are extracted on the CPU"),
+            }
+            if gpu::driver_sees_gpu().is_ok() {
+                let places: Vec<String> = gpu::nvcomp_candidates().iter().map(|p| p.display().to_string()).collect();
+                if !places.is_empty() {
+                    say!("        nvCOMP was looked for in: {}", places.join(", "));
+                }
             }
             return 1;
         }
@@ -977,7 +1002,7 @@ fn main() {
     dylib::harden();
     let cli = Cli::parse();
     let opts = match &cli.command {
-        Command::Doctor { opts } | Command::X { opts, .. } | Command::T { opts, .. } | Command::L { opts, .. } | Command::Rescue { opts, .. } => opts,
+        Command::Doctor { opts, .. } | Command::X { opts, .. } | Command::T { opts, .. } | Command::L { opts, .. } | Command::Rescue { opts, .. } => opts,
     };
     match &opts.codepage {
         Some(cp) => {
@@ -989,7 +1014,12 @@ fn main() {
         None => zip::use_system_codepage(),
     }
     let rc = match &cli.command {
-        Command::Doctor { opts } => doctor(opts),
+        Command::Doctor { opts, get_nvcomp } => {
+            if *get_nvcomp && getnvcomp::get() != 0 {
+                std::process::exit(1);
+            }
+            doctor(opts)
+        }
         Command::X { archives, output, opts } => run_all('x', archives, output.clone(), opts),
         Command::T { archives, opts } => run_all('t', archives, None, opts),
         Command::L { archives, opts } => run_all('l', archives, None, opts),
