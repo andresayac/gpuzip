@@ -98,6 +98,42 @@ pub fn nvcomp_candidates() -> Vec<PathBuf> {
     dylib::candidates("GPUZIP_NVCOMP_DIR", &nvcomp_names())
 }
 
+/// Whether the NVIDIA driver is there and sees a GPU gpuinflate is built for (Turing, compute
+/// capability 7.5, or newer), asked of the driver itself, once per process. gpuinflate is loaded
+/// only then: its CUDA runtime, linked in, crashed the process on Windows without the driver
+/// (access violation, in `doctor` and every `x` of a large .gz: a Windows 10 PC with no GPU, and
+/// GitHub's Windows runners), where on Linux it reports the driver missing.
+pub fn driver_sees_gpu() -> Result<(), String> {
+    static READY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    READY
+        .get_or_init(|| unsafe {
+            let driver = CUDA_DRIVER.ok_or("no CUDA on this system")?;
+            let cuda = Library::new(driver).map_err(|_| format!("NVIDIA driver not found ({driver})"))?;
+            let cu_init: unsafe extern "C" fn(u32) -> CuResult = sym(&cuda, b"cuInit\0")?;
+            let cu_count: unsafe extern "C" fn(*mut i32) -> CuResult = sym(&cuda, b"cuDeviceGetCount\0")?;
+            let cu_attr: unsafe extern "C" fn(*mut i32, i32, CuDevice) -> CuResult = sym(&cuda, b"cuDeviceGetAttribute\0")?;
+            // the driver stays loaded: what uses the GPU next loads it again
+            let _cuda = std::mem::ManuallyDrop::new(cuda);
+            match cu_init(0) {
+                0 => {}
+                100 => return Err("no NVIDIA GPU".into()), // CUDA_ERROR_NO_DEVICE
+                r => return Err(format!("the NVIDIA driver does not start (CUDA error {r})")),
+            }
+            let mut n = 0;
+            if cu_count(&mut n) != 0 || n == 0 {
+                return Err("no NVIDIA GPU".into());
+            }
+            const MAJOR: i32 = 75; // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR
+            const MINOR: i32 = 76;
+            let (mut major, mut minor) = (0, 0);
+            if cu_attr(&mut major, MAJOR, 0) == 0 && cu_attr(&mut minor, MINOR, 0) == 0 && (major, minor) < (7, 5) {
+                return Err(format!("the GPU is too old for gpuinflate (compute capability {major}.{minor}; 7.5, Turing, or newer)"));
+            }
+            Ok(())
+        })
+        .clone()
+}
+
 unsafe fn sym<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
     unsafe {
         lib.get::<T>(name)

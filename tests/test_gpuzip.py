@@ -805,6 +805,10 @@ def main():
     dev_tgz = os.path.join(work, "devices.tar.gz")
     open(dev_tgz, "wb").write(gzip.compress(tar_of(dev_files), 6, mtime=0))
     dev_gz = os.path.join(work, "nul.gz")
+    if device_path("nul.gz") != "nul.gz":
+        # Windows 10 takes nul.gz itself for the device: such a file is there only by the \\?\
+        # path (copied from Linux, say), which is how it is written here and given to gpuzip
+        dev_gz = "\\\\?\\" + os.path.abspath(dev_gz)
     open(dev_gz, "wb").write(gzip.compress(b"one file named nul", 6, mtime=0))
     for cmd in ("x", "rescue"):
         for label, path, want in (("zip", dev_zip, dev_files), ("tar.gz", dev_tgz, dev_files), (".gz named nul", dev_gz, {"nul": b"one file named nul"})):

@@ -143,20 +143,32 @@ jobs:
         run: |
           exe="$PKG/gpuzip"; [ "${{ runner.os }}" = Windows ] && exe="$PKG/gpuzip.exe"
           "$exe" --version
-          "$exe" doctor | tee doctor.txt || true
+          # doctor exits 1 where no GPU can be used (these runners), never by crashing: on
+          # Windows without the NVIDIA driver it once died after its rescue line, which a
+          # "|| true" here let pass (a segmentation fault), and every x of a large .gz with it
+          set +e; "$exe" doctor > doctor.txt 2>&1; rc=$?; set -e
+          cat doctor.txt
+          [ "$rc" -le 1 ] || { echo "doctor exited $rc" >&2; exit 1; }
           grep -q "rescue: gzrescue loaded from" doctor.txt
+          grep -q "^gzip: " doctor.txt
           if [ "${{ runner.os }}" = macOS ]; then lipo -archs "$exe"; fi
-          # 2 MB of text in many Deflate blocks, with a bad 4 KB sector in the middle
+          # 2 MB of text in many Deflate blocks, with a bad 4 KB sector in the middle; and a sound
+          # .gz of more than 8 MB, which auto mode would give the GPU
           cat > make_check.py <<'EOF'
           import gzip, random
           r = random.Random(1)
           words = ["".join(r.choice("abcdefghijklmnop") for _ in range(r.randint(2, 9))) for _ in range(3000)]
           d = gzip.compress(" ".join(r.choice(words) for _ in range(300000)).encode())
           open("check.gz", "wb").write(d[:len(d) // 2] + bytes(4096) + d[len(d) // 2 + 4096:])
+          big = " ".join(r.choice(words) for _ in range(4000000)).encode()
+          open("sound.gz", "wb").write(gzip.compress(big, 6))
+          open("sound.txt", "wb").write(big)
           EOF
           python3 make_check.py 2>/dev/null || python make_check.py
           set +e; "$exe" rescue check.gz -o rescued; rc=$?; set -e
           [ "$rc" = 2 ] && [ -s rescued/check ]
+          "$exe" x sound.gz -o extracted
+          cmp extracted/sound sound.txt
 
       - name: Archive
         run: |

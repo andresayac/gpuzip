@@ -56,7 +56,7 @@ struct Ctx(*mut c_void);
 unsafe impl Send for Ctx {}
 
 pub struct Gpu {
-    _lib: Library,
+    _lib: std::mem::ManuallyDrop<Library>,
     ctx: Mutex<Ctx>, // a context serves one call at a time
     pub device: String,
     pub path: String,
@@ -112,10 +112,14 @@ impl Gpu {
             if !dylib::CUDA {
                 return Err("no CUDA on this system".into());
             }
+            crate::gpu::driver_sees_gpu()?;
             let name = dylib::file_name("gpuinflate");
             let (lib, path) = dylib::load_first(candidates()).ok_or_else(|| {
                 format!("{name} not found: put it next to {} or set GPUZIP_INFLATE_DIR", dylib::exe_name())
             })?;
+            // never unloaded, even when it cannot be used: unloading its CUDA runtime after a
+            // failed start is what may crash (the library lives as long as the process anyway)
+            let lib = std::mem::ManuallyDrop::new(lib);
             let abi: unsafe extern "C" fn() -> u32 = sym(&lib, b"gi_abi_version\0")?;
             if abi() != ABI_VERSION {
                 return Err(format!("{name} speaks version {} of the interface, this gpuzip {ABI_VERSION}", abi()));

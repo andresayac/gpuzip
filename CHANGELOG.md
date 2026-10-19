@@ -116,6 +116,10 @@ damage, not the output. The Python version is gone, and the crate is at the repo
   instead of counting it among the GPU results that failed the CRC check.
 
 ### Fixed
+- On Windows without an NVIDIA GPU, `gpuzip doctor` and every `x` or `t` of a .gz or .tar.gz of
+  8 MB or more in auto mode (the default) crashed (access violation): gpuinflate.dll, in the
+  Windows package since 0.1.0, was loaded, and its CUDA runtime died without the driver. It is
+  now loaded only when the NVIDIA driver says there is a GPU it is built for (Turing or newer).
 - ZIP names not flagged UTF-8 are read in the code page they were written in: on Windows the
   system's OEM one, as Explorer and 7-Zip read them, and DOS's 437 elsewhere, as Info-ZIP's
   unzip. Before, 437 everywhere: a Spanish Windows' `ADMINISTRACIÓN/` (code page 850) came out
