@@ -576,7 +576,7 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
     let mut inside: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut by_case: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // a file's path in lower case: as written
     let mut case_pairs: Vec<(String, String)> = Vec::new(); // (the one before, the one written over it)
-    let mut folders: Vec<(PathBuf, std::time::SystemTime)> = Vec::new(); // their times, given last
+    let mut folders: Vec<(PathBuf, Option<std::time::SystemTime>, u32)> = Vec::new(); // their times and modes, given last
     #[allow(unused_mut)] // filled on Windows only
     let mut links: Vec<(String, PathBuf, PathBuf)> = Vec::new(); // symbolic links to make last: name, path, target
     let mut ar = tar::Archive::new(reader);
@@ -606,8 +606,9 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
         let kind = e.header().entry_type();
         let device = zip::device_renamed(&name);
         match root {
-            // regular files are written here, to take their names only once whole (OutFile)
-            Some(r) if kind.is_file() || (device && kind.is_dir()) => match tar_path(&mut e, &name) {
+            // regular files are written here, to take their names only once whole (OutFile), and
+            // folders made, their modes and times given last (set_folders)
+            Some(r) if kind.is_file() || kind.is_dir() => match tar_path(&mut e, &name) {
                 Ok(Some(rel)) if rel.as_os_str().is_empty() => {}
                 Ok(Some(rel)) => {
                     let dst = r.join(&rel);
@@ -646,6 +647,10 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
                         pool.wait(Some(thread));
                         write_tar_file(&dst, &mut e, mode, mtime)
                     });
+                    if made.is_ok() && kind.is_dir() {
+                        let (mode, mtime) = tar_mode_mtime(&e);
+                        folders.push((dst.clone(), mtime, mode & 0o777));
+                    }
                     match made {
                         Ok(()) if device => u.name_notes.push(format!(
                             "{name} uses a name this Windows takes for a device (what is written to one is lost): written as {}",
@@ -683,13 +688,8 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
                     }
                     inside.clear();
                 }
-                let folder = kind.is_dir().then(|| (tar_path(&mut e, &name).ok().flatten(), tar_mode_mtime(&e).1));
                 match e.unpack_in(r) {
-                    Ok(true) => {
-                        if let Some((Some(rel), Some(t))) = folder {
-                            folders.push((r.join(rel), t));
-                        }
-                    }
+                    Ok(true) => {}
                     Ok(false) => {
                         u.failed.push((name, "path leaves the output folder; skipped".into()));
                         continue;
@@ -724,7 +724,7 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
         u.name_notes.extend(make_links(r, c, std::mem::take(&mut links), u.bytes.max(64 << 20)));
     }
     // the folders' times, now that what goes in them is written
-    crate::outfile::set_folder_times(folders);
+    crate::outfile::set_folders(folders);
     // the padding after the end-of-archive blocks, so the decoder's checks run to the end
     if u.error.is_none() {
         let _ = io::copy(&mut ar.into_inner(), &mut io::sink());

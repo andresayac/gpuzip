@@ -117,23 +117,34 @@ impl Drop for OutFile {
     }
 }
 
-/// Give folders their times, the deepest first: once their files are written, since writing one
-/// changes its folder's time
-pub fn set_folder_times(mut folders: Vec<(PathBuf, SystemTime)>) {
-    folders.sort_by_key(|(p, _)| std::cmp::Reverse(p.components().count()));
-    for (p, t) in folders {
-        #[cfg(windows)]
-        let dir = {
-            use std::os::windows::fs::OpenOptionsExt;
-            const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
-            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000; // what opens a folder
-            std::fs::OpenOptions::new().access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(&p)
-        };
-        #[cfg(not(windows))]
-        let dir = File::open(&p);
-        if let Ok(d) = dir {
-            let _ = d.set_modified(t);
+/// Give folders their times, and on Unix their modes, the deepest first: once their files are
+/// written, since writing one changes its folder's time, and a mode may forbid writing in it
+/// (GNU tar waits so too; a tar's folder of mode 644 failed every file in it)
+pub fn set_folders(mut folders: Vec<(PathBuf, Option<SystemTime>, u32)>) {
+    folders.sort_by_key(|(p, ..)| std::cmp::Reverse(p.components().count()));
+    for (p, t, mode) in folders {
+        // the time first, while the folder still opens as it was made
+        if let Some(t) = t {
+            #[cfg(windows)]
+            let dir = {
+                use std::os::windows::fs::OpenOptionsExt;
+                const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+                const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000; // what opens a folder
+                std::fs::OpenOptions::new().access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(&p)
+            };
+            #[cfg(not(windows))]
+            let dir = File::open(&p);
+            if let Ok(d) = dir {
+                let _ = d.set_modified(t);
+            }
         }
+        #[cfg(unix)]
+        if mode != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode));
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
     }
 }
 

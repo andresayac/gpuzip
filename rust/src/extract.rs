@@ -782,7 +782,7 @@ impl<'a> Run<'a> {
         // the folders' own times, now that the files in them are written
         if let Some(root) = &self.out_root {
             let folders = self.entries.iter().filter(|e| e.route == Route::Dir);
-            crate::outfile::set_folder_times(folders.filter_map(|e| Some((root.join(e.path.as_ref()?), e.time()?))).collect());
+            crate::outfile::set_folders(folders.filter_map(|e| Some((root.join(e.path.as_ref()?), e.time(), 0))).collect());
         }
         let retried = self.redone.load(Ordering::Relaxed);
         Outcome {
