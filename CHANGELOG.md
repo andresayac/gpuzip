@@ -101,7 +101,8 @@
   extended timestamp (seconds, UTC), not the DOS time (local time to 2 seconds, wrong by the time
   zone's offset elsewhere). Folders get their times from ZIP and tar entries once their files
   are written, and the read-only attribute of a ZIP made on DOS or Windows is restored; an
-  extraction into the same folder replaces such a file.
+  extraction into the same folder replaces such a file. A tar's folders get their modes last
+  too, as GNU tar gives them: one of mode 644 could not be entered, and every file in it failed.
 - A ZIP made on Unix or macOS keeps each file's permissions in its directory; they are now
   restored on Linux and macOS, the executable bit among them (setuid, setgid and sticky never),
   by `x` and `rescue`. Not from a ZIP made elsewhere, whose bits there mean nothing.
