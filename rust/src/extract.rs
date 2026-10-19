@@ -273,7 +273,7 @@ impl<'a> Run<'a> {
         if let Some(path) = self.target(e) {
             let mut f = OutFile::create(&path).map_err(|x| x.to_string())?;
             f.write_all(data).map_err(|x| x.to_string())?;
-            finish_entry(f, e)?;
+            finish_entry(f, e, &path)?;
         }
         self.add(via, e);
         Ok(true)
@@ -303,7 +303,7 @@ impl<'a> Run<'a> {
             return Ok(false); // the file written goes with `out`
         }
         if let Some(f) = out {
-            finish_entry(f, e)?;
+            finish_entry(f, e, &self.target(e).unwrap())?;
         }
         self.add(Via::Cpu, e);
         Ok(true)
@@ -339,7 +339,7 @@ impl<'a> Run<'a> {
             Ok(_) => {}
         }
         if let Some(f) = out {
-            finish_entry(f, e)?;
+            finish_entry(f, e, &self.target(e).unwrap())?;
         }
         self.add(Via::Gpu, e);
         Ok(Inflated::Done)
@@ -779,6 +779,11 @@ impl<'a> Run<'a> {
                 _ => {}
             }
         }
+        // the folders' own times, now that the files in them are written
+        if let Some(root) = &self.out_root {
+            let folders = self.entries.iter().filter(|e| e.route == Route::Dir);
+            crate::outfile::set_folder_times(folders.filter_map(|e| Some((root.join(e.path.as_ref()?), e.time()?))).collect());
+        }
         let retried = self.redone.load(Ordering::Relaxed);
         Outcome {
             seconds: t0.elapsed().as_secs_f64(),
@@ -795,14 +800,20 @@ impl<'a> Run<'a> {
 }
 
 /// Entry `e`'s file is whole: it gets the permissions its ZIP keeps when made on Unix or macOS
-/// (the executable bit among them), then takes its name and time
-fn finish_entry(f: OutFile, e: &Entry) -> Result<(), String> {
+/// (the executable bit among them), takes its name and time, and is made read-only when it was
+fn finish_entry(f: OutFile, e: &Entry, path: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     if e.unix_mode != 0 {
         use std::os::unix::fs::PermissionsExt;
         f.file().set_permissions(std::fs::Permissions::from_mode(e.unix_mode)).map_err(|x| x.to_string())?;
     }
-    f.finish(zip::dos_time(e.dos_date, e.dos_time)).map_err(|x| x.to_string())
+    f.finish(e.time()).map_err(|x| x.to_string())?;
+    if e.read_only && (cfg!(windows) || e.unix_mode == 0) {
+        let mut p = std::fs::metadata(path).map_err(|x| x.to_string())?.permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(path, p).map_err(|x| x.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -822,7 +833,9 @@ mod tests {
             data_offset: 0,
             dos_time: 0,
             dos_date: 0,
+            mtime: None,
             unix_mode: 0,
+            read_only: false,
             route: Route::Deflate,
         };
         sizes.iter().map(entry).collect()

@@ -30,7 +30,18 @@ impl OutFile {
             use std::os::windows::fs::OpenOptionsExt;
             const GENERIC_WRITE: u32 = 0x4000_0000;
             const DELETE: u32 = 0x0001_0000;
-            let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).access_mode(GENERIC_WRITE | DELETE).open(path)?;
+            let open = || std::fs::OpenOptions::new().write(true).create(true).truncate(true).access_mode(GENERIC_WRITE | DELETE).open(path);
+            let file = match open() {
+                // a read-only file of an earlier extraction (its archive said so): replaced
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied && std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly()) => {
+                    let mut p = std::fs::metadata(path)?.permissions();
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    p.set_readonly(false);
+                    std::fs::set_permissions(path, p)?;
+                    open()?
+                }
+                r => r?,
+            };
             let marked = set_delete_on_close(&file, true);
             Ok(OutFile { file: Some(file), path: path.to_path_buf(), marked, done: false })
         }
@@ -103,6 +114,26 @@ impl Drop for OutFile {
         }
         #[cfg(not(windows))]
         let _ = std::fs::remove_file(&self.tmp);
+    }
+}
+
+/// Give folders their times, the deepest first: once their files are written, since writing one
+/// changes its folder's time
+pub fn set_folder_times(mut folders: Vec<(PathBuf, SystemTime)>) {
+    folders.sort_by_key(|(p, _)| std::cmp::Reverse(p.components().count()));
+    for (p, t) in folders {
+        #[cfg(windows)]
+        let dir = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000; // what opens a folder
+            std::fs::OpenOptions::new().access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(&p)
+        };
+        #[cfg(not(windows))]
+        let dir = File::open(&p);
+        if let Ok(d) = dir {
+            let _ = d.set_modified(t);
+        }
     }
 }
 

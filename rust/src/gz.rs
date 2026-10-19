@@ -430,6 +430,141 @@ impl TarWriters {
     }
 }
 
+/// Windows: a tar's symbolic links, made once what they name is written. Windows makes real
+/// ones only for an administrator or in Developer Mode (else error 1314: 63 links of
+/// linux-6.6.tar.gz failed so). Then a link to a file is written as a hard link to it, which
+/// needs no privilege, or a copy; a link to a folder as a copy of it, all copies within
+/// `budget` bytes (the archive's own files, 64 MB at least: links cannot make an extraction
+/// much more than twice as large). A link that leads out of the output folder, names nothing, or whose name a file
+/// or folder of the archive already took, is not made. Returns the notes that say so.
+#[cfg(windows)]
+fn make_links(root: &Path, canon_root: &Path, links: Vec<(String, PathBuf, PathBuf)>, mut budget: u64) -> Vec<String> {
+    let (mut real, mut hard, mut copies) = (0usize, 0usize, 0usize);
+    let (mut outside, mut taken, mut too_big) = (Vec::new(), Vec::new(), Vec::new());
+    let mut pending = links;
+    // a link may name another link: what it names is made on a later round
+    loop {
+        let before = pending.len();
+        let mut left = Vec::new();
+        for (name, rel, target) in pending {
+            let dst = root.join(&rel);
+            // out of the output folder by its very path: absolute, or more .. than folders above it
+            let mut depth = rel.components().count() as i64 - 1;
+            let leaves = target.has_root()
+                || target.is_absolute()
+                || target.components().any(|c| {
+                    depth += match c {
+                        std::path::Component::ParentDir => -1,
+                        std::path::Component::Normal(_) => 1,
+                        _ => 0,
+                    };
+                    depth < 0
+                });
+            if leaves {
+                outside.push(name);
+                continue;
+            }
+            let Ok(canon) = dst.parent().unwrap_or(root).join(&target).canonicalize() else {
+                left.push((name, rel, target));
+                continue;
+            };
+            if !canon.starts_with(canon_root) || make_dirs_inside(canon_root, dst.parent().unwrap_or(root)).is_err() {
+                outside.push(name);
+            } else if dst.symlink_metadata().is_ok() {
+                taken.push(name);
+            } else if canon.is_dir() {
+                if std::os::windows::fs::symlink_dir(&target, &dst).is_ok() {
+                    real += 1;
+                } else if copy_tree(&canon, &dst, &mut budget) {
+                    copies += 1;
+                } else {
+                    too_big.push(name);
+                }
+            } else if std::os::windows::fs::symlink_file(&target, &dst).is_ok() {
+                real += 1;
+            } else if std::fs::hard_link(&canon, &dst).is_ok() {
+                hard += 1;
+            } else if copy_tree(&canon, &dst, &mut budget) {
+                copies += 1;
+            } else {
+                too_big.push(name);
+            }
+        }
+        if left.is_empty() || left.len() == before {
+            pending = left;
+            break;
+        }
+        pending = left;
+    }
+    let list = |v: &[String]| v.iter().take(5).cloned().collect::<Vec<_>>().join(", ") + if v.len() > 5 { ", ..." } else { "" };
+    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut notes = Vec::new();
+    if hard + copies > 0 {
+        notes.push(format!(
+            "{} not made as such (Windows lets only an administrator, or Developer Mode, make them): written as {} to \
+             the files they name and {}{}",
+            count(hard + copies, "symbolic link", "symbolic links"),
+            count(hard, "hard link", "hard links"),
+            count(copies, "copy", "copies"),
+            if real > 0 { format!("; {real} made") } else { String::new() }
+        ));
+    }
+    let nothing: Vec<String> = pending.into_iter().map(|(n, _, _)| n).collect();
+    for (v, what) in [
+        (&outside, "leading out of the output folder"),
+        (&nothing, "naming nothing the archive holds"),
+        (&taken, "whose name a file or folder of the archive took"),
+        (&too_big, "whose copies would pass the size of the archive's own files (64 MB at least)"),
+    ] {
+        if !v.is_empty() {
+            notes.push(format!("{} {what}, not made: {}", count(v.len(), "link", "links"), list(v)));
+        }
+    }
+    notes
+}
+
+/// Copy a file, or a folder and all in it, from `src` to `dst` if it fits in `budget` bytes
+/// (which it then takes from). What is copied is listed first: a link to a folder above itself
+/// is copied into itself, and must not copy its own copy on. Links inside are not followed.
+#[cfg(windows)]
+fn copy_tree(src: &Path, dst: &Path, budget: &mut u64) -> bool {
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    if src.is_file() {
+        files.push((PathBuf::new(), src.metadata().map_or(0, |m| m.len())));
+        stack.clear();
+    }
+    while let Some(rel) = stack.pop() {
+        dirs.push(rel.clone());
+        let Ok(read) = std::fs::read_dir(src.join(&rel)) else { return false };
+        for d in read.flatten() {
+            let Ok(t) = d.file_type() else { continue };
+            if t.is_symlink() {
+                continue;
+            }
+            let r = rel.join(d.file_name());
+            if t.is_dir() {
+                stack.push(r);
+            } else {
+                files.push((r, d.metadata().map_or(0, |m| m.len())));
+            }
+        }
+    }
+    let total: u64 = files.iter().map(|(_, n)| n).sum();
+    if total > *budget {
+        return false;
+    }
+    *budget -= total;
+    for d in &dirs {
+        let _ = std::fs::create_dir_all(dst.join(d));
+    }
+    files.iter().all(|(r, _)| {
+        let (from, to) = if r.as_os_str().is_empty() { (src.to_path_buf(), dst.to_path_buf()) } else { (src.join(r), dst.join(r)) };
+        std::fs::copy(from, to).is_ok()
+    })
+}
+
 /// Extract (root given) or read through (none) a tar stream; with `list`, print each entry.
 /// `writers`: threads that write its small files.
 fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> Untarred {
@@ -441,6 +576,9 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
     let mut inside: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut by_case: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // a file's path in lower case: as written
     let mut case_pairs: Vec<(String, String)> = Vec::new(); // (the one before, the one written over it)
+    let mut folders: Vec<(PathBuf, std::time::SystemTime)> = Vec::new(); // their times, given last
+    #[allow(unused_mut)] // filled on Windows only
+    let mut links: Vec<(String, PathBuf, PathBuf)> = Vec::new(); // symbolic links to make last: name, path, target
     let mut ar = tar::Archive::new(reader);
     ar.set_preserve_mtime(true);
     ar.set_overwrite(true);
@@ -530,6 +668,14 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
                 }
             },
             Some(r) => {
+                if cfg!(windows) && kind == tar::EntryType::Symlink {
+                    // made at the end, once what it names is written (make_links)
+                    match (tar_path(&mut e, &name), e.link_name()) {
+                        (Ok(Some(rel)), Ok(Some(target))) if !rel.as_os_str().is_empty() => links.push((name, rel, target.into_owned())),
+                        _ => u.failed.push((name, "a link with no path or no target; skipped".into())),
+                    }
+                    continue;
+                }
                 if !kind.is_dir() {
                     // a link, or anything else unpack_in makes: once every file before it is written
                     if let Some(p) = &pool {
@@ -537,8 +683,13 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
                     }
                     inside.clear();
                 }
+                let folder = kind.is_dir().then(|| (tar_path(&mut e, &name).ok().flatten(), tar_mode_mtime(&e).1));
                 match e.unpack_in(r) {
-                    Ok(true) => {}
+                    Ok(true) => {
+                        if let Some((Some(rel), Some(t))) = folder {
+                            folders.push((r.join(rel), t));
+                        }
+                    }
                     Ok(false) => {
                         u.failed.push((name, "path leaves the output folder; skipped".into()));
                         continue;
@@ -568,6 +719,12 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
         u.files = u.files.saturating_sub(1);
         u.bytes = u.bytes.saturating_sub(size);
     }
+    #[cfg(windows)]
+    if let (Some(r), Ok(c)) = (root, &canon_root) {
+        u.name_notes.extend(make_links(r, c, std::mem::take(&mut links), u.bytes.max(64 << 20)));
+    }
+    // the folders' times, now that what goes in them is written
+    crate::outfile::set_folder_times(folders);
     // the padding after the end-of-archive blocks, so the decoder's checks run to the end
     if u.error.is_none() {
         let _ = io::copy(&mut ar.into_inner(), &mut io::sink());

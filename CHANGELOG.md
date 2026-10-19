@@ -92,6 +92,16 @@
   512 MiB, a file of a .tar.gz and a .gz were the ones written as they decode: killed part way,
   they left 184 of 400 MB, 296 of 600 and 344 of 400 under their names. Nor does a wrong CRC
   leave its output any more (`gpuzip rescue` keeps what can be saved).
+- A tar's symbolic links failed on Windows ("failed to unpack", exit 2: 63 in linux-6.6.tar.gz),
+  where only an administrator or Developer Mode may make them. They are now made once what they
+  name is written: real links where allowed, else a hard link to the file they name (which
+  needs no privilege) or a copy of the folder (within the archive's size, 64 MB at least), and
+  a note says so. A link leading out of the output folder, or naming nothing, is not made.
+- ZIP entries get their exact time when the ZIP keeps it: NTFS's (100 ns) or Info-ZIP's
+  extended timestamp (seconds, UTC), not the DOS time (local time to 2 seconds, wrong by the time
+  zone's offset elsewhere). Folders get their times from ZIP and tar entries once their files
+  are written, and the read-only attribute of a ZIP made on DOS or Windows is restored; an
+  extraction into the same folder replaces such a file.
 - A ZIP made on Unix or macOS keeps each file's permissions in its directory; they are now
   restored on Linux and macOS, the executable bit among them (setuid, setgid and sticky never),
   by `x` and `rescue`. Not from a ZIP made elsewhere, whose bits there mean nothing.

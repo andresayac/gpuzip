@@ -886,6 +886,81 @@ def main():
               + ("" if ok else f"; {ascii(sorted(on_disk))} {ascii(notes)}"))
     shutil.rmtree(out, ignore_errors=True)
 
+    # a tar's symbolic links: made where the system lets (Unix); on Windows, which lets only an
+    # administrator or Developer Mode make them, once what they name is written, as hard links
+    # to files and copies of folders, with a note. Either way what a link names reads through it
+    # (before: "failed to unpack" on Windows, exit 2). One leading out, or naming nothing, is not made
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as t:
+        for name, kind, payload in (("lib", "dir", ""), ("lib/real.txt", "file", b"the real file\n"), ("lib/alias.txt", "sym", "real.txt"),
+                                    ("inc", "sym", "lib"), ("a/b/up", "sym", "../../lib"), ("alias2", "sym", "lib/alias.txt"),
+                                    ("early", "sym", "later.txt"), ("later.txt", "file", b"named before it came\n"),
+                                    ("dangling", "sym", "nope.txt"), ("out", "sym", "../../x")):
+            info = tarfile.TarInfo(name)
+            info.mtime = 1700000000 - (86400 if name == "lib" else 0)
+            if kind == "dir":
+                info.type = tarfile.DIRTYPE
+                t.addfile(info)
+            elif kind == "sym":
+                info.type, info.linkname = tarfile.SYMTYPE, payload
+                t.addfile(info)
+            else:
+                info.size = len(payload)
+                t.addfile(info, io.BytesIO(payload))
+    links_tgz = os.path.join(work, "links.tar.gz")
+    open(links_tgz, "wb").write(gzip.compress(buf.getvalue(), 6, mtime=0))
+    out = os.path.join(work, "links_out")
+    shutil.rmtree(out, ignore_errors=True)
+    r = subprocess.run([*GPUZIP, "x", links_tgz, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+    try:
+        notes = json.loads(r.stdout.strip().splitlines()[-1]).get("notes", [])
+    except (json.JSONDecodeError, IndexError):
+        notes = []
+    reads = {p: open(os.path.join(out, p), "rb").read() if os.path.isfile(os.path.join(out, p)) else None
+             for p in ("lib/alias.txt", "inc/real.txt", "a/b/up/real.txt", "alias2", "early")}
+    real, later = b"the real file\n", b"named before it came\n"
+    ok = r.returncode == 0 and reads == {"lib/alias.txt": real, "inc/real.txt": real, "a/b/up/real.txt": real, "alias2": real, "early": later}
+    if os.name == "nt":
+        ok = ok and any("hard link" in n for n in notes) and any("leading out" in n and "out" in n for n in notes) \
+            and not os.path.exists(os.path.join(out, "out"))
+    lib_time = os.path.getmtime(os.path.join(out, "lib"))
+    ok = ok and abs(lib_time - (1700000000 - 86400)) < 2  # a folder's time, given once its files are written
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} x of a tar.gz with symbolic links: {sum(v is not None for v in reads.values())} of 5 read through, "
+          f"folder time {'kept' if abs(lib_time - (1700000000 - 86400)) < 2 else 'LOST'}, exit {r.returncode}"
+          + ("" if ok else f"; {ascii(reads)} {ascii(notes)}"))
+    shutil.rmtree(out, ignore_errors=True)
+
+    # a ZIP's exact times: Info-ZIP's extended timestamp (UTC seconds) and NTFS's (100 ns), over
+    # the DOS time (local, 2 s); a folder's time; and the DOS read-only attribute, which an
+    # extraction into the same folder must still replace
+    def ut_field(ts):
+        return struct.pack("<HHBI", 0x5455, 5, 1, ts)
+
+    def ntfs_field(ts):
+        ft = int(ts * 10_000_000) + 116444736000000000
+        return struct.pack("<HHIHHQQQ", 0x000a, 32, 0, 1, 24, ft, ft, ft)
+    times_zip = os.path.join(work, "times.zip")
+    with zipfile.ZipFile(times_zip, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, extra, attr, data in (("ut.txt", ut_field(1700000001), 0, b"ut\n"), ("ntfs.txt", ntfs_field(1700000000.5), 0, b"ntfs\n"),
+                                        ("ro.txt", b"", 0x01, b"read only\n"), ("dir/", ut_field(1700000000 - 3600), 0x10, b""),
+                                        ("dir/in.txt", b"", 0, b"in a folder\n")):
+            info = zipfile.ZipInfo(name, (2020, 1, 1, 0, 0, 0))
+            info.extra, info.external_attr, info.create_system = extra, attr, 0
+            z.writestr(info, data)
+    out = os.path.join(work, "times_out")
+    shutil.rmtree(out, ignore_errors=True)
+    rcs = [subprocess.run([*GPUZIP, "x", times_zip, "-o", out], capture_output=True, text=True).returncode for _ in range(2)]
+    got = {n: os.path.getmtime(os.path.join(out, n)) for n in ("ut.txt", "ntfs.txt", "dir")}
+    read_only = os.stat(os.path.join(out, "ro.txt")).st_mode & 0o222 == 0  # (root may write it anyway)
+    ok = rcs == [0, 0] and abs(got["ut.txt"] - 1700000001) < 0.01 and abs(got["ntfs.txt"] - 1700000000.5) < 0.01 \
+        and abs(got["dir"] - (1700000000 - 3600)) < 0.01 and read_only
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} x of a ZIP with exact times and a read-only file, twice into one folder: exits {rcs}, "
+          f"times {ascii({n: round(t, 2) for n, t in got.items()})}, read-only {read_only}")
+    os.chmod(os.path.join(out, "ro.txt"), 0o644)
+    shutil.rmtree(out, ignore_errors=True)
+
     # an extraction killed while it writes a large file leaves no part of it under its name:
     # every file there must be whole (measured before: 184 MB of 400 left as big.bin in the
     # tar.gz, 344 of 400 from the .gz, 296 of 600 of the ZIP's entry). The ZIP's is past the

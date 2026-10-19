@@ -41,10 +41,58 @@ pub struct Entry {
     pub data_offset: u64,
     pub dos_time: u16,
     pub dos_date: u16,
+    /// its time to the second or better, in UTC, when an extra field gives it (else the DOS one)
+    pub mtime: Option<SystemTime>,
     /// a regular file's permission bits, from a ZIP made on Unix or macOS (0: none)
     #[cfg_attr(not(unix), allow(dead_code))]
     pub unix_mode: u32,
+    pub read_only: bool,
     pub route: Route,
+}
+
+impl Entry {
+    /// The time to give its file: the exact one when the ZIP has it, else the DOS one
+    pub fn time(&self) -> Option<SystemTime> {
+        self.mtime.or_else(|| dos_time(self.dos_date, self.dos_time))
+    }
+}
+
+/// An entry's time from its extra fields in the central directory: NTFS's (0x000a, Windows
+/// tools and 7-Zip: 100 ns, UTC), else Info-ZIP's extended timestamp (0x5455: seconds, UTC). The
+/// DOS time every entry has is local time to 2 seconds, and wrong by the time zone's offset on
+/// a machine in another.
+fn exact_mtime(extra: &[u8]) -> Option<SystemTime> {
+    let (mut ntfs, mut ut) = (None, None);
+    let mut x = 0;
+    while x + 4 <= extra.len() {
+        let (id, len) = (u16le(extra, x), u16le(extra, x + 2) as usize);
+        let field = &extra[x + 4..(x + 4 + len).min(extra.len())];
+        if id == 0x000a && field.len() >= 32 && u16le(field, 4) == 1 && u16le(field, 6) >= 24 {
+            // 4 reserved bytes, then attribute 1: modification, access and creation FILETIMEs
+            let ft = u64le(field, 8);
+            const UNIX_IN_FILETIME: u64 = 116_444_736_000_000_000; // 1970 in 100 ns steps from 1601
+            if ft > UNIX_IN_FILETIME {
+                ntfs = Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos((ft - UNIX_IN_FILETIME) * 100));
+            }
+        } else if id == 0x5455 && field.len() >= 5 && field[0] & 1 != 0 {
+            ut = Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(u32le(field, 1) as u64));
+        }
+        x += 4 + len;
+    }
+    ntfs.or(ut)
+}
+
+/// Is the file read-only? From a ZIP made on DOS or Windows (0, 10, 14): bit 0 of the external
+/// attributes, the DOS read-only attribute; on Unix or macOS: a mode the owner may not write
+fn read_only(made_by: u8, external: u32) -> bool {
+    match made_by {
+        3 | 19 => {
+            let m = unix_mode(made_by, external);
+            m != 0 && m & 0o200 == 0
+        }
+        0 | 10 | 14 => external & 1 != 0,
+        _ => false,
+    }
 }
 
 /// The permission bits a ZIP keeps for a regular file: the high 16 bits of its external
@@ -310,7 +358,9 @@ pub fn read_central_directory(data: &[u8], lost_ok: bool) -> Result<Vec<Entry>, 
             data_offset: (header as i64 + concat).max(0) as u64, // the local header for now; plan() moves it to the data
             dos_time: u16le(data, p + 12),
             dos_date: u16le(data, p + 14),
+            mtime: exact_mtime(extra),
             unix_mode: unix_mode(data[p + 5], u32le(data, p + 38)),
+            read_only: read_only(data[p + 5], u32le(data, p + 38)),
             route: Route::Cpu,
         });
         p += 46 + nlen + xlen + clen;
