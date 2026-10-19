@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-19)
+
+Extraction that hostile or odd archives cannot fool: entries whose bytes overlap are refused,
+names Windows takes for devices are kept, and nothing half written is left under a file's name.
+Files come out as they went in: exact times, Unix permissions, read-only, a tar's links on
+Windows, names in the code page they were written in. Rescue reads bzip2, LZMA, Zstandard and
+Deflate64 entries too (bzip2 block by block), in memory that grows with the damage, not the
+output. The Python version is gone, and the crate is at the repository's root.
 
 ### Rescue
 - ZIP entries compressed with bzip2, LZMA, Zstandard or Deflate64 are rescued: each decoded (by
