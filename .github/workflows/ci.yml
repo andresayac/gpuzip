@@ -45,8 +45,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            rust/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       # 7-Zip 24 or later: older ones (Ubuntu's 23.01) cannot read Zstandard ZIP entries
       - name: 7-Zip (Linux)
@@ -71,20 +71,18 @@ jobs:
         run: gpuinflate\build.cmd rescue
 
       - name: cargo build
-        working-directory: rust
         run: cargo build --release
       - name: cargo test
-        working-directory: rust
         run: cargo test --release
 
       - name: gpuzip doctor
         run: |
-          cp gpuinflate/*gzrescue.* rust/target/release/
-          rust/target/release/gpuzip doctor || true # exits 1 without a GPU
+          cp gpuinflate/*gzrescue.* target/release/
+          target/release/gpuzip doctor || true # exits 1 without a GPU
 
       - name: Tests
         env:
-          GPUZIP_BIN: rust/target/release/gpuzip${{ runner.os == 'Windows' && '.exe' || '' }}
+          GPUZIP_BIN: target/release/gpuzip${{ runner.os == 'Windows' && '.exe' || '' }}
         run: python tests/test_gpuzip.py
 
   gpuinflate-linux:

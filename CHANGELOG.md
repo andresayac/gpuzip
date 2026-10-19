@@ -62,6 +62,9 @@
   from 2,325 bytes right to 284,706 of 566,666, one from 0 to 8,654 of 8,659), none worse.
 
 ### Changed
+- The program's crate moved from `rust/` to the repository's root, as a Rust project's usually
+  is: `cargo build --release` there, and the program is `target/release/gpuzip`. The folder
+  stood beside the Python version's, which is gone.
 - `auto` starts nvCOMP only when the CPU threads, timed on the archive's first entries, would
   be slower alone than with the GPU, start-up included: on a strong CPU it is as fast as
   `--mode cpu`, on a weak one the GPU still takes the small entries.

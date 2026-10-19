@@ -102,7 +102,7 @@ for large files.
 zlib starts a new block every 16,383 symbols, so a text under about 60 KB is one block, and so
 are megabytes of repetitive data (a symbol copies up to 258 bytes). Such a file has no next
 header to land on and no symbol count to compare with, and gzrescue did badly on it. Measured on
-159 single-block files (the first 8, 20 and 60 KB of `rust/src/ziprescue.rs` at zlib level 6,
+159 single-block files (the first 8, 20 and 60 KB of `src/ziprescue.rs` at zlib level 6,
 and 2.4 to 4.2 MB of one short line repeated, five lines, at levels 1, 6 and 9, RLE and
 fixed-Huffman; zeros, 0xFF, random bytes, a flipped bit or a cut, at 20, 50 and 80% of the file),
 56,956,061 wrong bytes were marked exact, in 75 of them, three ways:
@@ -146,7 +146,7 @@ block, would pass.
 
 The method lives in `gpuinflate/rescue.cpp` (C API in `rescue.h`, built as `gzrescue.dll`, `libgzrescue.so` or `libgzrescue.dylib`, CPU
 only); `gzrescue.cpp` here is a command line over it, used by `measure.py`. `gpuzip rescue`
-(Rust, `rust/src/rescue.rs`) adds the tar side: the files are extracted from the recovered
+(Rust, `src/rescue.rs`) adds the tar side: the files are extracted from the recovered
 stream and classified as intact, possibly damaged or partial. Two things make that work on a
 damaged archive:
 
@@ -169,7 +169,7 @@ deep, so with small blocks references that reached further back were marked unkn
 ## ZIP and Office documents
 
 A ZIP gives us more to work with than gzip: every entry has its own CRC, and its name and sizes
-are stored twice (local header, central directory). `rust/src/ziprescue.rs` reads the
+are stored twice (local header, central directory). `src/ziprescue.rs` reads the
 directory when it can, scans the file for local headers (`PK\3\4`; headers of a ZIP stored inside
 an entry, such as a wheel, are skipped by tracking the data extents), and recovers each entry:
 stored ones by copying, Deflate ones through `gr_rescue_raw`, the library's entry point for a

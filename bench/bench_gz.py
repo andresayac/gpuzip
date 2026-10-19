@@ -29,7 +29,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-RUST = os.path.join(ROOT, "rust", "target", "release", "gpuzip.exe")
+RUST = os.path.join(ROOT, "target", "release", "gpuzip.exe")
 SEVENZIP = r"C:\Program Files\7-Zip\7z.exe"
 TAR = r"C:\Windows\System32\tar.exe"
 

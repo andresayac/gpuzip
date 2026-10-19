@@ -6,7 +6,7 @@ Builds four datasets (many small files, medium files, a few large files, a reali
 packs each with 7-Zip (zip, Deflate, -mx5), then times, per archive:
   test     7z t        vs gpuzip t --mode cpu|gpu|auto   decompress + CRC, nothing written
   extract  7z x        vs gpuzip x --mode cpu|auto       full extraction to disk
-for the build in rust/target/release (or --rust PATH). Every command runs once to warm the
+for the build in target/release (or --rust PATH). Every command runs once to warm the
 caches, then --runs rounds follow, the tools taking turns inside each round; the median wall
 time, including process start, is reported. The last extraction (gpuzip auto) is compared
 file by file with 7-Zip's. Results go to results.json and results.md next to this script.
@@ -27,7 +27,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-RUST = os.path.join(ROOT, "rust", "target", "release", "gpuzip.exe")
+RUST = os.path.join(ROOT, "target", "release", "gpuzip.exe")
 SEVENZIP = r"C:\Program Files\7-Zip\7z.exe"
 
 DATASETS = {

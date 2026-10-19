@@ -11,10 +11,10 @@ Needs [Rust](https://rustup.rs) and a C compiler (the Visual Studio Build Tools 
 the repository's folder:
 
 ```
-cargo build --release --manifest-path rust/Cargo.toml
+cargo build --release
 ```
 
-The program is `rust/target/release/gpuzip` (`gpuzip.exe` on Windows). It loads three
+The program is `target/release/gpuzip` (`gpuzip.exe` on Windows). It loads three
 libraries at run time, each optional: without one, that work goes to the CPU (or, for gzrescue,
 `gpuzip rescue` is not available). Each is looked for in the folder its variable names, next to
 the program, then on the system's search path (PATH on Windows, LD_LIBRARY_PATH and the linker
@@ -39,10 +39,10 @@ Running needs no CUDA toolkit: the NVIDIA driver is enough. `gpuzip doctor` show
 
 ## Tests
 
-`python tests/test_gpuzip.py` checks the build in `rust\target\release` (`GPUZIP_BIN` points
+`python tests/test_gpuzip.py` checks the build in `target\release` (`GPUZIP_BIN` points
 it at another). They pack a folder with 7-Zip, Python and the system's own tool (PowerShell on Windows,
 Info-ZIP's zip elsewhere), extract it in every mode and compare every file; without a GPU the
-gpu modes are skipped. `cd rust && cargo test --release` runs the unit tests.
+gpu modes are skipped. `cargo test --release` runs the unit tests.
 
 ## Platforms and CI
 
@@ -77,7 +77,7 @@ with PTX for newer ones. Before packing, the workflow runs the program from the 
 `gpuzip doctor` must load the rescue library from next to it, and a gzip file with a zeroed
 sector must be rescued.
 
-To release: set the version in `rust/Cargo.toml`, add
+To release: set the version in `Cargo.toml`, add
 its section to `CHANGELOG.md`, then push a tag `v<version>` on main. The workflow drafts a
 GitHub release with the three packages and their `SHA256SUMS`; read it over and publish it. A
 pull request that touches the packaging builds the packages too, without publishing them.

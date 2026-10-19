@@ -6,7 +6,9 @@ rust-version = "1.87"
 description = "Recover what damaged .gz, .tar.gz, .zip and Office files still hold, and extract archives fast on the CPU or an NVIDIA GPU"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/andresayac/gpuzip"
-readme = "../README.md"
+readme = "README.md"
+# a package of the program alone: the libraries, tests, benchmarks and studies are built and run apart
+include = ["/src", "/Cargo.toml", "/Cargo.lock", "/README.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 keywords = ["zip", "gzip", "recovery", "gpu", "cuda"]
 categories = ["command-line-utilities", "compression"]
 

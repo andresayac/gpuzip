@@ -85,9 +85,9 @@ library next to it, and on Windows and Linux the GPU decoder. Put the folder on 
 Or build it from source with [Rust](https://rustup.rs) and a C++ compiler:
 
 ```
-cargo build --release --manifest-path rust/Cargo.toml
+cargo build --release
 sh gpuinflate/build.sh rescue                  # Linux, macOS (gpuinflate\build.cmd rescue on Windows)
-cp gpuinflate/libgzrescue.* rust/target/release/
+cp gpuinflate/libgzrescue.* target/release/
 ```
 
 [7-Zip](https://www.7-zip.org) (24 or later) handles RAR, 7z, tar.xz and encrypted entries. The

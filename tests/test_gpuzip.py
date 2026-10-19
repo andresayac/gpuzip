@@ -1,7 +1,7 @@
 """Correctness tests for gpuzip: archives made by different tools must extract to exactly
 the files they were made from, in every mode.
 
-  python tests\\test_gpuzip.py                     (the build in rust\\target\\release)
+  python tests\\test_gpuzip.py                     (the build in target\\release)
   GPUZIP_BIN=path/to/gpuzip python3 tests/test_gpuzip.py   (another build)
 
 Builds a source folder (text, binary, empty files, empty folders, non-ASCII names), packs it
@@ -33,7 +33,7 @@ import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GPUZIP = [os.path.abspath(os.environ.get("GPUZIP_BIN") or
-                          os.path.join(HERE, "..", "rust", "target", "release", "gpuzip.exe" if os.name == "nt" else "gpuzip"))]
+                          os.path.join(HERE, "..", "target", "release", "gpuzip.exe" if os.name == "nt" else "gpuzip"))]
 SEVENZIP = next((p for p in (shutil.which("7zz"), shutil.which("7z"), shutil.which("7za"), r"C:\Program Files\7-Zip\7z.exe")
                  if p and os.path.isfile(p)), None)
 PASSWORD = "correct horse"
@@ -193,7 +193,7 @@ def repo_text():
     """This repository's source files: {path: bytes}"""
     root = os.path.join(HERE, "..")
     text = {}
-    for sub in ("rust/src", "gpuinflate", "research/recovery", "docs", "tests"):
+    for sub in ("src", "gpuinflate", "research/recovery", "docs", "tests"):
         d = os.path.join(root, sub)
         for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
             if n.endswith((".rs", ".cpp", ".cu", ".cuh", ".h", ".py", ".md")):
@@ -516,7 +516,7 @@ def main():
     # bytes before the damage must be certified about as far as gzip decodes them right. Exact
     # bytes are told apart from unknown ones by rescuing with two fill bytes, from suspect ones by
     # the damaged list.
-    rust_src = os.path.join(HERE, "..", "rust", "src")
+    rust_src = os.path.join(HERE, "..", "src")
     names = ["ziprescue.rs"] + sorted(n for n in os.listdir(rust_src) if n.endswith(".rs") and n != "ziprescue.rs")
     code = b"".join(open(os.path.join(rust_src, n), "rb").read() for n in names)
     repeated = b"gpuzip release check " * 200000

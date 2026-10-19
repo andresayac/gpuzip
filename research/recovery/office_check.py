@@ -25,7 +25,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-GPUZIP = os.path.join(ROOT, "rust", "target", "release", "gpuzip.exe")
+GPUZIP = os.path.join(ROOT, "target", "release", "gpuzip.exe")
 WORKER = os.path.join(HERE, "office_open.ps1")
 APPS = {"docx": ("word", "WINWORD.EXE", "Word"), "xlsx": ("excel", "EXCEL.EXE", "Excel"), "pptx": ("powerpoint", "POWERPNT.EXE", "PowerPoint")}
 TIMEOUT = 120

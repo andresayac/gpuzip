@@ -63,20 +63,22 @@ Learned the hard way:
 ## Project layout
 
 ```
-rust/           the Rust version
-  src/zip.rs        reads the archive's central directory and routes each entry
-  src/dylib.rs      the libraries loaded at run time: their names on each system, where they are looked for
-  src/gpu.rs        the NVIDIA driver and nvCOMP, loaded at run time
-  src/extract.rs    shares the work between GPU, CPU threads and 7-Zip; writes the files
-  src/sevenzip.rs   hands entries and whole archives to 7-Zip
-  src/gz.rs         gzip members, trailers, tar extraction from a pipe
-  src/inflate.rs    gpuinflate, loaded at run time
-  src/rescue.rs     gzrescue, loaded at run time; tar extraction that skips destroyed headers
-  src/ziprescue.rs  damaged ZIPs: local-header scan, per-entry recovery; Office XML repair and rebuild
-  src/sheetfix.rs   damaged spreadsheets: sheets rebuilt from their valid cells, a lost workbook remade
-  src/officefix.rs  damaged Word stories rebuilt, a presentation's lost master, layout and theme remade
-  src/main.rs       the command line, reports and doctor
-  src/ui.rs         terminal output: colors on a terminal only, a closed pipe ends quietly
+Cargo.toml      the program, gpuzip (Rust)
+src/
+  zip.rs        reads the archive's central directory and routes each entry
+  dylib.rs      the libraries loaded at run time: their names on each system, where they are looked for
+  gpu.rs        the NVIDIA driver and nvCOMP, loaded at run time
+  extract.rs    shares the work between GPU, CPU threads and 7-Zip; writes the files
+  outfile.rs    a file written gives it its name only once whole (no half file after a kill)
+  sevenzip.rs   hands entries and whole archives to 7-Zip
+  gz.rs         gzip members, trailers, tar extraction from a pipe
+  inflate.rs    gpuinflate, loaded at run time
+  rescue.rs     gzrescue, loaded at run time; tar extraction that skips destroyed headers
+  ziprescue.rs  damaged ZIPs: local-header scan, per-entry recovery; Office XML repair and rebuild
+  sheetfix.rs   damaged spreadsheets: sheets rebuilt from their valid cells, a lost workbook remade
+  officefix.rs  damaged Word stories rebuilt, a presentation's lost master, layout and theme remade
+  main.rs       the command line, reports and doctor
+  ui.rs         terminal output: colors on a terminal only, a closed pipe ends quietly
 tests/          correctness tests (ZIP, gzip, tar.gz, damaged files, zip slip)
 gpuinflate/     the library that decodes one Deflate stream on the GPU, in segments (C/CUDA),
                 with its tests and fuzzer; rescue.cpp, the recovery of damaged gzip files (CPU);

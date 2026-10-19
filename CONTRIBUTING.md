@@ -10,20 +10,20 @@ from a measurement someone else can repeat.
 [docs/building.md](docs/building.md) has the details. In short, from the repository's folder:
 
 ```
-cargo build --release --manifest-path rust/Cargo.toml
+cargo build --release
 sh gpuinflate/build.sh rescue          # libgzrescue; gpuinflate\build.cmd rescue on Windows
 sh gpuinflate/build.sh                 # also gpuinflate, on Linux with the CUDA toolkit
 ```
 
-Put the libraries next to `rust/target/release/gpuzip` or point `GPUZIP_RESCUE_DIR`,
+Put the libraries next to `target/release/gpuzip` or point `GPUZIP_RESCUE_DIR`,
 `GPUZIP_INFLATE_DIR` and `GPUZIP_NVCOMP_DIR` at their folders; `gpuzip doctor` shows what it
 finds.
 
 ## Testing
 
 ```
-cd rust && cargo test --release   # unit tests
-python tests/test_gpuzip.py         # the build in rust/target/release (GPUZIP_BIN=... for another)
+cargo test --release              # unit tests
+python tests/test_gpuzip.py       # the build in target/release (GPUZIP_BIN=... for another)
 ```
 
 `tests/test_gpuzip.py` packs a folder with 7-Zip, Python and the system's own tool, extracts it
@@ -69,7 +69,7 @@ and their results). New behavior comes with a test that fails without it.
 
 ## Releasing
 
-Set the version in `rust/Cargo.toml`, give it a section in
+Set the version in `Cargo.toml`, give it a section in
 `CHANGELOG.md`, and push a tag `v<version>` on main. [release.yml](.github/workflows/release.yml)
 builds and checks the packages for Windows, Linux and macOS and drafts the release with them;
 publish it by hand after reading it over ([docs/building.md](docs/building.md#release-packages)).

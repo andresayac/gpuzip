@@ -1,5 +1,5 @@
 # Builds the packages people download: gpuzip with its libraries, for Windows x64, Linux x64 and
-# macOS (universal: Apple silicon and Intel). A tag v<version> (the version in rust/Cargo.toml)
+# macOS (universal: Apple silicon and Intel). A tag v<version> (the version in Cargo.toml)
 # publishes them as a draft release, to be read over and published by hand; a pull request that
 # touches the packaging, or a manual run, only builds them and keeps them as workflow artifacts.
 #
@@ -16,7 +16,7 @@ on:
       - .github/workflows/release.yml
       - gpuinflate/build.sh
       - gpuinflate/build.cmd
-      - rust/Cargo.toml
+      - Cargo.toml
   workflow_dispatch:
 
 permissions:
@@ -45,9 +45,9 @@ jobs:
 
       - name: Version
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "tag $GITHUB_REF_NAME does not match rust/Cargo.toml's version $version" >&2
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml's version $version" >&2
             exit 1
           fi
           echo "PKG=gpuzip-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
@@ -91,7 +91,6 @@ jobs:
         run: CXXFLAGS="-arch arm64 -arch x86_64" sh gpuinflate/build.sh rescue
 
       - name: gpuzip
-        working-directory: rust
         run: |
           if [ "${{ runner.os }}" = macOS ]; then
             cargo build --release --target aarch64-apple-darwin
@@ -106,9 +105,9 @@ jobs:
         run: |
           mkdir -p "$PKG"
           case "${{ runner.os }}" in
-            Windows) cp rust/target/release/gpuzip.exe gpuinflate/gzrescue.dll gpuinflate/gpuinflate.dll "$PKG/" ;;
-            Linux)   cp rust/target/release/gpuzip gpuinflate/libgzrescue.so gpuinflate/libgpuinflate.so "$PKG/" ;;
-            macOS)   cp rust/target/release/gpuzip gpuinflate/libgzrescue.dylib "$PKG/" ;;
+            Windows) cp target/release/gpuzip.exe gpuinflate/gzrescue.dll gpuinflate/gpuinflate.dll "$PKG/" ;;
+            Linux)   cp target/release/gpuzip gpuinflate/libgzrescue.so gpuinflate/libgpuinflate.so "$PKG/" ;;
+            macOS)   cp target/release/gpuzip gpuinflate/libgzrescue.dylib "$PKG/" ;;
           esac
           cp README.md CHANGELOG.md "$PKG/"
           cp LICENSE-MIT LICENSE-APACHE "$PKG/"

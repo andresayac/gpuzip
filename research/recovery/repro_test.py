@@ -13,7 +13,7 @@ import tarfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests"))
 from test_gpuzip import make_source, tree  # noqa: E402
 
-GPUZIP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "rust", "target", "release", "gpuzip.exe")
+GPUZIP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "target", "release", "gpuzip.exe")
 
 
 def main():
