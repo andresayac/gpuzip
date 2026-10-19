@@ -826,6 +826,66 @@ def main():
           f"exit {r.returncode}" + (f"; WRONG: {wrong[:5]} {r.stderr.strip()[-200:]}" if wrong else ""))
     shutil.rmtree(out, ignore_errors=True)
 
+    # a ZIP made on Unix keeps each file's permissions, the executable bit among them: restored
+    # on Unix and macOS. Not from a ZIP made on DOS, whose high attribute bits mean nothing, and
+    # never setuid
+    modes = os.path.join(work, "modes.zip")
+    with zipfile.ZipFile(modes, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, made_by, mode, data in (("run.sh", 3, 0o100755, b"#!/bin/sh\necho hi\n"), ("data.txt", 3, 0o100644, b"data\n"),
+                                          ("suid", 3, 0o104750, b"no setuid\n"), ("dos.txt", 0, 0o100700, b"made on DOS\n")):
+            info = zipfile.ZipInfo(name, (2026, 1, 2, 3, 4, 6))
+            info.create_system, info.external_attr, info.compress_type = made_by, mode << 16, zipfile.ZIP_DEFLATED
+            z.writestr(info, data)
+    out = os.path.join(work, "modes_out")
+    for cmd in ("x", "rescue"):
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, cmd, modes, "-o", out], capture_output=True, text=True)
+        got = {n: os.stat(os.path.join(out, n)).st_mode & 0o7777 for n in ("run.sh", "data.txt", "suid", "dos.txt") if os.path.exists(os.path.join(out, n))}
+        if os.name == "nt":
+            ok = r.returncode == 0 and len(got) == 4  # no such bits on Windows: the files are there
+        else:
+            umask = os.umask(0)
+            os.umask(umask)
+            ok = r.returncode == 0 and got.get("run.sh") == 0o755 and got.get("data.txt") == 0o644 and got.get("suid") == 0o750 \
+                and got.get("dos.txt") == 0o666 & ~umask
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {cmd} of a ZIP made on Unix restores its modes: {ascii({n: oct(m) for n, m in got.items()})}"
+              + (" (Windows: not checked)" if os.name == "nt" else ""))
+    shutil.rmtree(out, ignore_errors=True)
+
+    # tar names that differ only in case are one file where names ignore case (Windows, macOS):
+    # the last copy is kept, and a note says so (linux-6.6.tar.gz has 13 such pairs); elsewhere
+    # both are written
+    cases = [("Makefile", b"upper\n"), ("makefile", b"lower, last\n"), ("dir/Read.me", b"first\n"), ("dir/READ.ME", b"second, last\n")]
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as t:
+        for name, data in cases:
+            info = tarfile.TarInfo(name)
+            info.size, info.mtime = len(data), 1700000000
+            t.addfile(info, io.BytesIO(data))
+    case_tgz = os.path.join(work, "case.tar.gz")
+    open(case_tgz, "wb").write(gzip.compress(buf.getvalue(), 6, mtime=0))
+    out = os.path.join(work, "case_out")
+    for cmd in ("x", "rescue"):
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, cmd, case_tgz, "-o", out, "--json"], capture_output=True, text=True)
+        try:
+            notes = json.loads(r.stdout.strip().splitlines()[-1]).get("notes", [])
+        except (json.JSONDecodeError, IndexError):
+            notes = []
+        noted = any("differ" in n and "only in case" in n for n in notes)
+        on_disk = {os.path.relpath(os.path.join(d, f), out).replace("\\", "/"): open(os.path.join(d, f), "rb").read() for d, _, fs in os.walk(out) for f in fs}
+        if os.name == "nt" or sys.platform == "darwin":
+            lowered = {k.lower(): v for k, v in on_disk.items()}
+            ok = r.returncode == 0 and noted and len(on_disk) == 2 and lowered.get("makefile") == b"lower, last\n" \
+                and lowered.get("dir/read.me") == b"second, last\n"
+        else:
+            ok = r.returncode == 0 and not noted and on_disk == dict(cases)
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {cmd} of a tar.gz with names that differ only in case: {len(on_disk)} files, noted: {noted}"
+              + ("" if ok else f"; {ascii(sorted(on_disk))} {ascii(notes)}"))
+    shutil.rmtree(out, ignore_errors=True)
+
     # an extraction killed while it writes a large file leaves no part of it under its name:
     # every file there must be whole (measured before: 184 MB of 400 left as big.bin in the
     # tar.gz, 344 of 400 from the .gz, 296 of 600 of the ZIP's entry). The ZIP's is past the

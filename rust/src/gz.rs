@@ -263,7 +263,7 @@ struct Untarred {
     files: u64,
     bytes: u64,
     failed: Vec<(String, String)>,
-    renamed: Vec<String>, // notes on the names written under another
+    name_notes: Vec<String>, // on names: written under another, or two names one file here
     error: Option<String>,
 }
 
@@ -338,6 +338,21 @@ fn write_tar_file(dst: &Path, src: &mut impl Read, mode: u32, mtime: Option<std:
         std::fs::set_permissions(dst, p)?;
     }
     Ok(())
+}
+
+/// The note on a tar's files whose names differ only in case from one before them, where file
+/// names ignore case (Windows, macOS): pairs of (the one before, the one written over it)
+pub fn case_note(pairs: &[(String, String)]) -> Option<String> {
+    if pairs.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = pairs.iter().take(5).map(|(a, b)| format!("{b} over {a}")).collect();
+    Some(format!(
+        "{} only in case from one before, and file names here ignore case: each was written over it, the last copy kept ({}{})",
+        if pairs.len() == 1 { "1 file differs".to_string() } else { format!("{} files differ", pairs.len()) },
+        shown.join(", "),
+        if pairs.len() > 5 { ", ..." } else { "" }
+    ))
 }
 
 /// Files of a tar up to this size are read whole and written by TarWriters; larger ones by the
@@ -424,6 +439,8 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
     // folders already made or found inside the output folder; forgotten at a link, which could
     // make a path lead elsewhere
     let mut inside: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut by_case: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // a file's path in lower case: as written
+    let mut case_pairs: Vec<(String, String)> = Vec::new(); // (the one before, the one written over it)
     let mut ar = tar::Archive::new(reader);
     ar.set_preserve_mtime(true);
     ar.set_overwrite(true);
@@ -456,6 +473,16 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
                 Ok(Some(rel)) if rel.as_os_str().is_empty() => {}
                 Ok(Some(rel)) => {
                     let dst = r.join(&rel);
+                    // names that differ only in case are one file where names ignore it: the
+                    // last copy is written over the other (13 pairs in linux-6.6.tar.gz)
+                    if kind.is_file() && cfg!(any(windows, target_os = "macos")) {
+                        let exact = rel.to_string_lossy().replace('\\', "/");
+                        if let Some(prev) = by_case.insert(exact.to_lowercase(), exact.clone()) {
+                            if prev != exact {
+                                case_pairs.push((prev, exact));
+                            }
+                        }
+                    }
                     let dir = if kind.is_dir() { dst.clone() } else { dst.parent().unwrap_or(r).to_path_buf() };
                     let made = match &canon_root {
                         Ok(_) if inside.contains(&dir) => Ok(()),
@@ -482,7 +509,7 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
                         write_tar_file(&dst, &mut e, mode, mtime)
                     });
                     match made {
-                        Ok(()) if device => u.renamed.push(format!(
+                        Ok(()) if device => u.name_notes.push(format!(
                             "{name} uses a name this Windows takes for a device (what is written to one is lost): written as {}",
                             rel.display()
                         )),
@@ -534,6 +561,7 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> 
             u.bytes += size;
         }
     }
+    u.name_notes.extend(case_note(&case_pairs));
     // the files still being written, and those that could not be
     for (name, x, size) in pool.map(TarWriters::finish).unwrap_or_default() {
         u.failed.push((name, x));
@@ -577,7 +605,7 @@ pub fn run(cmd: char, archive: &str, data: &[u8], out_root: Option<PathBuf>, opt
             let u = extractor.join().unwrap_or_default();
             files = u.files;
             failed = u.failed;
-            renamed = u.renamed;
+            renamed = u.name_notes;
             match (r, u.error) {
                 (Ok(()), Some(e)) => Err(Fail::Corrupt(e)),
                 (Err(Fail::Stopped), Some(e)) => Err(Fail::Corrupt(e)),

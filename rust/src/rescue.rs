@@ -365,6 +365,9 @@ pub struct TarOutcome {
     pub bytes: u64,
     /// files and folders that name a Windows device, written with a `_` before (safe_relpath)
     pub renamed: Vec<String>,
+    /// files whose names differ only in case from one before, where names ignore case: (the
+    /// one before, the one written over it)
+    pub case_pairs: Vec<(String, String)>,
 }
 
 fn octal(field: &[u8]) -> Option<u64> {
@@ -448,6 +451,7 @@ pub struct TarReader<'a> {
     last_valid: Option<[u8; 512]>,
     // the last regular file: its name, status and where the header after it must be
     prev_file: Option<(String, u8, u64)>,
+    by_case: std::collections::HashMap<String, String>, // a file's path in lower case: as written
 }
 
 impl<'a> TarReader<'a> {
@@ -467,6 +471,7 @@ impl<'a> TarReader<'a> {
             pax_size: None,
             last_valid: None,
             prev_file: None,
+            by_case: std::collections::HashMap::new(),
         }
     }
 
@@ -647,6 +652,15 @@ impl<'a> TarReader<'a> {
                         match zip::safe_relpath(&name) {
                             Some(rel) => {
                                 self.make_root();
+                                // one file for two names where names ignore case: the last is kept
+                                if cfg!(any(windows, target_os = "macos")) {
+                                    let exact = rel.to_string_lossy().replace('\\', "/");
+                                    if let Some(prev) = self.by_case.insert(exact.to_lowercase(), exact.clone()) {
+                                        if prev != exact {
+                                            self.o.case_pairs.push((prev, exact));
+                                        }
+                                    }
+                                }
                                 let path = r.join(rel);
                                 if let Some(parent) = path.parent() {
                                     let _ = std::fs::create_dir_all(parent);

@@ -273,7 +273,7 @@ impl<'a> Run<'a> {
         if let Some(path) = self.target(e) {
             let mut f = OutFile::create(&path).map_err(|x| x.to_string())?;
             f.write_all(data).map_err(|x| x.to_string())?;
-            f.finish(zip::dos_time(e.dos_date, e.dos_time)).map_err(|x| x.to_string())?;
+            finish_entry(f, e)?;
         }
         self.add(via, e);
         Ok(true)
@@ -303,7 +303,7 @@ impl<'a> Run<'a> {
             return Ok(false); // the file written goes with `out`
         }
         if let Some(f) = out {
-            f.finish(zip::dos_time(e.dos_date, e.dos_time)).map_err(|x| x.to_string())?;
+            finish_entry(f, e)?;
         }
         self.add(Via::Cpu, e);
         Ok(true)
@@ -339,7 +339,7 @@ impl<'a> Run<'a> {
             Ok(_) => {}
         }
         if let Some(f) = out {
-            f.finish(zip::dos_time(e.dos_date, e.dos_time)).map_err(|x| x.to_string())?;
+            finish_entry(f, e)?;
         }
         self.add(Via::Gpu, e);
         Ok(Inflated::Done)
@@ -794,6 +794,17 @@ impl<'a> Run<'a> {
     }
 }
 
+/// Entry `e`'s file is whole: it gets the permissions its ZIP keeps when made on Unix or macOS
+/// (the executable bit among them), then takes its name and time
+fn finish_entry(f: OutFile, e: &Entry) -> Result<(), String> {
+    #[cfg(unix)]
+    if e.unix_mode != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        f.file().set_permissions(std::fs::Permissions::from_mode(e.unix_mode)).map_err(|x| x.to_string())?;
+    }
+    f.finish(zip::dos_time(e.dos_date, e.dos_time)).map_err(|x| x.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Entry, Route, nvcomp_pays, pick_for_gpuinflate};
@@ -811,6 +822,7 @@ mod tests {
             data_offset: 0,
             dos_time: 0,
             dos_date: 0,
+            unix_mode: 0,
             route: Route::Deflate,
         };
         sizes.iter().map(entry).collect()

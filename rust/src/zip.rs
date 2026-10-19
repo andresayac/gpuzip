@@ -41,7 +41,19 @@ pub struct Entry {
     pub data_offset: u64,
     pub dos_time: u16,
     pub dos_date: u16,
+    /// a regular file's permission bits, from a ZIP made on Unix or macOS (0: none)
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub unix_mode: u32,
     pub route: Route,
+}
+
+/// The permission bits a ZIP keeps for a regular file: the high 16 bits of its external
+/// attributes hold a Unix st_mode when it was made on Unix (3) or macOS (19). Not those of a
+/// link or a folder, and never setuid, setgid or sticky (Info-ZIP's unzip drops them too).
+fn unix_mode(made_by: u8, external: u32) -> u32 {
+    let mode = external >> 16;
+    let regular = matches!(mode & 0o170000, 0 | 0o100000);
+    if matches!(made_by, 3 | 19) && regular { mode & 0o777 } else { 0 }
 }
 
 pub fn method_name(m: u16) -> String {
@@ -298,6 +310,7 @@ pub fn read_central_directory(data: &[u8], lost_ok: bool) -> Result<Vec<Entry>, 
             data_offset: (header as i64 + concat).max(0) as u64, // the local header for now; plan() moves it to the data
             dos_time: u16le(data, p + 12),
             dos_date: u16le(data, p + 14),
+            unix_mode: unix_mode(data[p + 5], u32le(data, p + 38)),
             route: Route::Cpu,
         });
         p += 46 + nlen + xlen + clen;
@@ -390,6 +403,17 @@ mod tests {
         assert_eq!(decode_name(b"caf\x82.txt", false, true, None), "café.txt");
         assert_eq!(decode_name(b"x\\y.txt", true, false, None), "x/y.txt");
         assert_eq!(decode_name(b"a.txt", false, false, Some("ä.txt".into())), "ä.txt");
+    }
+
+    #[test]
+    fn unix_modes() {
+        use super::unix_mode;
+        assert_eq!(unix_mode(3, 0o100755 << 16), 0o755); // a script made on Unix
+        assert_eq!(unix_mode(19, 0o644 << 16), 0o644); // macOS, no file type given
+        assert_eq!(unix_mode(3, 0o104755 << 16), 0o755); // setuid dropped
+        assert_eq!(unix_mode(3, 0o120777 << 16), 0); // a link
+        assert_eq!(unix_mode(3, 0o040755 << 16), 0); // a folder
+        assert_eq!(unix_mode(0, 0o100755 << 16), 0); // made on DOS: those bits mean nothing
     }
 
     #[test]

@@ -184,7 +184,8 @@ fn data_descriptor(data: &[u8], at: usize) -> Option<(u32, u64, u64)> {
     Some((u32le(data, p), u32le(data, p + 4) as u64, u32le(data, p + 8) as u64))
 }
 
-fn write_file(root: Option<&Path>, name: &str, bytes: &[u8], dos_time: u16, dos_date: u16) -> Result<(), String> {
+/// `mode`: the permission bits the directory keeps for it, made on Unix or macOS (0: none)
+fn write_file(root: Option<&Path>, name: &str, bytes: &[u8], dos_time: u16, dos_date: u16, mode: u32) -> Result<(), String> {
     let Some(root) = root else { return Ok(()) };
     let rel = zip::safe_relpath(name).ok_or("path leaves the output folder; skipped")?;
     let path = root.join(rel);
@@ -193,6 +194,13 @@ fn write_file(root: Option<&Path>, name: &str, bytes: &[u8], dos_time: u16, dos_
     }
     let mut f = File::create(&path).map_err(|e| e.to_string())?;
     f.write_all(bytes).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    if mode != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
     if let Some(t) = zip::dos_time(dos_date, dos_time) {
         let _ = f.set_modified(t);
     }
@@ -213,6 +221,7 @@ struct Task {
     dos_date: u16,
     from_scan: bool,
     cd_extra_len: usize,
+    unix_mode: u32, // from the directory (a local header has none)
 }
 
 /// Recover every entry of `data` into `root` (none: only read). `fill` is written where bytes are unknown.
@@ -268,6 +277,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
                     dos_date: e.dos_date,
                     from_scan: false,
                     cd_extra_len: 0,
+                    unix_mode: e.unix_mode,
                 });
             }
             if o.moved > 0 {
@@ -305,6 +315,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
             dos_date: l.dos_date,
             from_scan: true,
             cd_extra_len: 0,
+            unix_mode: 0,
         });
     }
     tasks.sort_by_key(|t| t.header_offset);
@@ -412,7 +423,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
                 rec.detail = if rec.detail.is_empty() { detail } else { format!("{}; {detail}", rec.detail) };
             }
             if status != Status::Lost {
-                if let Err(e) = write_file(root, &t.name, &bytes, t.dos_time, t.dos_date) {
+                if let Err(e) = write_file(root, &t.name, &bytes, t.dos_time, t.dos_date, t.unix_mode) {
                     o.failed.push((t.name.clone(), e));
                 }
                 if office && keep_parts {
@@ -954,7 +965,7 @@ fn office_repair(entries: &mut [Recovered], root: Option<&Path>, _fill: u8) -> O
             if fixed != *part {
                 *part = fixed;
                 of.repaired_parts.push(e.name.clone());
-                if let Err(err) = write_file(root, &e.name, part, 0, 0) {
+                if let Err(err) = write_file(root, &e.name, part, 0, 0, 0) {
                     e.detail = format!("{}; could not write the repaired part: {err}", e.detail);
                 }
             }
@@ -1474,7 +1485,7 @@ mod tests {
         sound.extend_from_slice(b"PK\x01\x02");
         let t = Task {
             name: "0123456789".into(), raw_name: b"0123456789".to_vec(), data_offset: None, header_offset: 0, method: DEFLATED, flags: 0, crc: Some(crc32fast::hash(&text)),
-            csize: Some(n as u64), size: Some(text.len() as u64), dos_time: 0, dos_date: 0, from_scan: false, cd_extra_len: 0,
+            csize: Some(n as u64), size: Some(text.len() as u64), dos_time: 0, dos_date: 0, from_scan: false, cd_extra_len: 0, unix_mode: 0,
         };
         let order = |data: &[u8]| {
             let mut starts = vec![40, 49, 64, 68, 60];

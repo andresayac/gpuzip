@@ -92,6 +92,12 @@
   512 MiB, a file of a .tar.gz and a .gz were the ones written as they decode: killed part way,
   they left 184 of 400 MB, 296 of 600 and 344 of 400 under their names. Nor does a wrong CRC
   leave its output any more (`gpuzip rescue` keeps what can be saved).
+- A ZIP made on Unix or macOS keeps each file's permissions in its directory; they are now
+  restored on Linux and macOS, the executable bit among them (setuid, setgid and sticky never),
+  by `x` and `rescue`. Not from a ZIP made elsewhere, whose bits there mean nothing.
+- Files of a tar whose names differ only in case (13 pairs in linux-6.6.tar.gz) are one file on
+  Windows and macOS: the last copy was written over the other with nothing said. A note now
+  lists them, as ZIP extraction notes duplicate paths; `x` and `rescue`.
 - ZIP entries whose bytes overlap (a local header inside another entry's header or data) are
   refused, by `x` and `t`, as Info-ZIP's unzip and Python's zipfile refuse them: that is how
   zip bombs multiply their data. One 100 MB stream named by 20 entries wrote 2 GB from 103 KB,
