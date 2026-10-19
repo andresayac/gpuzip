@@ -15,14 +15,14 @@ every dataset.
 
 | Dataset | Job | 7-Zip | Rust CPU | Rust GPU | Rust auto |
 |---|---|---|---|---|---|
-| 40,000 small files, 1.1 GB | test | 4.34 s | **0.26 s** | 0.57 s | **0.26 s** |
-| | extract | 25.54 s | 18.80 s* | - | 19.36 s* |
-| 2,000 medium files, 1.4 GB | test | 5.02 s | **0.26 s** | 2.36 s | **0.26 s** |
-| | extract | 7.12 s | 1.48 s* | - | 1.58 s* |
-| 8 large files, 1.1 GB | test | 3.63 s | **0.26 s** | 0.48 s | **0.26 s** |
-| | extract | 3.90 s | **0.48 s** | - | **0.48 s** |
-| Mixed, 10,304 files, 0.8 GB | test | 2.83 s | 0.22 s | 0.85 s | **0.20 s** |
-| | extract | 9.59 s | 5.41 s* | - | 5.29 s* |
+| 40,000 small files, 1.1 GB | test | 4.46 s | **0.28 s** | 0.64 s | 0.29 s |
+| | extract | 30.00 s | 20.09 s* | - | 20.69 s* |
+| 2,000 medium files, 1.4 GB | test | 5.00 s | **0.25 s** | 2.38 s | 0.27 s |
+| | extract | 7.42 s | 1.68 s* | - | 1.67 s* |
+| 8 large files, 1.1 GB | test | 3.64 s | **0.27 s** | 0.52 s | **0.27 s** |
+| | extract | 3.97 s | 0.50 s | - | **0.49 s** |
+| Mixed, 10,304 files, 0.8 GB | test | 2.84 s | **0.20 s** | 0.88 s | **0.20 s** |
+| | extract | 9.47 s | 5.58 s* | - | 5.17 s* |
 
 \* Windows Defender inspects every file the Rust build writes, at about 0.35 ms a file, far more
 than it charges Python's signed interpreter. The same `gpuzip.exe` run from `%TEMP%` (which this
@@ -30,13 +30,17 @@ machine's Defender apparently leaves alone) extracts much faster:
 
 | Extract | 7-Zip | Rust CPU, from the project folder | Rust CPU, from `%TEMP%` |
 |---|---|---|---|
-| 40,000 small files | 26.38 s | 19.50 s | **6.08 s** |
-| 2,000 medium files | 7.25 s | 1.81 s | **1.22 s** |
-| Mixed, 10,304 files | 8.79 s | 4.82 s | **1.74 s** |
+| 40,000 small files | 26.91 s | 20.09 s | **6.25 s** |
+| 2,000 medium files | 9.86 s | 1.68 s | **0.95 s** |
+| Mixed, 10,304 files | 14.08 s | 5.58 s | **2.06 s** |
+
+7-Zip's own times vary most from run to run (the mixed files: 9.47 s in the run above, 14.08 s
+in this one); gpuzip's from `%TEMP%` stayed within 0.3 s of the run before 0.2.0, which gives
+each file its exact time and its name only once whole (about 4 µs a file here).
 
 What this shows:
 
-- Decoding: gpuzip is 13-20x faster than 7-Zip. 7-Zip decodes ZIP
+- Decoding: gpuzip is 14-20x faster than 7-Zip. 7-Zip decodes ZIP
   at 0.2-0.3 GB/s here; gpuzip with libdeflate at up to 5.6 GB/s, process start included.
 - Extracting many files is limited by creating them, and on Windows by how Defender treats
   the program. A code-signed release with some reputation should behave like the `%TEMP%` column.

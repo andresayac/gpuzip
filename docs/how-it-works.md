@@ -65,7 +65,9 @@ Learned the hard way:
 ```
 Cargo.toml      the program, gpuzip (Rust)
 src/
-  zip.rs        reads the archive's central directory and routes each entry
+  zip.rs        reads the archive's central directory and routes each entry; entry names, in
+                UTF-8 or the code page they were written in (the system's OEM one, --codepage)
+  dospages.rs   the DOS code pages' upper halves (437, 850, 852, 866...), written from Python's codecs
   dylib.rs      the libraries loaded at run time: their names on each system, where they are looked for
   gpu.rs        the NVIDIA driver and nvCOMP, loaded at run time
   extract.rs    shares the work between GPU, CPU threads and 7-Zip; writes the files

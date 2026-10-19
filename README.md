@@ -19,8 +19,8 @@ survived, and says exactly which bytes are certain and which are not.
   sectors, interrupted or wrongly resumed downloads, FTP transfers in ASCII mode, bit rot. Every
   file comes out marked intact, inferred, possibly damaged or partial, and the report says what
   could not be checked. Office documents are rebuilt so that Word, Excel and PowerPoint open them.
-- **Extract and test** ZIP, `.gz` and `.tar.gz` on every CPU core: a ZIP tests 13-20x faster
-  than with 7-Zip and extracts 1.4-8x faster (creating the files is most of that time), every CRC
+- **Extract and test** ZIP, `.gz` and `.tar.gz` on every CPU core: a ZIP tests 14-20x faster
+  than with 7-Zip and extracts 1.5-8x faster (creating the files is most of that time), every CRC
   checked, paths that would escape the output folder refused. RAR, 7z and the rest go to 7-Zip.
 - **On an NVIDIA GPU**, one large `.gz` is decoded in parallel by thousands of GPU threads with
   [gpuinflate](gpuinflate), a decoder of our own: 6.4 GB in 2.2 s, 9.5x 7-Zip and 1.5x
@@ -62,7 +62,7 @@ How it works, what each status means and every measurement: [docs/rescue.md](doc
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/zip-speed-dark.svg">
-  <img alt="Testing ZIP archives: gpuzip on the CPU is 13-20x faster than 7-Zip" src="docs/img/zip-speed-light.svg">
+  <img alt="Testing ZIP archives: gpuzip on the CPU is 14-20x faster than 7-Zip" src="docs/img/zip-speed-light.svg">
 </picture>
 
 <picture>

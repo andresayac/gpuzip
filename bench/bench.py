@@ -19,6 +19,7 @@ import math
 import os
 import platform
 import random
+import re
 import shutil
 import statistics
 import subprocess
@@ -120,17 +121,16 @@ def tree_digest(root):
     return out
 
 
-def system_info():
+def system_info(rust=RUST):
     gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
                          capture_output=True, text=True).stdout.strip()
     cpu = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor).Name"],
                          capture_output=True, text=True).stdout.strip()
     sz = subprocess.run([SEVENZIP], capture_output=True, text=True).stdout.strip().splitlines()[0]
-    try:
-        from importlib.metadata import version
-        nv = version("nvidia-nvcomp-cu13")
-    except Exception:
-        nv = "?"
+    # the nvCOMP gpuzip loads, as its doctor reports it
+    doctor = subprocess.run([rust, "doctor"], capture_output=True, text=True).stdout if os.path.isfile(rust) else ""
+    found = re.search(r"nvCOMP (\d[\d.]*)", doctor)
+    nv = found.group(1) if found else "?"
     return {"gpu": gpu, "cpu": cpu, "threads": os.cpu_count(), "7zip": sz, "nvcomp": nv,
             "python": platform.python_version(), "os": platform.platform()}
 
@@ -145,7 +145,7 @@ def main():
     rust = [args.rust] if os.path.isfile(args.rust) else None
     os.makedirs(args.data, exist_ok=True)
     names = args.only.split(",") if args.only else list(DATASETS)
-    info = system_info()
+    info = system_info(args.rust)
     print(json.dumps(info, indent=1))
     results = []
     for name in names:

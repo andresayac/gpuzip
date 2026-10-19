@@ -4,7 +4,7 @@
   "cpu": "AMD Ryzen 7 9700X 8-Core Processor",
   "threads": 16,
   "7zip": "7-Zip 24.09 (x64) : Copyright (c) 1999-2024 Igor Pavlov : 2024-11-29",
-  "nvcomp": "6.0.0.12",
+  "nvcomp": "6.0.0",
   "python": "3.14.2",
   "os": "Windows-11-10.0.26300-SP0"
  },
@@ -13,87 +13,87 @@
    "dataset": "small",
    "kind": "test",
    "tool": "7-Zip",
-   "median_s": 4.339,
+   "median_s": 4.463,
    "runs_s": [
-    4.335,
-    4.35,
-    4.339
+    4.336,
+    4.463,
+    4.607
    ],
    "zip_bytes": 496271968,
    "bytes": 1065590603,
-   "gbps": 0.25,
+   "gbps": 0.24,
    "output_matches_7zip": true
   },
   {
    "dataset": "small",
    "kind": "test",
    "tool": "rust cpu",
-   "median_s": 0.262,
+   "median_s": 0.285,
    "runs_s": [
-    0.277,
-    0.262,
-    0.259
+    0.27,
+    0.285,
+    0.295
    ],
    "zip_bytes": 496271968,
    "routes": {
     "cpu": 40000
    },
-   "inner_s": 0.1415,
+   "inner_s": 0.1453,
    "bytes": 1065590603,
-   "gbps": 4.07,
+   "gbps": 3.74,
    "output_matches_7zip": true
   },
   {
    "dataset": "small",
    "kind": "test",
    "tool": "rust gpu",
-   "median_s": 0.571,
+   "median_s": 0.644,
    "runs_s": [
-    0.571,
-    0.562,
-    0.606
+    0.733,
+    0.644,
+    0.634
    ],
    "zip_bytes": 496271968,
    "routes": {
     "gpu": 40000
    },
-   "inner_s": 0.4618,
-   "gpu_busy_s": 0.331,
-   "gpu_startup_s": 0.0666692,
+   "inner_s": 0.4683,
+   "gpu_busy_s": 0.324,
+   "gpu_startup_s": 0.0871394,
    "bytes": 1065590603,
-   "gbps": 1.87,
+   "gbps": 1.65,
    "output_matches_7zip": true
   },
   {
    "dataset": "small",
    "kind": "test",
    "tool": "rust auto",
-   "median_s": 0.264,
+   "median_s": 0.292,
    "runs_s": [
-    0.273,
-    0.26,
-    0.264
+    0.284,
+    0.297,
+    0.292
    ],
    "zip_bytes": 496271968,
    "routes": {
     "cpu": 40000
    },
-   "inner_s": 0.1394,
+   "inner_s": 0.1432,
    "gpu_busy_s": 0.0,
    "gpu_startup_s": null,
    "bytes": 1065590603,
-   "gbps": 4.04,
+   "gbps": 3.65,
    "output_matches_7zip": true
   },
   {
    "dataset": "small",
    "kind": "extract",
    "tool": "7-Zip",
-   "median_s": 25.539,
+   "median_s": 29.995,
    "runs_s": [
-    25.349,
-    25.539,
-    31.569
+    44.689,
+    29.135,
+    29.995
    ],
    "zip_bytes": 496271968,
    "bytes": 1065590603,
@@ -104,51 +104,51 @@
    "dataset": "small",
    "kind": "extract",
    "tool": "rust cpu",
-   "median_s": 18.804,
+   "median_s": 20.085,
    "runs_s": [
-    18.719,
-    19.856,
-    18.804
+    20.085,
+    20.242,
+    20.074
    ],
    "zip_bytes": 496271968,
    "routes": {
     "cpu": 40000
    },
-   "inner_s": 18.6819,
+   "inner_s": 19.9148,
    "bytes": 1065590603,
-   "gbps": 0.06,
+   "gbps": 0.05,
    "output_matches_7zip": true
   },
   {
    "dataset": "small",
    "kind": "extract",
    "tool": "rust auto",
-   "median_s": 19.355,
+   "median_s": 20.693,
    "runs_s": [
-    19.355,
-    25.137,
-    18.54
+    21.279,
+    20.693,
+    20.472
    ],
    "zip_bytes": 496271968,
    "routes": {
     "cpu": 40000
    },
-   "inner_s": 18.4108,
+   "inner_s": 20.3073,
    "gpu_busy_s": 0.0,
    "gpu_startup_s": null,
    "bytes": 1065590603,
-   "gbps": 0.06,
+   "gbps": 0.05,
    "output_matches_7zip": true
   },
   {
    "dataset": "medium",
    "kind": "test",
    "tool": "7-Zip",
-   "median_s": 5.021,
+   "median_s": 5.004,
    "runs_s": [
-    5.021,
-    4.996,
-    5.033
+    5.03,
+    5.004,
+    5.0
    ],
    "zip_bytes": 576351374,
    "bytes": 1445860044,
@@ -159,38 +159,38 @@
    "dataset": "medium",
    "kind": "test",
    "tool": "rust cpu",
-   "median_s": 0.256,
+   "median_s": 0.251,
    "runs_s": [
-    0.234,
-    0.256,
-    0.301
+    0.251,
+    0.246,
+    0.261
    ],
    "zip_bytes": 576351374,
    "routes": {
     "cpu": 2000
    },
-   "inner_s": 0.2132,
+   "inner_s": 0.1916,
    "bytes": 1445860044,
-   "gbps": 5.65,
+   "gbps": 5.76,
    "output_matches_7zip": true
   },
   {
    "dataset": "medium",
    "kind": "test",
    "tool": "rust gpu",
-   "median_s": 2.361,
+   "median_s": 2.381,
    "runs_s": [
-    2.299,
-    2.361,
-    2.436
+    2.382,
+    2.381,
+    2.358
    ],
    "zip_bytes": 576351374,
    "routes": {
     "gpu": 2000
    },
-   "inner_s": 2.3338,
-   "gpu_busy_s": 2.512,
-   "gpu_startup_s": 0.0644735,
+   "inner_s": 2.2496,
+   "gpu_busy_s": 2.397,
+   "gpu_startup_s": 0.0832838,
    "bytes": 1445860044,
    "gbps": 0.61,
    "output_matches_7zip": true
@@ -199,102 +199,142 @@
    "dataset": "medium",
    "kind": "test",
    "tool": "rust auto",
-   "median_s": 0.262,
+   "median_s": 0.267,
    "runs_s": [
-    0.253,
-    0.263,
-    0.262
+    0.255,
+    0.267,
+    0.269
    ],
    "zip_bytes": 576351374,
    "routes": {
     "cpu": 2000
    },
-   "inner_s": 0.1943,
+   "inner_s": 0.1925,
    "gpu_busy_s": 0.0,
    "gpu_startup_s": null,
    "bytes": 1445860044,
-   "gbps": 5.52,
+   "gbps": 5.42,
    "output_matches_7zip": true
   },
   {
    "dataset": "medium",
    "kind": "extract",
    "tool": "7-Zip",
-   "median_s": 7.119,
+   "median_s": 7.419,
    "runs_s": [
-    7.116,
-    17.875,
-    7.119
+    7.315,
+    7.488,
+    7.419
    ],
    "zip_bytes": 576351374,
    "bytes": 1445860044,
-   "gbps": 0.2,
+   "gbps": 0.19,
    "output_matches_7zip": true
   },
   {
    "dataset": "medium",
    "kind": "extract",
    "tool": "rust cpu",
-   "median_s": 1.479,
+   "median_s": 1.676,
    "runs_s": [
-    1.479,
-    1.447,
-    1.519
+    1.676,
+    1.588,
+    1.78
    ],
    "zip_bytes": 576351374,
    "routes": {
     "cpu": 2000
    },
-   "inner_s": 1.4504,
+   "inner_s": 1.6991,
    "bytes": 1445860044,
-   "gbps": 0.98,
+   "gbps": 0.86,
    "output_matches_7zip": true
   },
   {
    "dataset": "medium",
    "kind": "extract",
    "tool": "rust auto",
-   "median_s": 1.578,
+   "median_s": 1.665,
    "runs_s": [
-    1.466,
-    1.663,
-    1.578
+    1.655,
+    1.665,
+    1.734
    ],
    "zip_bytes": 576351374,
    "routes": {
     "cpu": 2000
    },
-   "inner_s": 1.4997,
+   "inner_s": 1.6486,
    "gpu_busy_s": 0.0,
    "gpu_startup_s": null,
    "bytes": 1445860044,
-   "gbps": 0.92,
+   "gbps": 0.87,
    "output_matches_7zip": true
   },
   {
    "dataset": "large",
    "kind": "test",
    "tool": "7-Zip",
-   "median_s": 3.635,
+   "median_s": 3.644,
    "runs_s": [
-    3.61,
-    3.635,
-    3.651
+    3.636,
+    3.672,
+    3.644
    ],
    "zip_bytes": 426597075,
    "bytes": 1073741824,
-   "gbps": 0.3,
+   "gbps": 0.29,
    "output_matches_7zip": true
   },
   {
    "dataset": "large",
    "kind": "test",
    "tool": "rust cpu",
-   "median_s": 0.259,
+   "median_s": 0.266,
    "runs_s": [
-    0.259,
-    0.255,
-    0.268
+    0.266,
+    0.271,
+    0.261
+   ],
+   "zip_bytes": 426597075,
+   "routes": {
+    "cpu": 8
+   },
+   "inner_s": 0.2208,
+   "bytes": 1073741824,
+   "gbps": 4.04,
+   "output_matches_7zip": true
+  },
+  {
+   "dataset": "large",
+   "kind": "test",
+   "tool": "rust gpu",
+   "median_s": 0.52,
+   "runs_s": [
+    0.499,
+    0.52,
+    0.527
+   ],
+   "zip_bytes": 426597075,
+   "routes": {
+    "gpu": 8
+   },
+   "inner_s": 0.4396,
+   "gpu_busy_s": 0.322,
+   "gpu_startup_s": 0.1156969,
+   "bytes": 1073741824,
+   "gbps": 2.06,
+   "output_matches_7zip": true
+  },
+  {
+   "dataset": "large",
+   "kind": "test",
+   "tool": "rust auto",
+   "median_s": 0.269,
+   "runs_s": [
+    0.262,
+    0.269,
+    0.273
    ],
    "zip_bytes": 426597075,
    "routes": {
@@ -302,111 +342,71 @@
    },
    "inner_s": 0.2275,
    "bytes": 1073741824,
-   "gbps": 4.15,
-   "output_matches_7zip": true
-  },
-  {
-   "dataset": "large",
-   "kind": "test",
-   "tool": "rust gpu",
-   "median_s": 0.481,
-   "runs_s": [
-    0.481,
-    0.478,
-    0.5
-   ],
-   "zip_bytes": 426597075,
-   "routes": {
-    "gpu": 8
-   },
-   "inner_s": 0.4196,
-   "gpu_busy_s": 0.334,
-   "gpu_startup_s": 0.0841606,
-   "bytes": 1073741824,
-   "gbps": 2.23,
-   "output_matches_7zip": true
-  },
-  {
-   "dataset": "large",
-   "kind": "test",
-   "tool": "rust auto",
-   "median_s": 0.255,
-   "runs_s": [
-    0.254,
-    0.255,
-    0.268
-   ],
-   "zip_bytes": 426597075,
-   "routes": {
-    "cpu": 8
-   },
-   "inner_s": 0.226,
-   "bytes": 1073741824,
-   "gbps": 4.21,
+   "gbps": 3.99,
    "output_matches_7zip": true
   },
   {
    "dataset": "large",
    "kind": "extract",
    "tool": "7-Zip",
-   "median_s": 3.901,
+   "median_s": 3.967,
    "runs_s": [
-    3.891,
-    3.901,
-    4.739
+    3.989,
+    3.967,
+    3.956
    ],
    "zip_bytes": 426597075,
    "bytes": 1073741824,
-   "gbps": 0.28,
+   "gbps": 0.27,
    "output_matches_7zip": true
   },
   {
    "dataset": "large",
    "kind": "extract",
    "tool": "rust cpu",
-   "median_s": 0.483,
+   "median_s": 0.495,
    "runs_s": [
-    0.483,
-    0.473,
-    0.491
+    0.495,
+    0.481,
+    0.58
    ],
    "zip_bytes": 426597075,
    "routes": {
     "cpu": 8
    },
-   "inner_s": 0.4519,
+   "inner_s": 0.5374,
    "bytes": 1073741824,
-   "gbps": 2.22,
+   "gbps": 2.17,
    "output_matches_7zip": true
   },
   {
    "dataset": "large",
    "kind": "extract",
    "tool": "rust auto",
-   "median_s": 0.482,
+   "median_s": 0.487,
    "runs_s": [
-    0.482,
-    0.471,
-    0.487
+    0.534,
+    0.487,
+    0.485
    ],
    "zip_bytes": 426597075,
    "routes": {
     "cpu": 8
    },
-   "inner_s": 0.4447,
+   "inner_s": 0.4441,
    "bytes": 1073741824,
-   "gbps": 2.23,
+   "gbps": 2.2,
    "output_matches_7zip": true
   },
   {
    "dataset": "mixed",
    "kind": "test",
    "tool": "7-Zip",
-   "median_s": 2.831,
+   "median_s": 2.844,
    "runs_s": [
-    2.731,
-    2.831,
-    2.866
+    3.449,
+    2.844,
+    2.765
    ],
    "zip_bytes": 338289715,
    "bytes": 759708949,
@@ -417,73 +417,73 @@
    "dataset": "mixed",
    "kind": "test",
    "tool": "rust cpu",
-   "median_s": 0.22,
+   "median_s": 0.203,
    "runs_s": [
-    0.234,
-    0.22,
-    0.205
+    0.348,
+    0.194,
+    0.203
    ],
    "zip_bytes": 338289715,
    "routes": {
     "cpu": 10304
    },
-   "inner_s": 0.141,
+   "inner_s": 0.1354,
    "bytes": 759708949,
-   "gbps": 3.45,
+   "gbps": 3.74,
    "output_matches_7zip": true
   },
   {
    "dataset": "mixed",
    "kind": "test",
    "tool": "rust gpu",
-   "median_s": 0.851,
+   "median_s": 0.878,
    "runs_s": [
-    0.826,
-    0.926,
-    0.851
+    1.274,
+    0.878,
+    0.868
    ],
    "zip_bytes": 338289715,
    "routes": {
     "cpu": 1000,
     "gpu": 9304
    },
-   "inner_s": 0.7425,
-   "gpu_busy_s": 0.851,
-   "gpu_startup_s": 0.0697539,
+   "inner_s": 0.7639,
+   "gpu_busy_s": 0.85,
+   "gpu_startup_s": 0.0931788,
    "bytes": 759708949,
-   "gbps": 0.89,
+   "gbps": 0.87,
    "output_matches_7zip": true
   },
   {
    "dataset": "mixed",
    "kind": "test",
    "tool": "rust auto",
-   "median_s": 0.204,
+   "median_s": 0.2,
    "runs_s": [
-    0.185,
-    0.204,
-    0.208
+    0.253,
+    0.2,
+    0.187
    ],
    "zip_bytes": 338289715,
    "routes": {
     "cpu": 10304
    },
-   "inner_s": 0.1446,
+   "inner_s": 0.1217,
    "gpu_busy_s": 0.0,
    "gpu_startup_s": null,
    "bytes": 759708949,
-   "gbps": 3.72,
+   "gbps": 3.8,
    "output_matches_7zip": true
   },
   {
    "dataset": "mixed",
    "kind": "extract",
    "tool": "7-Zip",
-   "median_s": 9.592,
+   "median_s": 9.472,
    "runs_s": [
-    8.894,
-    10.842,
-    9.592
+    17.365,
+    9.446,
+    9.472
    ],
    "zip_bytes": 338289715,
    "bytes": 759708949,
@@ -494,17 +494,17 @@
    "dataset": "mixed",
    "kind": "extract",
    "tool": "rust cpu",
-   "median_s": 5.409,
+   "median_s": 5.579,
    "runs_s": [
-    5.073,
-    5.512,
-    5.409
+    6.145,
+    5.579,
+    5.103
    ],
    "zip_bytes": 338289715,
    "routes": {
     "cpu": 10304
    },
-   "inner_s": 5.3467,
+   "inner_s": 5.0384,
    "bytes": 759708949,
    "gbps": 0.14,
    "output_matches_7zip": true
@@ -513,21 +513,21 @@
    "dataset": "mixed",
    "kind": "extract",
    "tool": "rust auto",
-   "median_s": 5.288,
+   "median_s": 5.174,
    "runs_s": [
-    5.942,
-    5.288,
-    5.044
+    6.043,
+    5.005,
+    5.174
    ],
    "zip_bytes": 338289715,
    "routes": {
     "cpu": 10304
    },
-   "inner_s": 4.9692,
+   "inner_s": 5.1048,
    "gpu_busy_s": 0.0,
    "gpu_startup_s": null,
    "bytes": 759708949,
-   "gbps": 0.14,
+   "gbps": 0.15,
    "output_matches_7zip": true
   }
  ]
