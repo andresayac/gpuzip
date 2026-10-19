@@ -355,7 +355,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
             o.entries.push(rec);
             continue;
         }
-        if t.method != STORED && t.method != DEFLATED {
+        if t.method != STORED && t.method != DEFLATED && !OTHER_METHODS.contains(&t.method) {
             rec.status = Status::Unsupported;
             rec.detail = format!("method {} is not read here", zip::method_name(t.method));
             o.entries.push(rec);
@@ -562,11 +562,123 @@ fn inflate_exact(slice: &[u8], size: usize) -> Option<(Vec<u8>, usize)> {
     }
 }
 
+/// Methods read here besides stored and Deflate: Deflate64 (9), bzip2 (12), LZMA (14),
+/// Zstandard (93, and 20, its number before 2020). Before, every such entry was "not readable
+/// here", undamaged ones too (7-Zip's LZMA ZIP: 26 of 428 files back from a sound archive)
+const OTHER_METHODS: [u16; 5] = [9, 12, 14, 20, 93];
+
+/// An entry of one of OTHER_METHODS from its data at `start`: whole when it decodes to its size
+/// and CRC. Where it breaks, what came before is given as partial, unchecked: these decoders
+/// do not go on past damage (Deflate's block-by-block rescue does), so the rest is lost.
+fn recover_other(data: &[u8], t: &Task, start: usize, limit: usize) -> (Status, Vec<u8>, String, u32, usize) {
+    let end = match t.csize {
+        Some(c) if c > 0 => (start as u64 + c).min(limit as u64).min(data.len() as u64) as usize,
+        _ => limit.min(data.len()),
+    };
+    let src = &data[start..end];
+    // at most one byte more than the directory says: an entry that lies about its size, or a
+    // stream made to explode, stops there
+    let cap = t.size.map_or(1 << 30, |s| s.saturating_add(1)).min(1 << 31) as usize;
+    let (bytes, err) = decode_other(t.method, t.flags, src, t.size, cap);
+    let name = zip::method_name(t.method);
+    let cut = t.csize.is_some_and(|c| ((end - start) as u64) < c);
+    match (err, t.crc) {
+        (None, Some(c)) if crc32fast::hash(&bytes) == c && t.size.is_none_or(|s| s == bytes.len() as u64) => {
+            (Status::Intact, bytes, String::new(), 0, end - start)
+        }
+        (None, Some(_)) => (Status::Unverified, bytes, format!("{name}: decodes, but the CRC does not match: damage the decoder could not see"), 0, 0),
+        (None, None) => (Status::Unverified, bytes, "no CRC known".into(), 0, 0),
+        (Some(e), _) => {
+            let n = bytes.len();
+            let why = if cut { "cut short".to_string() } else { e };
+            let detail = format!("{name} stream broken ({why}): the {n} bytes before the break are given, unchecked; past a break {name} is not read here");
+            (if n > 0 { Status::Partial } else { Status::Lost }, bytes, detail, 0, 0)
+        }
+    }
+}
+
+/// Decode `src`, an entry's data of method `method`, into at most `cap` bytes: what came out, and
+/// the error that stopped it, if one did
+fn decode_other(method: u16, flags: u16, src: &[u8], size: Option<u64>, cap: usize) -> (Vec<u8>, Option<String>) {
+    use std::io::Read;
+    // whatever a Read gives, up to cap
+    fn read_all(r: &mut impl Read, cap: usize) -> (Vec<u8>, Option<String>) {
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => return (out, None),
+                Ok(n) if out.len() + n > cap => return (out, Some("more data than the directory says".into())),
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) => return (out, Some(e.to_string())),
+            }
+        }
+    }
+    match method {
+        12 => read_all(&mut bzip2::read::BzDecoder::new(src), cap),
+        20 | 93 => match ruzstd::decoding::StreamingDecoder::new(src) {
+            Ok(mut d) => read_all(&mut d, cap),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        },
+        14 => {
+            // ZIP's LZMA: 2 bytes of version, the size of the properties (5), the properties, then
+            // the stream, which ends with a marker when bit 1 of the flags is set
+            if src.len() < 9 || u16::from_le_bytes([src[2], src[3]]) != 5 {
+                return (Vec::new(), Some("not an LZMA header".into()));
+            }
+            struct Capped(Vec<u8>, usize);
+            impl std::io::Write for Capped {
+                fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                    if self.0.len() + b.len() > self.1 {
+                        return Err(std::io::Error::other("more data than the directory says"));
+                    }
+                    self.0.extend_from_slice(b);
+                    Ok(b.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let known = if flags & 2 != 0 { None } else { size };
+            let opts = lzma_rs::decompress::Options { unpacked_size: lzma_rs::decompress::UnpackedSize::UseProvided(known), ..Default::default() };
+            let mut out = Capped(Vec::new(), cap);
+            let r = lzma_rs::lzma_decompress_with_options(&mut &src[4..], &mut out, &opts);
+            (out.0, r.err().map(|e| e.to_string()))
+        }
+        9 => {
+            let mut inf = deflate64::InflaterManaged::new();
+            let (mut out, mut at) = (Vec::new(), 0usize);
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                let r = inf.inflate(&src[at..], &mut buf);
+                at += r.bytes_consumed;
+                if out.len() + r.bytes_written > cap {
+                    return (out, Some("more data than the directory says".into()));
+                }
+                out.extend_from_slice(&buf[..r.bytes_written]);
+                if r.data_error || inf.errored() {
+                    return (out, Some("invalid Deflate64 data".into()));
+                }
+                if inf.finished() {
+                    return (out, None);
+                }
+                if r.bytes_consumed == 0 && r.bytes_written == 0 {
+                    return (out, Some("the stream ends before its last block".into()));
+                }
+            }
+        }
+        _ => (Vec::new(), Some(format!("method {method} is not read here"))),
+    }
+}
+
 /// One entry from its data at `start`: its status, bytes, what to say, CRs put back, and for an
 /// intact one how many input bytes its data took
 fn recover_entry(data: &[u8], lib: &Rescue, t: &Task, start: usize, limit: usize, fill: u8, cr_left: &mut u64) -> (Status, Vec<u8>, String, u32, usize) {
     if start >= data.len() {
         return (Status::Lost, Vec::new(), "data lies beyond the end of the file".into(), 0, 0);
+    }
+    if OTHER_METHODS.contains(&t.method) {
+        return recover_other(data, t, start, limit);
     }
     if t.method == STORED {
         let size = t.size.or(t.csize);

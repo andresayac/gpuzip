@@ -826,6 +826,51 @@ def main():
           f"exit {r.returncode}" + (f"; WRONG: {wrong[:5]} {r.stderr.strip()[-200:]}" if wrong else ""))
     shutil.rmtree(out, ignore_errors=True)
 
+    # rescue reads bzip2, LZMA, Zstandard and Deflate64 entries too, their CRC the judge: a sound
+    # archive comes back whole (before: every entry "not readable here"), and 4 KB of zeros in
+    # one leaves the others intact and nothing wrong called intact
+    rnd = random.Random(12)
+    method_files = {f"m/file{i}.txt": " ".join(rnd.choice(words) for _ in range(rnd.randint(3000, 30000))).encode() for i in range(10)}
+    method_zips = {}
+    for label, m in (("bzip2", zipfile.ZIP_BZIP2), ("LZMA", zipfile.ZIP_LZMA), ("Zstandard", getattr(zipfile, "ZIP_ZSTANDARD", None))):
+        if m is None:
+            continue  # Python before 3.14 writes no Zstandard
+        p = os.path.join(work, f"method_{label}.zip")
+        with zipfile.ZipFile(p, "w", m) as z:
+            for n, d in method_files.items():
+                z.writestr(n, d)
+        method_zips[label] = p
+    if SEVENZIP:
+        msrc = os.path.join(work, "method_src")
+        for n, d in method_files.items():
+            os.makedirs(os.path.dirname(os.path.join(msrc, n)), exist_ok=True)
+            open(os.path.join(msrc, n), "wb").write(d)
+        p = os.path.join(work, "method_Deflate64.zip")
+        sevenzip("a", "-tzip", "-mm=Deflate64", p, "m", cwd=msrc)
+        if os.path.exists(p):
+            method_zips["Deflate64"] = p
+    for label, p in method_zips.items():
+        blob = open(p, "rb").read()
+        for how, damaged in (("sound", blob), ("4 KB zeroed", blob[:len(blob) // 2] + bytes(4096) + blob[len(blob) // 2 + 4096:])):
+            bad = os.path.join(work, "method_case.zip")
+            open(bad, "wb").write(damaged)
+            out = os.path.join(work, "method_out")
+            shutil.rmtree(out, ignore_errors=True)
+            r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+            try:
+                entries = json.loads(r.stdout.strip().splitlines()[-1]).get("entries", [])
+            except (json.JSONDecodeError, IndexError):
+                entries = []
+            got = {e["name"]: e["status"] for e in entries}
+            right = {n for n, d in method_files.items() if os.path.isfile(os.path.join(out, n)) and open(os.path.join(out, n), "rb").read() == d}
+            silent = [n for n, s in got.items() if s == "intact" and n not in right]
+            intact = sum(s == "intact" for s in got.values())
+            ok = not silent and (intact == len(method_files) if how == "sound" else intact >= len(method_files) - 2)
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} rescue of a {label} ZIP, {how}: {intact} of {len(method_files)} intact, {len(right)} right"
+                  + (f"; CALLED INTACT BUT WRONG: {silent}" if silent else ""))
+    shutil.rmtree(os.path.join(work, "method_out"), ignore_errors=True)
+
     # a BGZF file (bgzip's: members of 64 KB, each one's size in its BC extra subfield, an empty
     # member at the end) comes out whole in every mode; --mode gpu sends its small members to the
     # CPU, saying so (each call to the GPU costs about 10 ms: 3,200 members took 28.5 s, now 0.3)

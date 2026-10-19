@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Rescue
+- ZIP entries compressed with bzip2, LZMA, Zstandard or Deflate64 are rescued: each decoded (by
+  decoders written in Rust: bzip2's libbz2-rs-sys, lzma-rs, ruzstd, deflate64) and called intact
+  when its CRC checks. Before, every such entry was "not readable here", even in a sound archive
+  (7-Zip's LZMA ZIP: 26 of 428 files back). A damaged one gives what came before its break,
+  unchecked; the rest is lost for now. Building needs Rust 1.87.
 - Small files and repetitive data packed into one Deflate block are rescued honestly: zeros (or
   the 0xFF of erased flash) inside a block mark where its damage begins, so what came before them
   is exact and the rest flagged, and a one-block stream whose CRC fails though it decoded in

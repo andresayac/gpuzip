@@ -63,7 +63,8 @@ directory at the end, and gives each its own CRC. gpuzip reads the directory if 
 the whole file for local headers (skipping those of ZIPs stored inside entries, such as wheels),
 so entries the directory does not vouch for, or that an interrupted download cut off from it,
 are found too; every entry is recovered, stored ones by copying, Deflate ones through gzrescue,
-and its own CRC says whether it is intact. A destroyed local header is worked around with the
+bzip2, LZMA, Zstandard and Deflate64 ones with their own decoders (a damaged one up to where it
+breaks: those decoders do not go on past damage), and its own CRC says whether it is intact. A destroyed local header is worked around with the
 directory's metadata and the CRC: of the places its data may start at, the one where a Deflate
 stream begins, or else whose data ends where the next header begins, is rescued. On a 17 MB ZIP of 3,447 Python source files: with the
 directory zeroed, 3,390 entries intact and 1 cut short; with a 4 KB stretch zeroed inside,

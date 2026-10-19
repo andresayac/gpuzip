@@ -9,12 +9,11 @@ So:
 
 | Data | Where it is decoded |
 |---|---|
-| ZIP: Deflate, small | GPU with nvCOMP, in batches of up to 256 MB (Python `auto` mode: 64 MB) |
-| ZIP: Deflate, large | CPU threads (Rust: libdeflate · Python: zlib-ng), or in Rust gpuinflate when that is faster (below) |
+| ZIP: Deflate, small | GPU with nvCOMP, in batches of up to 256 MB |
+| ZIP: Deflate, large | CPU threads (libdeflate), or gpuinflate when that is faster (below) |
 | ZIP: stored | CPU threads |
-| ZIP: bzip2, LZMA, Zstandard | Python: CPU threads · Rust: 7-Zip |
-| ZIP: encrypted, Deflate64, PPMd | 7-Zip |
-| `.gz`, `.tar.gz`, `.tgz` | Rust: each member on gpuinflate (8 MB or more) or one CPU thread (zlib-rs) · Python: 7-Zip |
+| ZIP: bzip2, LZMA, Zstandard, Deflate64, encrypted, PPMd | 7-Zip (`rescue` reads bzip2, LZMA, Zstandard and Deflate64 itself) |
+| `.gz`, `.tar.gz`, `.tgz` | each member on gpuinflate (8 MB or more) or one CPU thread (zlib-rs) |
 | Whole RAR, 7z, other tar.*, ... archives | 7-Zip |
 
 In `auto` mode nvCOMP takes the smallest Deflate entries and the CPU threads take the largest,
