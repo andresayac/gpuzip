@@ -921,8 +921,10 @@ def main():
     real, later = b"the real file\n", b"named before it came\n"
     ok = r.returncode == 0 and reads == {"lib/alias.txt": real, "inc/real.txt": real, "a/b/up/real.txt": real, "alias2": real, "early": later}
     if os.name == "nt":
-        ok = ok and any("hard link" in n for n in notes) and any("leading out" in n and "out" in n for n in notes) \
-            and not os.path.exists(os.path.join(out, "out"))
+        # real links where Windows lets (an administrator: CI), else hard links and copies, said in a note
+        made_real = os.path.islink(os.path.join(out, "lib", "alias.txt"))
+        ok = ok and (made_real or any("hard link" in n for n in notes)) and any("leading out" in n for n in notes) \
+            and not os.path.lexists(os.path.join(out, "out"))
     lib_time = os.path.getmtime(os.path.join(out, "lib"))
     ok = ok and abs(lib_time - (1700000000 - 86400)) < 2  # a folder's time, given once its files are written
     failures += not ok
