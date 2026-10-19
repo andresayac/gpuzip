@@ -9,7 +9,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # by hand, on every runner below or on one alone: windows-2022 (Windows Server 2022, of
+  # Windows 10's generation) still takes CON, AUX, COM1... for devices, as Windows 10 does and
+  # Windows 11 no longer does
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "One runner alone (e.g. windows-2022); empty: all"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -22,7 +30,7 @@ jobs:
       matrix:
         # Ubuntu named, not ubuntu-latest: that moves to 26.04 from 2026-10-19, and a new image is
         # taken on when it has been tried, not on GitHub's date
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: ${{ fromJSON(inputs.runner && format('["{0}"]', inputs.runner) || '["ubuntu-24.04", "macos-latest", "windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -87,6 +95,7 @@ jobs:
 
   gpuinflate-linux:
     name: gpuinflate builds on Linux (nvcc)
+    if: ${{ !inputs.runner }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5

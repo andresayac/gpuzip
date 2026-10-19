@@ -538,6 +538,7 @@ fn rescue_one(path: &str, out_root: PathBuf, fill: u8, opts: &Opts) -> i32 {
         failed.extend(t.failed.iter().cloned());
         report.notes.extend(zip::device_note(&t.renamed));
         report.notes.extend(gz::case_note(&t.case_pairs));
+        report.notes.extend(t.link_notes.iter().cloned());
         // a checksum failure with no block to blame: the damage is somewhere no decoder can see
         // it (raw stored data, a flipped bit that stayed in step), so no file can be vouched for
         if report.stats.crc_check == 0 && report.stats.damaged == 0 {

@@ -584,6 +584,8 @@ def main():
                          and i.header_offset + 30 + len(i.filename.encode()) + len(i.extra) + i.compress_size <= cut)
     cases = {
         "cut at 70%": (data[:cut], before_cut),
+        # a self-extractor's stub, or another file's bytes, before it: no signature at the start
+        "1 MB of other bytes before it, cut at 70%": (random.Random(5).randbytes(1 << 20) + data[:cut], before_cut),
         "directory zeroed": (data[: int(len(data) * 0.97)] + bytes(len(data) - int(len(data) * 0.97)), int(0.6 * len(files))),
         "4 KB zeroed inside": (data[: len(data) // 2] + bytes(4096) + data[len(data) // 2 + 4096:], int(0.6 * len(files))),
     }
@@ -698,6 +700,61 @@ def main():
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} rescue of a zip with names not flagged UTF-8, {label}: {len(back)} of 2 back under their names"
               + ("" if ok else f"; got {ascii(sorted(status))}, {ascii([v[1] for v in status.values()])}"))
+
+    # one name, two spellings: each local header in CP437 with Info-ZIP's Unicode Path field, the
+    # directory in UTF-8 (flagged). Header and entry are one entry: a sound archive comes back
+    # clean, and with bytes written twice (a bad resume) no copy is written over an intact file
+    def two_spellings(entries):
+        body, cd = b"", b""
+        for name, data in entries:
+            local, utf8 = name.encode("cp437"), name.encode("utf-8")
+            up = struct.pack("<HHB", 0x7075, 5 + len(utf8), 1) + struct.pack("<I", zlib.crc32(local)) + utf8
+            c = zlib.compressobj(6, zlib.DEFLATED, -15)
+            comp = c.compress(data) + c.flush()
+            crc, at = zlib.crc32(data), len(body)
+            body += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0, 8, 0, 0x5821, crc, len(comp), len(data), len(local), len(up)) + local + up + comp
+            cd += struct.pack("<IBBHHHHHIIIHHHHHII", 0x02014B50, 20, 0, 20, 0x800, 8, 0, 0x5821, crc, len(comp), len(data),
+                              len(utf8), len(up), 0, 0, 0, 0, at) + utf8 + up
+        return body, cd + struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(cd), len(body), 0)
+    spelled = [(f"data/año/f{i}.txt", f"{i} ".encode() * (3000 + 500 * i)) for i in range(6)]
+    body, tail = two_spellings(spelled)
+    third = body.find(b"PK\x03\x04", body.find(b"PK\x03\x04", 1) + 1)
+    for label, damaged, want_clean in (("sound", body + tail, True),
+                                       ("bytes written twice before its third entry", body[:third] + body[third - 3000:] + tail, None)):
+        bad = os.path.join(work, "spellings.zip")
+        open(bad, "wb").write(damaged)
+        out = os.path.join(work, "rescued_spellings")
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            rep = {}
+        intact = sum(1 for e in rep.get("entries", []) if e["status"] == "intact" and "destroyed" not in e.get("detail", ""))
+        right = sum(1 for n, d in spelled if os.path.exists(os.path.join(out, n)) and open(os.path.join(out, n), "rb").read() == d)
+        ok = right == len(spelled) and intact == len(spelled) and len(rep.get("entries", [])) == len(spelled) and (want_clean is None or rep.get("clean") is want_clean)
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} rescue of a zip whose headers spell its names otherwise than its directory, {label}: "
+              f"{right} of {len(spelled)} right on disk, {intact} intact from their own header, {len(rep.get('entries', []))} entries, clean {rep.get('clean')}, exit {r.returncode}")
+    # two entries of one name, the second damaged: the first's file, intact, is not written over
+    first, second = filler[:60000], filler[60000:120000]
+    zdata = bytearray(raw_zip([(b"dup.txt", 0, first), (b"dup.txt", 0, second)]))
+    at = zdata.find(b"dup.txt", zdata.find(b"dup.txt") + 1) + 7 + 2000  # inside the second's data
+    zdata[at:at + 64] = bytes(64)
+    bad = os.path.join(work, "dup.zip")
+    open(bad, "wb").write(bytes(zdata))
+    out = os.path.join(work, "rescued_dup")
+    shutil.rmtree(out, ignore_errors=True)
+    r = subprocess.run([*GPUZIP, "rescue", bad, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+    try:
+        rep = json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        rep = {}
+    statuses = [e["status"] for e in rep.get("entries", [])]
+    kept = os.path.exists(os.path.join(out, "dup.txt")) and open(os.path.join(out, "dup.txt"), "rb").read() == first
+    ok = statuses[:1] == ["intact"] and len(statuses) == 2 and statuses[1] != "intact" and kept
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} rescue of two entries of one name, the second damaged: {statuses}, the intact one kept on disk {kept}")
 
     # names from a Windows in another language say no code page, and are written in that Windows'
     # OEM one: read in another they come out garbled, so gpuzip reads them in this system's (as
@@ -855,19 +912,20 @@ def main():
     order_tgz = os.path.join(work, "order.tar.gz")
     open(order_tgz, "wb").write(gzip.compress(buf.getvalue(), 6, mtime=0))
     out = os.path.join(work, "order_out")
-    shutil.rmtree(out, ignore_errors=True)
-    r = subprocess.run([*GPUZIP, "x", order_tgz, "-o", out], capture_output=True, text=True)
-    want = {name: data for name, data in entries}  # the last copy of each
-    if os.name == "nt" or sys.platform == "darwin":
-        want.pop("Case.txt")
-        case_file = next((n for n in os.listdir(out) if n.lower() == "case.txt"), "case.txt")
-        want[case_file] = b"lower last\n"
-    want["hard.txt"] = want["target.txt"]
-    wrong = [n for n, d in want.items() if not os.path.isfile(os.path.join(out, n)) or open(os.path.join(out, n), "rb").read() != d]
-    ok = r.returncode == 0 and not wrong
-    failures += not ok
-    print(f"{'ok  ' if ok else 'FAIL'} x of a tar.gz whose paths repeat, with a hard link: {len(want) - len(wrong)} of {len(want)} files right, "
-          f"exit {r.returncode}" + (f"; WRONG: {wrong[:5]} {r.stderr.strip()[-200:]}" if wrong else ""))
+    for cmd in ("x", "rescue"):
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, cmd, order_tgz, "-o", out], capture_output=True, text=True)
+        want = {name: data for name, data in entries}  # the last copy of each
+        if os.name == "nt" or sys.platform == "darwin":
+            want.pop("Case.txt")
+            case_file = next((n for n in os.listdir(out) if n.lower() == "case.txt"), "case.txt")
+            want[case_file] = b"lower last\n"
+        want["hard.txt"] = want["target.txt"]
+        wrong = [n for n, d in want.items() if not os.path.isfile(os.path.join(out, n)) or open(os.path.join(out, n), "rb").read() != d]
+        ok = r.returncode == 0 and not wrong
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {cmd} of a tar.gz whose paths repeat, with a hard link: {len(want) - len(wrong)} of {len(want)} files right, "
+              f"exit {r.returncode}" + (f"; WRONG: {wrong[:5]} {r.stderr.strip()[-200:]}" if wrong else ""))
     shutil.rmtree(out, ignore_errors=True)
 
     # rescue reads bzip2, LZMA, Zstandard and Deflate64 entries too, their CRC the judge: a sound
@@ -1053,27 +1111,29 @@ def main():
     links_tgz = os.path.join(work, "links.tar.gz")
     open(links_tgz, "wb").write(gzip.compress(buf.getvalue(), 6, mtime=0))
     out = os.path.join(work, "links_out")
-    shutil.rmtree(out, ignore_errors=True)
-    r = subprocess.run([*GPUZIP, "x", links_tgz, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
-    try:
-        notes = json.loads(r.stdout.strip().splitlines()[-1]).get("notes", [])
-    except (json.JSONDecodeError, IndexError):
-        notes = []
-    reads = {p: open(os.path.join(out, p), "rb").read() if os.path.isfile(os.path.join(out, p)) else None
-             for p in ("lib/alias.txt", "inc/real.txt", "a/b/up/real.txt", "alias2", "early")}
-    real, later = b"the real file\n", b"named before it came\n"
-    ok = r.returncode == 0 and reads == {"lib/alias.txt": real, "inc/real.txt": real, "a/b/up/real.txt": real, "alias2": real, "early": later}
-    if os.name == "nt":
-        # real links where Windows lets (an administrator: CI), else hard links and copies, said in a note
-        made_real = os.path.islink(os.path.join(out, "lib", "alias.txt"))
-        ok = ok and (made_real or any("hard link" in n for n in notes)) and any("leading out" in n for n in notes) \
-            and not os.path.lexists(os.path.join(out, "out"))
-    lib_time = os.path.getmtime(os.path.join(out, "lib"))
-    ok = ok and abs(lib_time - (1700000000 - 86400)) < 2  # a folder's time, given once its files are written
-    failures += not ok
-    print(f"{'ok  ' if ok else 'FAIL'} x of a tar.gz with symbolic links: {sum(v is not None for v in reads.values())} of 5 read through, "
-          f"folder time {'kept' if abs(lib_time - (1700000000 - 86400)) < 2 else 'LOST'}, exit {r.returncode}"
-          + ("" if ok else f"; {ascii(reads)} {ascii(notes)}"))
+    for cmd in ("x", "rescue"):  # a rescue made no link at all once (linux-6.6.tar.gz: 63 lost, with no note)
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run([*GPUZIP, cmd, links_tgz, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+        try:
+            notes = json.loads(r.stdout.strip().splitlines()[-1]).get("notes", [])
+        except (json.JSONDecodeError, IndexError):
+            notes = []
+        reads = {p: open(os.path.join(out, p), "rb").read() if os.path.isfile(os.path.join(out, p)) else None
+                 for p in ("lib/alias.txt", "inc/real.txt", "a/b/up/real.txt", "alias2", "early")}
+        real, later = b"the real file\n", b"named before it came\n"
+        ok = r.returncode == 0 and reads == {"lib/alias.txt": real, "inc/real.txt": real, "a/b/up/real.txt": real, "alias2": real, "early": later}
+        if os.name == "nt" or cmd == "rescue":
+            # real links where Windows lets (an administrator: CI), else hard links and copies, said in a note
+            made_real = os.path.islink(os.path.join(out, "lib", "alias.txt"))
+            ok = ok and (made_real or any("hard link" in n for n in notes)) and any("leading out" in n for n in notes) \
+                and not os.path.lexists(os.path.join(out, "out"))
+        lib_time = os.path.getmtime(os.path.join(out, "lib"))
+        if cmd == "x":
+            ok = ok and abs(lib_time - (1700000000 - 86400)) < 2  # a folder's time, given once its files are written
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {cmd} of a tar.gz with symbolic links: {sum(v is not None for v in reads.values())} of 5 read through, "
+              + (f"folder time {'kept' if abs(lib_time - (1700000000 - 86400)) < 2 else 'LOST'}, " if cmd == "x" else "")
+              + f"exit {r.returncode}" + ("" if ok else f"; {ascii(reads)} {ascii(notes)}"))
     shutil.rmtree(out, ignore_errors=True)
 
     # a ZIP's exact times: Info-ZIP's extended timestamp (UTC seconds) and NTFS's (100 ns), over

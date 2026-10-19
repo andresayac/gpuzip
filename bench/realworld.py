@@ -293,13 +293,17 @@ def rescue_matrix(archives, bins, work, cache_path, only=None):
                 got = tree(out) if os.path.isdir(out) else {}
                 identical = sum(1 for f, h in ref.items() if got.get(f) == h)
                 if k == "zip":
-                    status = {e["name"]: e["status"] for e in rep.get("entries", [])}
+                    # every entry's status: two of one name must not hide an intact one whose file is wrong
+                    statuses = {}
+                    for e in rep.get("entries", []):
+                        statuses.setdefault(e["name"], []).append(e["status"])
+                    status = {f: "intact" if "intact" in s else s[-1] for f, s in statuses.items()}
                     silent = sum(1 for f, h in ref.items() if status.get(f) == "intact" and got.get(f) != h)
                     # an entry found by scanning may come out under another name than the reference's:
                     # still a silent error if what it holds is no file of the archive
                     contents = set(ref.values())
                     silent += sum(1 for f, s in status.items() if s == "intact" and f not in ref and got.get(f) not in contents)
-                    called = sum(1 for s in status.values() if s == "intact")
+                    called = sum(s.count("intact") for s in statuses.values())
                 else:
                     t = rep.get("tar") or {}
                     flagged = set(t.get("inferred", [])) | set(t.get("suspect", [])) | set(t.get("partial", []))

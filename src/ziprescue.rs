@@ -58,6 +58,8 @@ pub struct Outcome {
     pub shared: usize,
     /// local headers found only by scanning, inside an intact entry's data: not entries
     pub inside: usize,
+    /// entries not written over a file of the same name that an earlier entry gave back intact
+    pub kept_intact: usize,
 }
 
 #[derive(Default)]
@@ -237,24 +239,33 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
     let mut covered: Vec<usize> = Vec::new(); // local header offsets the directory's entries took
     // the scanned headers by name: when bytes were inserted or lost before an entry, the offset
     // the directory gives is off, but the entry's own local header is still there, elsewhere
+    // A header and its directory entry are matched on the name's bytes, or on the name they
+    // decode to: decoding can tell a name apart from its own header (one flagged UTF-8, the other
+    // not), and the bytes can differ for one name (a header in CP437 with Info-ZIP's Unicode Path
+    // field, the directory in UTF-8: every such entry of a sound archive was rescued as if its
+    // header were destroyed, partial, and its header, left over, as another entry of that name)
     let mut by_name: std::collections::HashMap<&[u8], Vec<&Local>> = std::collections::HashMap::new();
+    let mut by_decoded: std::collections::HashMap<&str, Vec<&Local>> = std::collections::HashMap::new();
     for l in &locals {
         by_name.entry(l.raw_name.as_slice()).or_default().push(l);
+        if l.name.as_bytes() != l.raw_name.as_slice() {
+            by_decoded.entry(l.name.as_str()).or_default().push(l);
+        }
     }
     match zip::read_central_directory(data, true) {
         Ok(cd) => {
             o.cd_ok = true;
             for e in &cd {
                 let at = e.data_offset as usize; // the local header, as the directory says
-                // matched on the name's bytes: decoding can tell a name apart from its own header
-                let local = by_offset.get(&at).copied().filter(|l| l.raw_name == e.raw_name).or_else(|| {
+                let local = by_offset.get(&at).copied().filter(|l| l.raw_name == e.raw_name || l.name == e.name).or_else(|| {
                     // the same name, the same CRC when the header has one, nearest the expected place
-                    by_name.get(e.raw_name.as_slice()).and_then(|v| {
-                        v.iter()
-                            .filter(|l| !covered.contains(&l.offset) && (l.crc == e.crc || (l.flags & 8 != 0 && l.crc == 0)))
-                            .min_by_key(|l| (l.offset as i64 - at as i64).unsigned_abs())
-                            .copied()
-                    })
+                    let named = by_name.get(e.raw_name.as_slice()).into_iter().flatten();
+                    let decoded = by_decoded.get(e.name.as_str()).into_iter().flatten();
+                    named
+                        .chain(decoded)
+                        .filter(|l| !covered.contains(&l.offset) && (l.crc == e.crc || (l.flags & 8 != 0 && l.crc == 0)))
+                        .min_by_key(|l| (l.offset as i64 - at as i64).unsigned_abs())
+                        .copied()
                 });
                 if let Some(l) = local {
                     if l.offset != at {
@@ -293,11 +304,12 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
         }
     }
     let cd_names: std::collections::HashSet<Vec<u8>> = tasks.iter().map(|t| t.raw_name.clone()).collect();
+    let cd_decoded: std::collections::HashSet<String> = tasks.iter().map(|t| t.name.clone()).collect();
     // entries only the scan knows
     for l in &locals {
         // a header the directory took, or a second copy of a name the directory has (bytes
         // written twice by a bad resume): skip
-        if covered.contains(&l.offset) || cd_names.contains(&l.raw_name) {
+        if covered.contains(&l.offset) || cd_names.contains(&l.raw_name) || cd_decoded.contains(&l.name) {
             continue;
         }
         let bit3 = l.flags & 8 != 0;
@@ -336,6 +348,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
     // (crosslinked: one of lib.zip's in the pptx, over the places of three of its entries). The
     // tasks go in the order of their headers, so the farthest reach is enough.
     let mut reach: (usize, String) = (0, String::new());
+    let mut intact_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     // The data of the directory's entries whose own local header was found, up to the next one's
     // header at most (bytes lost before it make the size reach past): a header only the scan
     // found in there is part of that entry (an archive stored in it, or a .jar in a tar that
@@ -438,9 +451,18 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
             if !detail.is_empty() {
                 rec.detail = if rec.detail.is_empty() { detail } else { format!("{}; {detail}", rec.detail) };
             }
-            if status != Status::Lost {
+            if status != Status::Lost && status != Status::Intact && intact_names.contains(&t.name) {
+                // two entries of one name (bytes written twice, a header matched to no entry):
+                // what one gave back intact is not written over
+                let why = "not written: an entry of the same name came out intact";
+                rec.detail = if rec.detail.is_empty() { why.into() } else { format!("{}; {why}", rec.detail) };
+                o.kept_intact += 1;
+            } else if status != Status::Lost {
                 if let Err(e) = write_file(root, &t.name, &bytes, t.dos_time, t.dos_date, t.unix_mode) {
                     o.failed.push((t.name.clone(), e));
+                }
+                if status == Status::Intact {
+                    intact_names.insert(t.name.clone());
                 }
                 if office && keep_parts {
                     rec.office_part = Some(bytes);
@@ -455,6 +477,13 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
              (no two entries share data; a zip bomb's do, and a directory whose offsets are off points into others)",
             o.shared,
             if o.shared == 1 { "y" } else { "ies" }
+        ));
+    }
+    if o.kept_intact > 0 {
+        o.notes.push(format!(
+            "{} entr{} not written over a file of the same name that another entry gave back intact",
+            o.kept_intact,
+            if o.kept_intact == 1 { "y" } else { "ies" }
         ));
     }
     if o.inside > 0 {
@@ -1688,9 +1717,30 @@ pub fn is_office_name(path: &str) -> bool {
 }
 
 /// It starts like a ZIP, or holds a central directory somewhere
+/// A ZIP: it starts with a ZIP signature, or the end of its directory is there, or a local
+/// header's data ends where the next local header or the directory begins (looked for in the
+/// first 256 MB): a ZIP with something before it, a self-extractor's stub or another file's
+/// bytes, cut short so that its directory is gone. Such a one was rescued as a lone Deflate
+/// stream, no file back (make_realworld.py's py_prepended.zip, 1 MB before it, cut: 0 of 428).
 pub fn looks_like_zip(data: &[u8]) -> bool {
-    (data.len() >= 4 && data[0] == b'P' && data[1] == b'K' && (data[2] == 3 || data[2] == 5 || data[2] == 7))
+    if (data.len() >= 4 && data[0] == b'P' && data[1] == b'K' && (data[2] == 3 || data[2] == 5 || data[2] == 7))
         || zip::find_eocd(data).is_some()
+    {
+        return true;
+    }
+    let end = data.len().min(256 << 20);
+    let mut i = 0;
+    while let Some(p) = data[i..end].windows(4).position(|w| w == b"PK\x03\x04") {
+        let at = i + p;
+        if let Some(l) = parse_local(data, at) {
+            let next = l.data_offset + l.csize as usize;
+            if l.flags & 8 == 0 && l.csize > 0 && next + 4 <= data.len() && matches!(u32le(data, next), 0x0403_4b50 | 0x0201_4b50) {
+                return true;
+            }
+        }
+        i = at + 1;
+    }
+    false
 }
 
 #[cfg(test)]

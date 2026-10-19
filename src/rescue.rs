@@ -368,6 +368,8 @@ pub struct TarOutcome {
     /// files whose names differ only in case from one before, where names ignore case: (the
     /// one before, the one written over it)
     pub case_pairs: Vec<(String, String)>,
+    /// what became of the links: those not made as such, or not made
+    pub link_notes: Vec<String>,
 }
 
 fn octal(field: &[u8]) -> Option<u64> {
@@ -448,6 +450,10 @@ pub struct TarReader<'a> {
     long_name: Option<String>,
     pax_path: Option<String>,
     pax_size: Option<u64>,
+    long_link: Option<String>, // GNU's long link name ('K') for the next header
+    pax_link: Option<String>,  // pax linkpath
+    // the links, made once every file is written: (name, what it names, a hard link)
+    links: Vec<(String, String, bool)>,
     last_valid: Option<[u8; 512]>,
     // the last regular file: its name, status and where the header after it must be
     prev_file: Option<(String, u8, u64)>,
@@ -469,6 +475,9 @@ impl<'a> TarReader<'a> {
             long_name: None,
             pax_path: None,
             pax_size: None,
+            long_link: None,
+            pax_link: None,
+            links: Vec::new(),
             last_valid: None,
             prev_file: None,
             by_case: std::collections::HashMap::new(),
@@ -498,7 +507,51 @@ impl<'a> TarReader<'a> {
     /// The end of the tar
     pub fn finish(mut self) -> TarOutcome {
         self.run(true);
+        if let (Some(r), false) = (self.root, self.links.is_empty()) {
+            self.make_root();
+            self.make_links(r);
+        }
         self.o
+    }
+
+    /// The tar's links, now that what they name is written: hard links first (a member of the
+    /// archive, by its path from the archive's root), then symbolic ones as `x` makes them
+    /// (gz::make_links). They were not written at all, and nothing said so: linux-6.6.tar.gz,
+    /// rescued sound, came back without its 63 links.
+    fn make_links(&mut self, root: &Path) {
+        let Ok(canon_root) = root.canonicalize() else { return };
+        let (mut symbolic, mut lost) = (Vec::new(), Vec::new());
+        for (name, target, hard) in std::mem::take(&mut self.links) {
+            let Some(rel) = zip::safe_relpath(&name) else {
+                self.o.failed.push((name, "path leaves the output folder; skipped".into()));
+                continue;
+            };
+            if !hard {
+                symbolic.push((name, rel, PathBuf::from(target)));
+                continue;
+            }
+            let dst = root.join(&rel);
+            let made = zip::safe_relpath(&target).map(|t| root.join(t)).is_some_and(|src| {
+                src.is_file()
+                    && dst.symlink_metadata().is_err()
+                    && dst.parent().is_none_or(|d| std::fs::create_dir_all(d).is_ok())
+                    && (std::fs::hard_link(&src, &dst).is_ok() || std::fs::copy(&src, &dst).is_ok())
+            });
+            if !made {
+                lost.push(name);
+            }
+        }
+        if !lost.is_empty() {
+            let shown = lost.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            self.o.link_notes.push(format!(
+                "{} hard link{} naming no file written here (or whose name a file took), not made: {shown}{}",
+                lost.len(),
+                if lost.len() == 1 { "" } else { "s" },
+                if lost.len() > 5 { ", ..." } else { "" }
+            ));
+        }
+        let budget = self.o.bytes.max(64 << 20);
+        self.o.link_notes.extend(crate::gz::make_links(root, &canon_root, symbolic, budget));
     }
 
     fn end(&self) -> u64 {
@@ -633,8 +686,15 @@ impl<'a> TarReader<'a> {
                 if prefix.is_empty() { base } else { format!("{prefix}/{base}") }
             });
             name = name.replace('\\', "/");
+            let link = self.pax_link.take().or_else(|| self.long_link.take());
             let body = match typeflag {
-                b'L' | b'x' => Body::Meta { typeflag, buf: Vec::new() },
+                b'L' | b'K' | b'x' => Body::Meta { typeflag, buf: Vec::new() },
+                b'1' | b'2' => {
+                    if self.root.is_some() {
+                        self.links.push((name.clone(), link.unwrap_or_else(|| field_str(&h[157..257])), typeflag == b'1'));
+                    }
+                    Body::Skip
+                }
                 b'5' => {
                     if let (Some(r), Some(rel)) = (self.root, zip::safe_relpath(&name)) {
                         self.make_root();
@@ -740,6 +800,7 @@ impl<'a> TarReader<'a> {
                 }
             }
             Body::Meta { typeflag: b'L', buf } => self.long_name = Some(field_str(&buf)), // GNU long name
+            Body::Meta { typeflag: b'K', buf } => self.long_link = Some(field_str(&buf)), // GNU long link name
             Body::Meta { buf, .. } => {
                 // pax: "<len> key=value\n" records for the next header
                 let mut p = 0;
@@ -755,6 +816,7 @@ impl<'a> TarReader<'a> {
                         let (k, v) = (&kv[..eq], String::from_utf8_lossy(&kv[eq + 1..]).into_owned());
                         match k {
                             b"path" => self.pax_path = Some(v),
+                            b"linkpath" => self.pax_link = Some(v),
                             b"size" => self.pax_size = v.parse().ok(),
                             _ => {}
                         }

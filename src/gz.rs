@@ -460,17 +460,19 @@ impl TarWriters {
     }
 }
 
-/// Windows: a tar's symbolic links, made once what they name is written. Windows makes real
-/// ones only for an administrator or in Developer Mode (else error 1314: 63 links of
-/// linux-6.6.tar.gz failed so). Then a link to a file is written as a hard link to it, which
-/// needs no privilege, or a copy; a link to a folder as a copy of it, all copies within
-/// `budget` bytes (the archive's own files, 64 MB at least: links cannot make an extraction
-/// much more than twice as large). A link that leads out of the output folder, names nothing, or whose name a file
-/// or folder of the archive already took, is not made. Returns the notes that say so.
-#[cfg(windows)]
-fn make_links(root: &Path, canon_root: &Path, links: Vec<(String, PathBuf, PathBuf)>, mut budget: u64) -> Vec<String> {
+/// A tar's symbolic links, made once what they name is written: on Windows for `x` (elsewhere the
+/// tar crate makes them as it unpacks), everywhere for a rescue. Windows makes real ones only for
+/// an administrator or in Developer Mode (else error 1314: 63 links of linux-6.6.tar.gz failed
+/// so). Then a link to a file is written as a hard link to it, which needs no privilege, or a
+/// copy; a link to a folder as a copy of it, all copies within `budget` bytes (the archive's own
+/// files, 64 MB at least: links cannot make an extraction much more than twice as large). A link
+/// that leads out of the output folder, names nothing (on Windows; elsewhere a link may), or whose
+/// name a file or folder of the archive already took, is not made. Returns the notes that say so.
+#[allow(unused_mut)] // each system fills only some of the lists
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub(crate) fn make_links(root: &Path, canon_root: &Path, links: Vec<(String, PathBuf, PathBuf)>, mut budget: u64) -> Vec<String> {
     let (mut real, mut hard, mut copies) = (0usize, 0usize, 0usize);
-    let (mut outside, mut taken, mut too_big) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut outside, mut taken, mut too_big, mut unmade) = (Vec::new(), Vec::new(), Vec::new(), Vec::<String>::new());
     let mut pending = links;
     // a link may name another link: what it names is made on a later round
     loop {
@@ -494,33 +496,49 @@ fn make_links(root: &Path, canon_root: &Path, links: Vec<(String, PathBuf, PathB
                 outside.push(name);
                 continue;
             }
-            let Ok(canon) = dst.parent().unwrap_or(root).join(&target).canonicalize() else {
-                left.push((name, rel, target));
-                continue;
-            };
-            // a real link's target with \ only: Windows does not take / for one in a relative
-            // target, and such a link leads nowhere (CI: lib/alias.txt and ../../lib did)
-            let target = PathBuf::from(target.to_string_lossy().replace('/', "\\"));
-            if !canon.starts_with(canon_root) || make_dirs_inside(canon_root, dst.parent().unwrap_or(root)).is_err() {
-                outside.push(name);
-            } else if dst.symlink_metadata().is_ok() {
-                taken.push(name);
-            } else if canon.is_dir() {
-                if std::os::windows::fs::symlink_dir(&target, &dst).is_ok() {
+            #[cfg(not(windows))]
+            {
+                if make_dirs_inside(canon_root, dst.parent().unwrap_or(root)).is_err() {
+                    outside.push(name);
+                } else if dst.symlink_metadata().is_ok() {
+                    taken.push(name);
+                } else if std::os::unix::fs::symlink(&target, &dst).is_ok() {
                     real += 1;
+                } else {
+                    unmade.push(name);
+                }
+                continue;
+            }
+            #[cfg(windows)]
+            {
+                let Ok(canon) = dst.parent().unwrap_or(root).join(&target).canonicalize() else {
+                    left.push((name, rel, target));
+                    continue;
+                };
+                // a real link's target with \ only: Windows does not take / for one in a relative
+                // target, and such a link leads nowhere (CI: lib/alias.txt and ../../lib did)
+                let target = PathBuf::from(target.to_string_lossy().replace('/', "\\"));
+                if !canon.starts_with(canon_root) || make_dirs_inside(canon_root, dst.parent().unwrap_or(root)).is_err() {
+                    outside.push(name);
+                } else if dst.symlink_metadata().is_ok() {
+                    taken.push(name);
+                } else if canon.is_dir() {
+                    if std::os::windows::fs::symlink_dir(&target, &dst).is_ok() {
+                        real += 1;
+                    } else if copy_tree(&canon, &dst, &mut budget) {
+                        copies += 1;
+                    } else {
+                        too_big.push(name);
+                    }
+                } else if std::os::windows::fs::symlink_file(&target, &dst).is_ok() {
+                    real += 1;
+                } else if std::fs::hard_link(&canon, &dst).is_ok() {
+                    hard += 1;
                 } else if copy_tree(&canon, &dst, &mut budget) {
                     copies += 1;
                 } else {
                     too_big.push(name);
                 }
-            } else if std::os::windows::fs::symlink_file(&target, &dst).is_ok() {
-                real += 1;
-            } else if std::fs::hard_link(&canon, &dst).is_ok() {
-                hard += 1;
-            } else if copy_tree(&canon, &dst, &mut budget) {
-                copies += 1;
-            } else {
-                too_big.push(name);
             }
         }
         if left.is_empty() || left.len() == before {
@@ -548,6 +566,7 @@ fn make_links(root: &Path, canon_root: &Path, links: Vec<(String, PathBuf, PathB
         (&nothing, "naming nothing the archive holds"),
         (&taken, "whose name a file or folder of the archive took"),
         (&too_big, "whose copies would pass the size of the archive's own files (64 MB at least)"),
+        (&unmade, "the system would not make"),
     ] {
         if !v.is_empty() {
             notes.push(format!("{} {what}, not made: {}", count(v.len(), "link", "links"), list(v)));
