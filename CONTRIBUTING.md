@@ -29,7 +29,10 @@ python tests/test_gpuzip.py         # the build in rust/target/release (GPUZIP_B
 `tests/test_gpuzip.py` packs a folder with 7-Zip, Python and the system's own tool, extracts it
 in every mode and compares every byte and timestamp, then damages archives and checks what
 `gpuzip rescue` gives back. Without a GPU the gpu modes are skipped; CI runs everything else on
-Windows, Linux and macOS for every pull request.
+Windows, Linux and macOS for every pull request. After a change to gzrescue
+(`gpuinflate/rescue.cpp`), run it with `GPUZIP_FULL_SWEEP=1` too: a tar.gz holding a .gz is then
+rescued at 120 places instead of 30, which catches the rarer ways a .gz inside can be taken for
+the stream around it (about 40 s more).
 
 Before a release, or after a change to how archives are read or written, run the real-world
 campaign in [docs/testing.md](docs/testing.md): public and generated archives against 7-Zip,

@@ -477,17 +477,20 @@ def main():
                   f"{intact} called intact, {unverified} unverifiable, {rep.get('damaged_blocks', '?')} damaged blocks, exit {r.returncode}"
                   + (f"; CALLED INTACT BUT WRONG: {intact_wrong[:3]}" if intact_wrong else ""))
 
-    # the same .gz inside, undamaged, at 120 places in the tar: whether its block headers, found in
-    # the outer stream's stored blocks, were taken for the stream's own hung on where the blocks
+    # the same .gz inside, undamaged, at many places in the tar: whether its block headers, found
+    # in the outer stream's stored blocks, were taken for the stream's own hung on where the blocks
     # fell (the archive above failed so on CI after an edit to this file changed its text; before
     # the fix, 8 of 200 such places flagged with zlib, 15 with zlib-ng; after it, 1 of 120 with
-    # zlib-ng, a header found in a stored block's length field). None may be: 120 places miss
-    # that regression less than once in a hundred runs, in about 50 s
+    # zlib-ng, a header found in a stored block's length field). None may be. 30 places by default
+    # (about 12 s; they would miss the first regression about once in four runs); with
+    # GPUZIP_FULL_SWEEP=1, 120 (about 50 s: less than once in a hundred), what to run before a
+    # change to gzrescue goes out
+    places = 120 if os.environ.get("GPUZIP_FULL_SWEEP") else 30
     text = repo_text()
     c = zlib.compressobj(6, zlib.DEFLATED, 31, 1)
     inner = c.compress(b"".join(text.values())) + c.flush()
     flagged_at = []
-    for v in range(120):
+    for v in range(places):
         files = {"pad.bin": random.Random(v).randbytes(v * 1531), **{f"a/{k}": d for k, d in text.items()},
                  "inner.txt.gz": inner, **{f"b/{k}": d for k, d in text.items()}}
         p = os.path.join(work, "shifted.tar.gz")
@@ -502,8 +505,9 @@ def main():
         if r.returncode != 0 or rep.get("damaged_blocks") != 0 or (rep.get("tar") or {}).get("intact") != len(files):
             flagged_at.append(v)
     failures += bool(flagged_at)
-    print(f"{'ok  ' if not flagged_at else 'FAIL'} rescue of 120 undamaged tar.gz files with a .gz inside at different places: "
-          f"{120 - len(flagged_at)} clean" + (f"; FLAGGED AS DAMAGED: variants {flagged_at[:5]}" if flagged_at else ""))
+    print(f"{'ok  ' if not flagged_at else 'FAIL'} rescue of {places} undamaged tar.gz files with a .gz inside at different places: "
+          f"{places - len(flagged_at)} clean" + (f"; FLAGGED AS DAMAGED: variants {flagged_at[:5]}" if flagged_at else "")
+          + ("" if places == 120 else " (GPUZIP_FULL_SWEEP=1: 120)"))
 
     # rescue of gzip files of one Deflate block: a small text, and repetitive data that
     # packs megabytes into one block, with zeros written over the middle. Zeros decode as valid
