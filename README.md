@@ -78,11 +78,87 @@ CPU threads it turns it on). All the numbers and how to reproduce them:
 
 ## Install
 
-Download the package for your system from the
-[releases](https://github.com/andresayac/gpuzip/releases): `gpuzip` (`gpuzip.exe`), the rescue
-library next to it, and on Windows and Linux the GPU decoder. Put the folder on your PATH.
+Download your system's package from the
+[releases](https://github.com/andresayac/gpuzip/releases). It holds `gpuzip` (`gpuzip.exe` on
+Windows), the rescue library and, on Windows and Linux, the GPU decoder: keep them together in
+one folder and put that folder on your PATH (gpuzip looks for its libraries next to itself). Then
+`gpuzip doctor` says what it found. To update, replace the folder's files with the new package's.
 
-Or build it from source with [Rust](https://rustup.rs) and a C++ compiler:
+### Windows
+
+In PowerShell, from the folder you downloaded to (no administrator needed):
+
+```powershell
+Expand-Archive .\gpuzip-0.2.0-windows-x64.zip "$env:LOCALAPPDATA\Programs"
+Rename-Item "$env:LOCALAPPDATA\Programs\gpuzip-0.2.0-windows-x64" gpuzip
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:LOCALAPPDATA\Programs\gpuzip", "User")
+```
+
+Open a new terminal, and `gpuzip doctor`.
+
+### Linux
+
+x86-64, any distribution with glibc 2.35 or newer (built on Ubuntu 22.04):
+
+```sh
+mkdir -p ~/.local/opt
+tar -xzf gpuzip-0.2.0-linux-x64.tar.gz -C ~/.local/opt
+mv ~/.local/opt/gpuzip-0.2.0-linux-x64 ~/.local/opt/gpuzip
+echo 'export PATH="$HOME/.local/opt/gpuzip:$PATH"' >> ~/.bashrc
+```
+
+Open a new terminal, and `gpuzip doctor`.
+
+### macOS
+
+Apple silicon and Intel, one package (the GPU paths need NVIDIA's CUDA, which macOS lacks):
+
+```sh
+mkdir -p ~/.local/opt
+tar -xzf gpuzip-0.2.0-macos-universal.tar.gz -C ~/.local/opt
+mv ~/.local/opt/gpuzip-0.2.0-macos-universal ~/.local/opt/gpuzip
+xattr -dr com.apple.quarantine ~/.local/opt/gpuzip
+echo 'export PATH="$HOME/.local/opt/gpuzip:$PATH"' >> ~/.zshrc
+```
+
+`xattr` lifts the mark a browser puts on what it downloads, without which macOS refuses to run a
+program that is not signed. Open a new terminal, and `gpuzip doctor`.
+
+### 7-Zip (optional)
+
+[7-Zip](https://www.7-zip.org) 24 or later handles RAR, 7z, tar.xz and encrypted entries, which
+gpuzip hands to it: on Windows its installer (gpuzip finds it in its usual folder), on Linux
+7-Zip's own `7zz` on the PATH, on macOS `brew install sevenzip`.
+
+### nvCOMP (optional, ZIP on an NVIDIA GPU)
+
+On an NVIDIA GPU (Turing, RTX 20, or newer) gpuzip decodes large .gz and .tar.gz files with
+gpuinflate, which is in the package and needs only the NVIDIA driver. For ZIP files it can also
+use NVIDIA's nvCOMP, which is not in the package (it is NVIDIA's library). Most machines do not
+need it: gpuzip gives ZIP entries to the GPU only when that beats the CPU threads, which it does
+with 2 to 4 of them and not on an 8-core desktop CPU ([benchmarks](docs/benchmarks.md)). To add
+it, take it from pip (version 6) and copy its library next to gpuzip:
+
+```powershell
+python -m pip install "nvidia-libnvcomp-cu13<7"
+$nv = python -c "import nvidia.libnvcomp, os; print(os.path.dirname(nvidia.libnvcomp.__file__))"
+Copy-Item (Get-ChildItem $nv -Recurse -Filter nvcomp64_6.dll)[0].FullName "$env:LOCALAPPDATA\Programs\gpuzip"
+```
+
+```sh
+python3 -m venv ~/.local/share/nvcomp
+~/.local/share/nvcomp/bin/pip install "nvidia-libnvcomp-cu13<7"
+cp "$(find ~/.local/share/nvcomp -name 'libnvcomp.so.6' | head -1)" ~/.local/opt/gpuzip/
+```
+
+(PowerShell on Windows; on Linux in a venv of its own, which recent distributions require for
+pip: on Debian and Ubuntu `sudo apt install python3-venv` first.) Instead of copying it,
+`GPUZIP_NVCOMP_DIR` can name the folder that holds it. `gpuzip doctor` then says
+`nvCOMP 6... test decode ok`.
+
+### From source
+
+With [Rust](https://rustup.rs) and a C++ compiler:
 
 ```
 cargo build --release
@@ -90,10 +166,7 @@ sh gpuinflate/build.sh rescue                  # Linux, macOS (gpuinflate\build.
 cp gpuinflate/libgzrescue.* target/release/
 ```
 
-[7-Zip](https://www.7-zip.org) (24 or later) handles RAR, 7z, tar.xz and encrypted entries. The
-GPU paths need an NVIDIA driver and, for ZIP, NVIDIA's nvCOMP library; `gpuzip doctor` says what
-it found and where it looked. Everything else, and the GPU decoder:
-[docs/building.md](docs/building.md).
+Everything else, and the GPU decoder: [docs/building.md](docs/building.md).
 
 ## Usage
 

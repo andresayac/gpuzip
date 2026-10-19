@@ -69,7 +69,7 @@ and their results). New behavior comes with a test that fails without it.
 
 ## Releasing
 
-Set the version in `Cargo.toml`, give it a section in
-`CHANGELOG.md`, and push a tag `v<version>` on main. [release.yml](.github/workflows/release.yml)
+Set the version in `Cargo.toml` and in the README's install commands (the packages' names), give
+it a section in `CHANGELOG.md`, and push a tag `v<version>` on main. [release.yml](.github/workflows/release.yml)
 builds and checks the packages for Windows, Linux and macOS and drafts the release with them;
 publish it by hand after reading it over ([docs/building.md](docs/building.md#release-packages)).
