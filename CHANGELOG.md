@@ -1,33 +1,13 @@
 # Changelog
 
-## Unreleased
-
-### Rescue
-- A ZIP entry whose local header spells its name otherwise than the directory (in CP437 with
-  Info-ZIP's Unicode Path field, the directory in UTF-8) is rescued from its own header. Before,
-  every such entry of a sound archive was rescued as if its header were destroyed, partial,
-  and when bytes were written twice its left-over header came out as a second entry of that
-  name, written over the first: in a Python ZIP of 428 files resumed badly, 66 entries were
-  called intact while the files on disk under their names were partial copies.
-- An entry that does not come out intact is never written over a file of the same name that
-  another entry gave back intact.
-- A ZIP with something before it (a self-extractor's stub, another file's bytes) that lost its
-  directory, cut short, is rescued as a ZIP: one local header whose data ends where the next
-  header begins says so. Before, it was rescued as a lone Deflate stream and no file came back
-  (1 MB before a Python ZIP of 428 files, cut: 0 files, now 221 intact, as without the prefix).
-- A tar.gz's links are rescued: symbolic links as `x` makes them (on Windows without the right
-  to make them, hard links to the files they name and copies of folders, with a note), hard
-  links as links to the file they name. Before, a rescue wrote none, and said nothing:
-  linux-6.6.tar.gz, rescued sound, came back without its 63 links.
-
 ## 0.2.0 (2026-10-19)
 
 Extraction that hostile or odd archives cannot fool: entries whose bytes overlap are refused,
 names Windows takes for devices are kept, and nothing half written is left under a file's name.
 Files come out as they went in: exact times, Unix permissions, read-only, a tar's links on
 Windows, names in the code page they were written in. Rescue reads bzip2, LZMA, Zstandard and
-Deflate64 entries too (bzip2 block by block), in memory that grows with the damage, not the
-output. The Python version is gone, and the crate is at the repository's root.
+Deflate64 entries too (bzip2 block by block) and a tar's links, in memory that grows with the
+damage, not the output. The Python version is gone, and the crate is at the repository's root.
 
 ### Rescue
 - ZIP entries compressed with bzip2, LZMA, Zstandard or Deflate64 are rescued: each decoded (by
@@ -97,6 +77,22 @@ output. The Python version is gone, and the crate is at the repository's root.
   take almost any bits: in a gzip of one block, 60 KB of code with 512 bytes zeroed, a decode
   from a wrong place ended in a "final" block 188 bytes on, 5,474 bytes before the trailer, and
   21 wrong bytes were called exact.
+- A ZIP entry whose local header spells its name otherwise than the directory (in CP437 with
+  Info-ZIP's Unicode Path field, the directory in UTF-8) is rescued from its own header. Before,
+  every such entry of a sound archive was rescued as if its header were destroyed, partial,
+  and when bytes were written twice its left-over header came out as a second entry of that
+  name, written over the first: in a Python ZIP of 428 files resumed badly, 66 entries were
+  called intact while the files on disk under their names were partial copies.
+- An entry that does not come out intact is never written over a file of the same name that
+  another entry gave back intact.
+- A ZIP with something before it (a self-extractor's stub, another file's bytes) that lost its
+  directory, cut short, is rescued as a ZIP: one local header whose data ends where the next
+  header begins says so. Before, it was rescued as a lone Deflate stream and no file came back
+  (1 MB before a Python ZIP of 428 files, cut: 0 files, now 221 intact, as without the prefix).
+- A tar.gz's links are rescued: symbolic links as `x` makes them (on Windows without the right
+  to make them, hard links to the files they name and copies of folders, with a note), hard
+  links as links to the file they name. Before, a rescue wrote none, and said nothing:
+  linux-6.6.tar.gz, rescued sound, came back without its 63 links.
 
 ### Changed
 - The program's crate moved from `rust/` to the repository's root, as a Rust project's usually
