@@ -86,6 +86,16 @@
   instead of counting it among the GPU results that failed the CRC check.
 
 ### Fixed
+- ZIP names not flagged UTF-8 are read in the code page they were written in: on Windows the
+  system's OEM one, as Explorer and 7-Zip read them, and DOS's 437 elsewhere, as Info-ZIP's
+  unzip. Before, 437 everywhere: a Spanish Windows' `ADMINISTRACIÓN/` (code page 850) came out
+  `ADMINISTRACIαN/`, 437 having no capitals with accents, and names from a Japanese, Chinese
+  or Russian Windows came out garbled with no way to ask for better. `--codepage` now names the
+  page, as 7-Zip's `-mcp`: a number (932 Japanese, 936 Chinese, 949 Korean, 950 Traditional
+  Chinese, 866 Russian, 850, 852 and the other DOS pages, 1250-1258) or a label (`shift_jis`,
+  `gbk`, `cp850`), in `x`, `t`, `l` and `rescue`. Names that look written in another page (box
+  drawing, Greek or math signs, or three non-ASCII bytes in a row, where Western letters with
+  accents come one or two at a time) get a note saying so and naming the option.
 - `x` and `t` run in a terminal no longer wait up to 250 ms after their work for the thread
   that draws the progress line to wake: a ZIP of one entry takes 8 ms instead of 259 ms, 300
   small files extract in 90 ms instead of 260. With stderr redirected (scripts, benchmarks)

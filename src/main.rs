@@ -2,6 +2,7 @@
 //! entries go to nvCOMP in batches; gzip streams to gpuinflate, which decodes one stream in
 //! parallel. RAR, 7z and other tar.* archives go to 7-Zip.
 
+mod dospages;
 mod dylib;
 mod extract;
 mod gpu;
@@ -135,6 +136,11 @@ pub struct Opts {
     /// Path to 7-Zip (7z.exe, 7z or 7zz), if not in the usual place
     #[arg(long, value_name = "PATH")]
     pub sevenzip: Option<PathBuf>,
+    /// Code page of ZIP names not marked UTF-8: 932 (Japanese), 936 (Chinese), 949 (Korean),
+    /// 950 (Traditional Chinese), 866 (Russian), 850 (Western Europe), 852... [default: the
+    /// system's OEM one on Windows, as Explorer's; 437 elsewhere]
+    #[arg(long, value_name = "CODEPAGE")]
+    pub codepage: Option<String>,
     /// Print one JSON report per archive
     #[arg(long)]
     pub json: bool,
@@ -247,7 +253,7 @@ fn report(cmd: char, archive: &str, fmt: &str, o: &Outcome, opts: &Opts) {
             _ => "on the CPU",
         };
         let what = if fmt == "tar.gz" {
-            format!("{} files ({})", commas(files), human(bytes.min(u64::MAX)))
+            format!("{} file{} ({})", commas(files), if files == 1 { "" } else { "s" }, human(bytes.min(u64::MAX)))
         } else {
             Path::new(archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
         };
@@ -269,9 +275,10 @@ fn report(cmd: char, archive: &str, fmt: &str, o: &Outcome, opts: &Opts) {
             .map(|(i, how)| format!("{} {how}", commas(o.counts[*i].files)))
             .collect();
         say!(
-            "{} {} files ({}) in {} · {} · {} · {}",
+            "{} {} file{} ({}) in {} · {} · {} · {}",
             paint(BOLD, verb),
             commas(files),
+            if files == 1 { "" } else { "s" },
             human(bytes),
             paint(BOLD, format!("{:.2} s", o.seconds)),
             paint(INFO, format!("{gbps:.2} GB/s")),
@@ -403,6 +410,7 @@ fn process(cmd: char, path: &str, out_root: Option<PathBuf>, opts: &Opts) -> i32
     if zip::find_eocd(data).is_none() {
         return run_7z_archive(cmd, &archive, out_root, opts, None);
     }
+    zip::codepage_hint(); // forget names an archive before this one left
     let entries = match zip::read_entries(data) {
         Ok(e) => e,
         Err(e) => {
@@ -410,11 +418,16 @@ fn process(cmd: char, path: &str, out_root: Option<PathBuf>, opts: &Opts) -> i32
             return run_7z_archive(cmd, &archive, out_root, opts, Some(why));
         }
     };
+    let hint = zip::codepage_hint();
     if cmd == 'l' {
         list_entries(&entries, opts);
+        if let Some(h) = hint {
+            say!("  {}", paint(DIM, format!("Note: {h}")));
+        }
         return 0;
     }
-    let outcome = extract::Run::new(opts, &archive, data, &entries, out_root).run();
+    let mut outcome = extract::Run::new(opts, &archive, data, &entries, out_root).run();
+    outcome.notes.extend(hint);
     report(cmd, &archive, "zip", &outcome, opts);
     if outcome.failed.is_empty() { 0 } else { 2 }
 }
@@ -742,7 +755,9 @@ fn rescue_zip_file(archive: &str, data: &[u8], lib: &rescue::Rescue, out_root: P
     }
     // Office parts are kept in memory to rebuild the document; a docx starts with its content types
     let keep_parts = ziprescue::is_office_name(archive) || data.len() > 50 && &data[30..30 + 19.min(data.len() - 30)] == b"[Content_Types].xml";
+    zip::codepage_hint(); // forget names an archive before this one left
     let o = ziprescue::rescue_zip(data, lib, Some(&out_root), fill, keep_parts);
+    let hint = zip::codepage_hint();
     let secs = t0.elapsed().as_secs_f64();
     use ziprescue::Status;
     let count = |s: Status| o.entries.iter().filter(|e| e.status == s).count() as u64;
@@ -770,7 +785,7 @@ fn rescue_zip_file(archive: &str, data: &[u8], lib: &rescue::Rescue, out_root: P
                 "text_chars": f.text_chars, "rebuilt": f.rebuilt.as_ref().map(|p| p.display().to_string()),
                 "package_fixes": f.package_fixes,
             })),
-            "notes": o.notes, "ascii_transfer_undone": rescue::ascii_undone(), "crs_restored": o.crs_restored, "failed": o.failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
+            "notes": o.notes, "codepage_hint": hint, "ascii_transfer_undone": rescue::ascii_undone(), "crs_restored": o.crs_restored, "failed": o.failed.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
             "seconds": (secs * 1e4).round() / 1e4, "implementation": "rust",
         });
         say!("{}", ascii_json(&v));
@@ -840,6 +855,9 @@ fn rescue_zip_file(archive: &str, data: &[u8], lib: &rescue::Rescue, out_root: P
     }
     if o.crs_restored > 0 {
         say!("  {}", paint(INFO, format!("{} CRs lost to an ASCII-mode transfer put back, each entry's CRC confirming them", commas(o.crs_restored as u64))));
+    }
+    if let Some(h) = &hint {
+        say!("  {}", paint(INFO, format!("Note: {h}")));
     }
     if opts.verbose {
         for n in &o.notes {
@@ -956,6 +974,18 @@ fn doctor(opts: &Opts) -> i32 {
 
 fn main() {
     let cli = Cli::parse();
+    let opts = match &cli.command {
+        Command::Doctor { opts } | Command::X { opts, .. } | Command::T { opts, .. } | Command::L { opts, .. } | Command::Rescue { opts, .. } => opts,
+    };
+    match &opts.codepage {
+        Some(cp) => {
+            if let Err(e) = zip::set_codepage(cp) {
+                eprintln!("--codepage: {e}");
+                std::process::exit(1);
+            }
+        }
+        None => zip::use_system_codepage(),
+    }
     let rc = match &cli.command {
         Command::Doctor { opts } => doctor(opts),
         Command::X { archives, output, opts } => run_all('x', archives, output.clone(), opts),

@@ -21,6 +21,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 crc32fast = "1.5.2"
 crossbeam-channel = "0.5.17"
 deflate64 = "0.1.12" # rescue of Deflate64 ZIP entries
+encoding_rs = "0.8.35" # --codepage: ZIP names from Windows in another language
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 glob = "0.3.4"
 libdeflater = "1.26.1"

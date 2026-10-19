@@ -114,6 +114,7 @@ gpuzip doctor                     check the GPU, nvCOMP and 7-Zip
 | `-o DIR` | output folder (default: the archive's name, in the current folder) |
 | `--mode auto\|gpu\|cpu` | `auto` (default): GPU and CPU share the work, each where it is faster · `gpu`: all Deflate on the GPU · `cpu`: no GPU |
 | `--password PW` | password for encrypted entries (passed to 7-Zip) |
+| `--codepage CP` | code page of ZIP names not flagged UTF-8: `932` Japanese, `936` Chinese, `949` Korean, `866` Russian, `850`... (default: the system's OEM page on Windows, as Explorer reads them; 437 elsewhere) |
 | `-v`, `-q` | more detail (every damaged file and block, GPU timings) · print only failures |
 | `--json` | one JSON report per archive, for scripts |
 | `--fill N` | `rescue`: the byte written where the data cannot be known (default 0) |

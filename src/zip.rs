@@ -139,19 +139,34 @@ pub fn find_eocd(data: &[u8]) -> Option<usize> {
     (lowest..=data.len() - 22).rev().find(|&p| u32le(data, p) == 0x0605_4b50)
 }
 
+/// The code page names that say neither UTF-8 nor anything else are read in: its number, and
+/// either the upper half of a DOS page or another page encoding_rs decodes
+struct CodePage {
+    number: u16,
+    upper: Option<Vec<char>>,
+    other: Option<&'static encoding_rs::Encoding>,
+    /// Given with --codepage, not this system's
+    chosen: bool,
+}
+static CODEPAGE: OnceLock<CodePage> = OnceLock::new();
+/// Names that look written in another code page than the one they were read in, each once
+/// (a rescue reads a name twice)
+static FOREIGN: std::sync::Mutex<std::collections::BTreeSet<Vec<u8>>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn dos_upper(number: u16) -> Option<Vec<char>> {
+    crate::dospages::DOS_PAGES.iter().find(|(n, _)| *n == number).map(|(_, upper)| upper.chars().collect())
+}
+
 fn cp437() -> &'static [char] {
     static TABLE: OnceLock<Vec<char>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■\u{a0}"
-            .chars()
-            .collect()
-    })
+    TABLE.get_or_init(|| dos_upper(437).unwrap())
 }
 
 /// An entry's name. Without the UTF-8 flag the bytes are in the creating system's code page:
-/// CP437 from DOS and Windows tools, but Unix and macOS tools (Info-ZIP's zip among them) store
-/// a UTF-8 system's names as they are, without the flag, so a valid UTF-8 name from those is
-/// read as UTF-8. Info-ZIP's Unicode Path field, when its CRC matches the name, wins over both.
+/// its OEM one from DOS and Windows tools (437 in English, 850 in Western Europe, 932 in Japan...),
+/// but Unix and macOS tools (Info-ZIP's zip among them) store a UTF-8 system's names as they are,
+/// without the flag, so a valid UTF-8 name from those is read as UTF-8. Info-ZIP's Unicode Path
+/// field, when its CRC matches the name, wins over both.
 pub fn decode_name(raw: &[u8], utf8: bool, made_on_unix: bool, unicode_path: Option<String>) -> String {
     let raw = raw.split(|&b| b == 0).next().unwrap_or(raw);
     let name = if let Some(name) = unicode_path {
@@ -159,10 +174,100 @@ pub fn decode_name(raw: &[u8], utf8: bool, made_on_unix: bool, unicode_path: Opt
     } else if utf8 || (made_on_unix && std::str::from_utf8(raw).is_ok()) {
         String::from_utf8_lossy(raw).into_owned()
     } else {
-        let table = cp437();
-        raw.iter().map(|&b| if b < 0x80 { b as char } else { table[(b - 0x80) as usize] }).collect()
+        let page = CODEPAGE.get();
+        let name = decode_in(raw, page);
+        // Read in a Western page a name from a Japanese, Chinese, Korean or Russian Windows shows
+        // signs no name holds, box drawing, Greek or math, or 3 non-ASCII bytes in a row, where
+        // accented Latin letters come one or two at a time
+        let western = page.is_none_or(|p| !p.chosen && matches!(p.number, 437 | 850 | 858 | 860 | 861 | 863 | 865));
+        if western && looks_foreign(raw, &name) {
+            FOREIGN.lock().unwrap().insert(raw.to_vec());
+        }
+        name
     };
     name.replace('\\', "/")
+}
+
+fn decode_in(raw: &[u8], page: Option<&CodePage>) -> String {
+    match page.and_then(|p| p.other) {
+        Some(enc) => enc.decode_without_bom_handling(raw).0.into_owned(),
+        None => {
+            let upper = page.and_then(|p| p.upper.as_deref()).unwrap_or(cp437());
+            raw.iter().map(|&b| if b < 0x80 { b as char } else { upper[(b - 0x80) as usize] }).collect()
+        }
+    }
+}
+
+fn looks_foreign(raw: &[u8], name: &str) -> bool {
+    let mut run = 0;
+    let in_a_row = raw.iter().any(|&b| {
+        run = if b >= 0x80 { run + 1 } else { 0 };
+        run >= 3
+    });
+    let signs = name.chars().filter(|&c| matches!(c, '\u{2500}'..='\u{25ff}' | '\u{2200}'..='\u{22ff}' | '\u{2310}'..='\u{2321}' | '\u{370}'..='\u{3ff}')).count();
+    in_a_row || signs >= 2
+}
+
+/// Read names not marked UTF-8 in this code page: a Windows number (932 Japanese, 936 Chinese,
+/// 949 Korean, 950 Traditional Chinese, 866 Russian, 850 Western Europe, 852 Central Europe,
+/// 1250-1258...) or a label such as shift_jis, gbk or cp850, as 7-Zip's -mcp takes them
+pub fn set_codepage(spec: &str) -> Result<(), String> {
+    let page = codepage(spec, true).ok_or_else(|| {
+        format!("unknown code page {spec:?}: a number such as 932, 936, 949, 950, 866, 850 or 1251, or a label such as shift_jis")
+    })?;
+    let _ = CODEPAGE.set(page);
+    Ok(())
+}
+
+/// With no --codepage, read names in this system's OEM code page, as Explorer and 7-Zip do on
+/// Windows; DOS's 437 elsewhere, as Info-ZIP's unzip
+pub fn use_system_codepage() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetOEMCP() -> u32;
+        }
+        if let Some(page) = codepage(&unsafe { GetOEMCP() }.to_string(), false) {
+            let _ = CODEPAGE.set(page);
+        }
+    }
+}
+
+fn codepage(spec: &str, chosen: bool) -> Option<CodePage> {
+    use encoding_rs::*;
+    let spec = spec.trim().to_ascii_lowercase();
+    let digits = spec.trim_start_matches("cp").trim_start_matches("ibm").trim_start_matches("windows-");
+    let number: Option<u16> = digits.parse().ok();
+    let other = match number {
+        Some(n) if dos_upper(n).is_some() => return Some(CodePage { number: n, upper: dos_upper(n), other: None, chosen }),
+        Some(932) => SHIFT_JIS,
+        Some(936) => GBK,
+        Some(949) => EUC_KR,
+        Some(950) => BIG5,
+        Some(874) => WINDOWS_874,
+        Some(n @ 1250..=1258) => Encoding::for_label(format!("windows-{n}").as_bytes())?,
+        Some(65001) => UTF_8,
+        Some(_) => return None,
+        None => Encoding::for_label(spec.as_bytes())?,
+    };
+    Some(CodePage { number: number.unwrap_or(0), upper: None, other: Some(other), chosen })
+}
+
+/// The hint to give if names read since the last call looked written in another code page
+pub fn codepage_hint() -> Option<String> {
+    let n = std::mem::take(&mut *FOREIGN.lock().unwrap()).len();
+    let read_in = match CODEPAGE.get() {
+        Some(p) => format!("code page {} (this system's)", p.number),
+        None => "code page 437 (DOS's)".to_string(),
+    };
+    (n > 0).then(|| {
+        let (names, look) = if n == 1 { ("name", "looks") } else { ("names", "look") };
+        format!(
+            "{n} {names} not marked UTF-8, read in {read_in}, {look} written in another; if they come out garbled, \
+             --codepage 932 (Japanese), 936 (Chinese), 949 (Korean), 950 (Traditional Chinese) or 866 (Russian) reads them as that"
+        )
+    })
 }
 
 /// Info-ZIP's Unicode Path extra field (0x7075), when it is there and still matches the name: version
@@ -453,6 +558,29 @@ mod tests {
         assert_eq!(decode_name(b"caf\x82.txt", false, true, None), "café.txt");
         assert_eq!(decode_name(b"x\\y.txt", true, false, None), "x/y.txt");
         assert_eq!(decode_name(b"a.txt", false, false, Some("ä.txt".into())), "ä.txt");
+    }
+
+    #[test]
+    fn code_pages() {
+        use super::{codepage, decode_in, looks_foreign};
+        let page = |spec: &str| codepage(spec, true).unwrap();
+        // 850 has the capitals with accents 437 lacks: Ó is 0xE0 there, α in 437
+        assert_eq!(decode_in(b"ADMINISTRACI\xe0N", Some(&page("850"))), "ADMINISTRACIÓN");
+        assert_eq!(decode_in(b"ADMINISTRACI\xe0N", None), "ADMINISTRACIαN");
+        assert_eq!(decode_in(b"\x93\xfa\x96{\x8c\xea.txt", Some(&page("932"))), "日本語.txt");
+        assert_eq!(decode_in(b"\xd6\xd0\xce\xc4", Some(&page("gbk"))), "中文");
+        assert_eq!(decode_in(b"\xaf\xe0\xa8\xa2\xa5\xe2", Some(&page("cp866"))), "привет");
+        assert_eq!(decode_in(b"\x9d\xa2d\xab", Some(&page("ibm852"))), "Łódź");
+        assert_eq!(decode_in(b"\xce\xf2\xf7\xb8\xf2", Some(&page("windows-1251"))), "Отчёт");
+        assert_eq!(page("CP850").number, 850);
+        assert!(codepage("klingon", true).is_none() && codepage("1", true).is_none());
+        // what looks written in another page when read in a Western one, and what does not
+        assert!(looks_foreign(b"\x93\xfa\x96{", &decode_in(b"\x93\xfa\x96{", None)));
+        assert!(looks_foreign(b"\xaf\xe0\xa8\xa2\xa5\xe2", &decode_in(b"\xaf\xe0\xa8\xa2\xa5\xe2", Some(&page("850")))));
+        for (raw, latin) in [(&b"A\x80\xc7O E \xe0RG\xc7O"[..], "AÇÃO E ÓRGÃO"), (b"Informa\x87\xe4es", "Informações"), (b"Stra\xe1e/Gr\x94\xe1e", "Straße/Größe")] {
+            assert_eq!(decode_in(raw, Some(&page("850"))), latin);
+            assert!(!looks_foreign(raw, latin), "{latin}");
+        }
     }
 
     #[test]
