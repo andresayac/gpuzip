@@ -899,7 +899,7 @@ def main():
             info = tarfile.TarInfo(name)
             info.mtime = 1700000000 - (86400 if name == "lib" else 0)
             if kind == "dir":
-                info.type = tarfile.DIRTYPE
+                info.type, info.mode = tarfile.DIRTYPE, 0o755  # (tarfile's 644 is given too, last: not to be entered)
                 t.addfile(info)
             elif kind == "sym":
                 info.type, info.linkname = tarfile.SYMTYPE, payload
