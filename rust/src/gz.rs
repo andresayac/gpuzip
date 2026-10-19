@@ -468,6 +468,9 @@ fn make_links(root: &Path, canon_root: &Path, links: Vec<(String, PathBuf, PathB
                 left.push((name, rel, target));
                 continue;
             };
+            // a real link's target with \ only: Windows does not take / for one in a relative
+            // target, and such a link leads nowhere (CI: lib/alias.txt and ../../lib did)
+            let target = PathBuf::from(target.to_string_lossy().replace('/', "\\"));
             if !canon.starts_with(canon_root) || make_dirs_inside(canon_root, dst.parent().unwrap_or(root)).is_err() {
                 outside.push(name);
             } else if dst.symlink_metadata().is_ok() {
