@@ -807,8 +807,9 @@ def main():
     dev_gz = os.path.join(work, "nul.gz")
     if device_path("nul.gz") != "nul.gz":
         # Windows 10 takes nul.gz itself for the device: such a file is there only by the \\?\
-        # path (copied from Linux, say), which is how it is written here and given to gpuzip
-        dev_gz = "\\\\?\\" + os.path.abspath(dev_gz)
+        # path (copied from Linux, say), which is how it is written here and given to gpuzip;
+        # the name joined as it is, abspath() making the device of it (\\.\nul)
+        dev_gz = "\\\\?\\" + os.path.join(os.path.abspath(work), "nul.gz")
     open(dev_gz, "wb").write(gzip.compress(b"one file named nul", 6, mtime=0))
     for cmd in ("x", "rescue"):
         for label, path, want in (("zip", dev_zip, dev_files), ("tar.gz", dev_tgz, dev_files), (".gz named nul", dev_gz, {"nul": b"one file named nul"})):
@@ -827,6 +828,7 @@ def main():
             failures += not ok
             print(f"{'ok  ' if ok else 'FAIL'} {cmd} of a {label} holding device names: {len(written)} of {len(expect)} files back, "
                   f"renamed here: {ascii(renamed)}" + ("" if ok else f"; wrote {ascii(sorted(written))}, notes {ascii(rep.get('notes'))}"))
+    os.remove(dev_gz)  # by the path it was made by: on Windows 10 the plain one is the device
 
     # entries whose bytes overlap, the way zip bombs multiply their data: one stream named by 20
     # entries, and Fifield's, where each entry's stream opens with a stored block quoting the next
