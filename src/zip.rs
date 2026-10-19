@@ -262,7 +262,8 @@ pub fn codepage_hint() -> Option<String> {
         None => (437, "code page 437 (DOS's)".to_string()),
     };
     (n > 0).then(|| {
-        let (names, look) = if n == 1 { ("name", "looks") } else { ("names", "look") };
+        let (names, look, they, come, them) =
+            if n == 1 { ("name", "looks", "it", "comes", "it") } else { ("names", "look", "they", "come", "them") };
         let pages: Vec<String> = [(850, "Western Europe"), (932, "Japanese"), (936, "Chinese"), (949, "Korean"), (950, "Traditional Chinese"), (866, "Russian")]
             .iter()
             .filter(|(p, _)| *p != number)
@@ -270,8 +271,8 @@ pub fn codepage_hint() -> Option<String> {
             .collect();
         let (last, rest) = pages.split_last().unwrap();
         format!(
-            "{n} {names} not marked UTF-8, read in {read_in}, {look} written in another; if they come out garbled, \
-             --codepage {} or {last} reads them as that",
+            "{n} {names} not marked UTF-8, read in {read_in}, {look} written in another; if {they} {come} out garbled, \
+             --codepage {} or {last} reads {them} as that",
             rest.join(", ")
         )
     })
