@@ -1407,7 +1407,25 @@ struct Rescuer {
             }
             // damaged: keep what was decoded, restart at the next header, trust no window. A forced
             // piece that landed past the next header passed over an embedded stream's (an earlier
-            // pass found it in step): it restarts where it landed
+            // pass found it in step): it restarts where it landed. Nor is it restarted at a header
+            // that lies in a stored block this decode copied before it broke: such a header is a
+            // stream's inside the data, never this one's (measured: a tar holding a .gz, 1 KB of
+            // zeros over a stored block's length fields; the restart at the first header after
+            // the piece's start, in the .gz, took 60 of its 127-symbol blocks for the stream's,
+            // its habit then flagged every real block, and 82 of 87 files were lost)
+            if (!forced_bad || !(r.status == gi::OK && r.landed > 0)) {
+                uint64_t stored_to = 0;  // the end of the last stored block found to hold one, in bits
+                while (t0 < headers.size() && headers[t0].bit < r.end_bit) {
+                    if (headers[t0].bit < stored_to) {
+                        t0++;
+                        continue;
+                    }
+                    uint64_t to = stored_around(p, headers[t0].bit, true).second;
+                    if (to == 0) break;
+                    stored_to = to * 8;
+                    t0++;
+                }
+            }
             p.suspect = true;
             commit(p, k, false, false);
             if (forced_bad && r.status == gi::OK && r.landed > 0) t0 += r.landed;
