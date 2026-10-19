@@ -1,0 +1,30 @@
+{
+    "version": "0.2.1",
+    "description": "Get back what a damaged .gz, .tar.gz, .zip or Office file still holds, and extract archives fast on any CPU or an NVIDIA GPU",
+    "homepage": "https://github.com/andresayac/gpuzip",
+    "license": "MIT|Apache-2.0",
+    "suggest": {
+        "7-Zip": "7zip",
+        "Visual C++ runtime": "extras/vcredist2022"
+    },
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/andresayac/gpuzip/releases/download/v0.2.1/gpuzip-0.2.1-windows-x64.zip",
+            "hash": "c6019fc396ee469938ffc9c21f60a38f6abc386feb2a817b3f385d8bc8c502d1",
+            "extract_dir": "gpuzip-0.2.1-windows-x64"
+        }
+    },
+    "bin": "gpuzip.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/andresayac/gpuzip/releases/download/v$version/gpuzip-$version-windows-x64.zip",
+                "hash": {
+                    "url": "$baseurl/SHA256SUMS"
+                },
+                "extract_dir": "gpuzip-$version-windows-x64"
+            }
+        }
+    }
+}

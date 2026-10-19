@@ -72,4 +72,7 @@ and their results). New behavior comes with a test that fails without it.
 Set the version in `Cargo.toml` and in the README's install commands (the packages' names), give
 it a section in `CHANGELOG.md`, and push a tag `v<version>` on main. [release.yml](.github/workflows/release.yml)
 builds and checks the packages for Windows, Linux and macOS and drafts the release with them;
-publish it by hand after reading it over ([docs/building.md](docs/building.md#release-packages)).
+publish it by hand after reading it over ([docs/building.md](docs/building.md#release-packages)). Then
+bring the package managers up to the new version: `bucket/gpuzip.json` (Scoop) and
+`Formula/gpuzip.rb` (Homebrew) take its URLs and the SHA-256s in its `SHA256SUMS`, and winget a
+new folder in `packaging/winget`, sent to microsoft/winget-pkgs as a pull request.

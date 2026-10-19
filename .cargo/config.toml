@@ -1,0 +1,5 @@
+# Windows: the C runtime is linked into gpuzip.exe (crt-static, as the C++ libraries' /MT), so it
+# needs no Visual C++ Redistributable: without it a fresh Windows lacks VCRUNTIME140.dll, and
+# gpuzip would not start.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

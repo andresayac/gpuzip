@@ -56,6 +56,16 @@ And a Word document that 7-Zip opens 2 of 10 parts of, after an FTP transfer in 
 
 <img alt="gpuzip rescue puts back the CRs an FTP transfer removed from a Word document and rebuilds it" src="docs/img/demo-office.svg">
 
+### Compared with other recovery tools
+
+What each is made for, from its own documentation (the numbers above are measured; these are not):
+
+| Tool | What it does with a damaged archive | What gpuzip rescue adds |
+|---|---|---|
+| gzrecover (gzrt) | skips damaged gzip data until decoding works again, and writes all it decodes | says which bytes are certain, inferred or unknown; knows tar and ZIP, so files come back whole under their names |
+| Info-ZIP's `zip -FF` | rebuilds a lost central directory from the entries' own headers | also gets back the data inside a damaged entry, each entry checked by its CRC |
+| bzip2recover | splits a damaged .bz2 into its blocks, to be tested one by one | the same for bzip2 entries inside a ZIP, put back in place |
+
 How it works, what each status means and every measurement: [docs/rescue.md](docs/rescue.md).
 
 ## Speed

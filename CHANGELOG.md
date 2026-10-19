@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- On Windows the C runtime is linked into gpuzip.exe: it no longer needs Microsoft's Visual C++
+  Redistributable (VCRUNTIME140.dll), which a fresh Windows lacks and without which gpuzip did
+  not start. It imports only Windows' own libraries now.
+
+### Packaging
+- Manifests for Scoop (`bucket/gpuzip.json`, this repository as a bucket), Homebrew
+  (`Formula/gpuzip.rb`, this repository as a tap) and winget (`packaging/winget`, for
+  microsoft/winget-pkgs), and a picture for links to the repository (`docs/img/social-preview.png`,
+  `bench/social.py`).
+
 ## 0.2.1 (2026-10-19)
 
 nvCOMP, for ZIP files on an NVIDIA GPU, in one command and only where it pays: `gpuzip doctor`
