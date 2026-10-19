@@ -336,9 +336,25 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
     // (crosslinked: one of lib.zip's in the pptx, over the places of three of its entries). The
     // tasks go in the order of their headers, so the farthest reach is enough.
     let mut reach: (usize, String) = (0, String::new());
+    // The data of the directory's entries whose own local header was found, up to the next one's
+    // header at most (bytes lost before it make the size reach past): a header only the scan
+    // found in there is part of that entry (an archive stored in it, or a .jar in a tar that
+    // Deflate kept in stored blocks: silesia's mozilla, damaged, gave 3 of them as entries), even
+    // when the entry does not come out intact
+    let mut cd_heads: Vec<usize> = tasks.iter().filter(|t| !t.from_scan).map(|t| t.header_offset).collect();
+    cd_heads.sort_unstable();
+    let spans: Vec<(usize, usize)> = tasks
+        .iter()
+        .filter(|t| !t.from_scan)
+        .filter_map(|t| {
+            let (d, c) = (t.data_offset?, t.csize? as usize);
+            let next = cd_heads.iter().copied().find(|&h| h > t.header_offset).unwrap_or(data.len());
+            (c > 0).then_some((d, (d + c).min(next)))
+        })
+        .collect();
 
     for t in tasks {
-        if t.from_scan && t.header_offset < reach.0 {
+        if t.from_scan && (t.header_offset < reach.0 || spans.iter().any(|&(a, b)| a < t.header_offset && t.header_offset < b)) {
             o.inside += 1;
             continue;
         }
@@ -443,7 +459,7 @@ pub fn rescue_zip(data: &[u8], lib: &Rescue, root: Option<&Path>, fill: u8, keep
     }
     if o.inside > 0 {
         o.notes.push(format!(
-            "{} local header{} found inside the data of entries that came out intact (an archive stored in one): not entries of this one",
+            "{} local header{} found inside other entries' data (an archive stored in one, or another file's bytes written over it): not entries of this one",
             o.inside,
             if o.inside == 1 { "" } else { "s" }
         ));

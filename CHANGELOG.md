@@ -134,9 +134,11 @@
   bytes an earlier entry's CRC vouched for is not written (both bombs: one file of 100 and of
   10 MB). The same rule stops it writing other entries' data under a name when a directory's
   offsets are off (lib.zip resumed past a 512 KB gap: 110 such files, nothing in them right), and
-  local headers found inside an intact entry's data (an archive stored in one: 7 in lib.zip)
-  are no longer taken for entries, so a ZIP whose every entry is intact is called clean. The 66
-  damaged files of the realistic tests give back the same files as before.
+  local headers found inside another entry's data, damaged or not, are no longer taken for
+  entries (an archive stored in one: 7 in lib.zip; .jar files in silesia's mozilla, 3 junk files
+  in each damaged copy; another ZIP's bytes written over a cluster: 2), so a ZIP whose every
+  entry is intact is called clean. The 66 damaged files of the realistic tests give back the
+  same files of theirs as before.
 
 ### Removed
 - The Python version (`python/`), the first implementation, kept as a reference. It was never
