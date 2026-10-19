@@ -1157,5 +1157,30 @@ def main():
     return 1 if failures else 0
 
 
+class Annotated(io.TextIOBase):
+    """On GitHub Actions, each FAIL line also as an error annotation: anyone can read those
+    through the API, where a job's log needs a sign-in with rights to the repository"""
+
+    def __init__(self, out):
+        self.out, self.line = out, ""
+
+    def write(self, s):
+        self.out.write(s)
+        self.line += s
+        while "\n" in self.line:
+            line, self.line = self.line.split("\n", 1)
+            head = line.split(":", 1)[0]
+            exception = " " not in head and head.endswith(("Error", "Exception"))  # a traceback's last line
+            if line.startswith("FAIL") or exception:
+                self.out.write("::error title=test::" + line.replace("%", "%25").replace("\r", "%0D") + "\n")
+        return len(s)
+
+    def flush(self):
+        self.out.flush()
+
+
 if __name__ == "__main__":
+    if os.environ.get("GITHUB_ACTIONS"):
+        sys.stdout = Annotated(sys.stdout)
+        sys.stderr = Annotated(sys.stderr)
     sys.exit(main())
