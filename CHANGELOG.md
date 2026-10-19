@@ -64,6 +64,12 @@
   3.5 GB/s on text, 1 GB/s on streams that hardly compress) and by when a CPU thread would be
   free for them: a ROM ZIP of nine 750 MB parts tests in 2.48 s instead of 2.93 s, and with
   2 CPU threads in 4.29 s instead of 4.81 s.
+- A .tar.gz's files of up to 256 KB are written on several threads (`--io-threads`), as a ZIP's
+  are: creating files was most of the time where there are many, and one thread did it. 30,000
+  small files extract in 4.6 s instead of 12.3 on Windows (the same in a ZIP: 4.3 s), when
+  Defender leaves them alone; inspecting each, it still sets the pace (16.5 s instead of 18.5,
+  as for the ZIP). A path written twice keeps its last copy, and a link waits for the files
+  before it, as in a tar.
 - After a GPU error from gpuinflate, the entry and every large entry after it go to the CPU
   threads at once, and gpuinflate is not used again in that run. The note says what failed,
   instead of counting it among the GPU results that failed the CRC check.

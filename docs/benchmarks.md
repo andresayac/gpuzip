@@ -110,6 +110,10 @@ What this shows:
 - Small files pay a fixed cost: about 80 ms to create the CUDA context, plus set-up, so on
   128 MB rapidgzip still wins (0.15 s against 0.19 s).
 - Extracting a tar.gz of many files is limited by writing them (decoding takes about 0.7 s of
-  the 2.7 s); the tar extractor writes one file at a time.
+  the 2.7 s). Files of 256 KB or less are now written on several threads, as a ZIP's are, so a
+  tar.gz of 30,000 small files extracts in 4.6 s instead of 12.3 (a ZIP of the same: 4.3 s),
+  when Defender leaves the files alone (`gpuzip.exe` run from `%TEMP%`, above); when it inspects
+  each, 16.5 s instead of 18.5, as long as the ZIP takes. The 2,000 files above (700 KB on
+  average) are written as before, as they come.
 
 The charts are drawn from `bench/results.json` and `bench/results-gz.json` by `python bench/charts.py`.

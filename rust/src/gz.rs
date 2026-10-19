@@ -314,13 +314,17 @@ fn make_dirs_inside(canon_root: &Path, dir: &Path) -> io::Result<()> {
     inside(dir)
 }
 
-/// A tar's regular file, written whole or not at all, with its time and permissions as the tar
-/// crate sets them (a time of 0 as 1; on Windows, read-only when the owner may not write)
-fn write_tar_file<R: Read>(e: &mut tar::Entry<'_, R>, dst: &Path) -> io::Result<()> {
-    let mode = e.header().mode().unwrap_or(0o644);
+/// A tar entry's permissions and time, as the tar crate sets them (a time of 0 as 1)
+fn tar_mode_mtime<R: Read>(e: &tar::Entry<'_, R>) -> (u32, Option<std::time::SystemTime>) {
     let mtime = e.header().mtime().ok().map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(1)));
+    (e.header().mode().unwrap_or(0o644), mtime)
+}
+
+/// A tar's regular file, written whole or not at all, with its time and permissions (on
+/// Windows, read-only when the owner may not write)
+fn write_tar_file(dst: &Path, src: &mut impl Read, mode: u32, mtime: Option<std::time::SystemTime>) -> io::Result<()> {
     let mut f = OutFile::create(dst)?;
-    io::copy(e, &mut f)?;
+    io::copy(src, &mut f)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -336,10 +340,90 @@ fn write_tar_file<R: Read>(e: &mut tar::Entry<'_, R>, dst: &Path) -> io::Result<
     Ok(())
 }
 
-/// Extract (root given) or read through (none) a tar stream; with `list`, print each entry
-fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
+/// Files of a tar up to this size are read whole and written by TarWriters; larger ones by the
+/// reader as they come
+const TAR_SMALL: u64 = 256 << 10;
+
+enum TarJob {
+    File { name: String, dst: PathBuf, data: Vec<u8>, mode: u32, mtime: Option<std::time::SystemTime> },
+    Wait(crossbeam_channel::Sender<()>), // answered once every file sent before it is written
+}
+
+/// The small files of a tar, written on a pool of threads: where there are many, creating them
+/// is most of the time (30,000 files of a tar.gz on Windows: 0.37 s to decode, 13.4 s to write
+/// one after another; the same files from a ZIP, written on 16 threads, 4.2 s). The same path
+/// (in any case where names ignore it) always goes to the same thread, in order, so its last
+/// copy wins, as in a tar; a link waits for every file sent before it, which it may name.
+struct TarWriters {
+    txs: Vec<crossbeam_channel::Sender<TarJob>>,
+    handles: Vec<std::thread::JoinHandle<Vec<(String, String, u64)>>>,
+}
+
+impl TarWriters {
+    fn new(n: usize) -> TarWriters {
+        let (mut txs, mut handles) = (Vec::new(), Vec::new());
+        for _ in 0..n {
+            let (tx, rx) = bounded::<TarJob>(16); // at most 16 x 256 KB waiting on a thread
+            txs.push(tx);
+            handles.push(std::thread::spawn(move || {
+                let mut failed = Vec::new();
+                for job in rx {
+                    match job {
+                        TarJob::File { name, dst, data, mode, mtime } => {
+                            if let Err(x) = write_tar_file(&dst, &mut data.as_slice(), mode, mtime) {
+                                failed.push((name, x.to_string(), data.len() as u64));
+                            }
+                        }
+                        TarJob::Wait(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+                failed
+            }));
+        }
+        TarWriters { txs, handles }
+    }
+
+    /// The thread a path goes to
+    fn thread_of(&self, dst: &Path) -> usize {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let s = dst.to_string_lossy();
+        if cfg!(any(windows, target_os = "macos")) { s.to_lowercase().hash(&mut h) } else { s.hash(&mut h) }
+        (h.finish() % self.txs.len() as u64) as usize
+    }
+
+    /// Until every file sent so far to thread `which` (None: to all) is written
+    fn wait(&self, which: Option<usize>) {
+        let (done, back) = crossbeam_channel::unbounded();
+        let mut asked = 0;
+        for (i, tx) in self.txs.iter().enumerate() {
+            if which.is_none_or(|w| w == i) && tx.send(TarJob::Wait(done.clone())).is_ok() {
+                asked += 1;
+            }
+        }
+        for _ in 0..asked {
+            let _ = back.recv();
+        }
+    }
+
+    /// Every file written; those that failed, with their sizes
+    fn finish(self) -> Vec<(String, String, u64)> {
+        drop(self.txs);
+        self.handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    }
+}
+
+/// Extract (root given) or read through (none) a tar stream; with `list`, print each entry.
+/// `writers`: threads that write its small files.
+fn untar(reader: impl Read, root: Option<&Path>, list: bool, writers: usize) -> Untarred {
     let mut u = Untarred::default();
     let canon_root = root.map_or(Ok(PathBuf::new()), |r| r.canonicalize());
+    let pool = root.map(|_| TarWriters::new(writers.max(1)));
+    // folders already made or found inside the output folder; forgotten at a link, which could
+    // make a path lead elsewhere
+    let mut inside: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut ar = tar::Archive::new(reader);
     ar.set_preserve_mtime(true);
     ar.set_overwrite(true);
@@ -355,7 +439,7 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
             Ok(e) => e,
             Err(x) => {
                 u.error = Some(format!("tar archive is damaged: {x}"));
-                return u;
+                break;
             }
         };
         let name = e.path().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| "?".into());
@@ -372,11 +456,31 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
                 Ok(Some(rel)) if rel.as_os_str().is_empty() => {}
                 Ok(Some(rel)) => {
                     let dst = r.join(&rel);
+                    let dir = if kind.is_dir() { dst.clone() } else { dst.parent().unwrap_or(r).to_path_buf() };
                     let made = match &canon_root {
-                        Ok(c) => make_dirs_inside(c, if kind.is_dir() { &dst } else { dst.parent().unwrap_or(r) }),
+                        Ok(_) if inside.contains(&dir) => Ok(()),
+                        Ok(c) => make_dirs_inside(c, &dir).map(|_| {
+                            inside.insert(dir);
+                        }),
                         Err(x) => Err(io::Error::new(x.kind(), x.to_string())),
                     };
-                    let made = made.and_then(|_| if kind.is_dir() { Ok(()) } else { write_tar_file(&mut e, &dst) });
+                    let made = made.and_then(|_| {
+                        if kind.is_dir() {
+                            return Ok(());
+                        }
+                        let (mode, mtime) = tar_mode_mtime(&e);
+                        let pool = pool.as_ref().unwrap();
+                        let thread = pool.thread_of(&dst);
+                        if size <= TAR_SMALL {
+                            let mut data = Vec::with_capacity(size as usize);
+                            e.read_to_end(&mut data)?;
+                            let job = TarJob::File { name: name.clone(), dst: dst.clone(), data, mode, mtime };
+                            return pool.txs[thread].send(job).map_err(|_| io::Error::other("a writer thread stopped"));
+                        }
+                        // a large one as it comes, once an earlier copy of the same path is written
+                        pool.wait(Some(thread));
+                        write_tar_file(&dst, &mut e, mode, mtime)
+                    });
                     match made {
                         Ok(()) if device => u.renamed.push(format!(
                             "{name} uses a name this Windows takes for a device (what is written to one is lost): written as {}",
@@ -398,17 +502,26 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
                     continue;
                 }
             },
-            Some(r) => match e.unpack_in(r) {
-                Ok(true) => {}
-                Ok(false) => {
-                    u.failed.push((name, "path leaves the output folder; skipped".into()));
-                    continue;
+            Some(r) => {
+                if !kind.is_dir() {
+                    // a link, or anything else unpack_in makes: once every file before it is written
+                    if let Some(p) = &pool {
+                        p.wait(None);
+                    }
+                    inside.clear();
                 }
-                Err(x) => {
-                    u.failed.push((name, x.to_string()));
-                    continue;
+                match e.unpack_in(r) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        u.failed.push((name, "path leaves the output folder; skipped".into()));
+                        continue;
+                    }
+                    Err(x) => {
+                        u.failed.push((name, x.to_string()));
+                        continue;
+                    }
                 }
-            },
+            }
             None => {
                 if let Err(x) = io::copy(&mut e, &mut io::sink()) {
                     u.error = Some(format!("tar archive is damaged: {x}"));
@@ -421,8 +534,16 @@ fn untar(reader: impl Read, root: Option<&Path>, list: bool) -> Untarred {
             u.bytes += size;
         }
     }
+    // the files still being written, and those that could not be
+    for (name, x, size) in pool.map(TarWriters::finish).unwrap_or_default() {
+        u.failed.push((name, x));
+        u.files = u.files.saturating_sub(1);
+        u.bytes = u.bytes.saturating_sub(size);
+    }
     // the padding after the end-of-archive blocks, so the decoder's checks run to the end
-    let _ = io::copy(&mut ar.into_inner(), &mut io::sink());
+    if u.error.is_none() {
+        let _ = io::copy(&mut ar.into_inner(), &mut io::sink());
+    }
     u
 }
 
@@ -443,11 +564,12 @@ pub fn run(cmd: char, archive: &str, data: &[u8], out_root: Option<PathBuf>, opt
             let (tx, rx) = bounded::<Vec<u8>>(8);
             let root = out_root.clone();
             let list = cmd == 'l';
+            let writers = opts.io_threads.unwrap_or_else(|| crate::cpu_threads().min(32));
             let extractor = std::thread::spawn(move || {
                 if let Some(r) = &root {
                     let _ = std::fs::create_dir_all(r);
                 }
-                untar(Pipe { rx, cur: Vec::new(), pos: 0 }, root.as_deref(), list)
+                untar(Pipe { rx, cur: Vec::new(), pos: 0 }, root.as_deref(), list, writers)
             });
             let mut sink = |c: &[u8]| c.chunks(PIPE_CHUNK).all(|p| tx.send(p.to_vec()).is_ok());
             let r = decode(data, mode, &mut sink, &mut d);

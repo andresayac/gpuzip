@@ -792,6 +792,40 @@ def main():
               f"sharing its data, {len(files)} file of {written:,} bytes, exit {r.returncode}")
     shutil.rmtree(os.path.join(work, "overlap_out"), ignore_errors=True)
 
+    # a tar's small files are written on several threads: order must hold as in a tar. A path
+    # written twice keeps its last copy (the same path in another case too, where names ignore
+    # it), small or large; a hard link made right after its target sees the target whole
+    entries = [("dup.txt", b"first copy\n"), ("grow.bin", b"small first\n"), ("Case.txt", b"upper first\n")]
+    entries += [(f"many/f{i:04}.txt", f"file {i}\n".encode() * 20) for i in range(2000)]
+    entries += [("dup.txt", b"second copy, which must win\n"), ("grow.bin", bytes(range(256)) * 1500),
+                ("case.txt", b"lower last\n"), ("target.txt", b"a hard link names me\n" * 50)]
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as t:
+        for name, data in entries:
+            info = tarfile.TarInfo(name)
+            info.size, info.mtime = len(data), 1700000000
+            t.addfile(info, io.BytesIO(data))
+        link = tarfile.TarInfo("hard.txt")
+        link.type, link.linkname, link.mtime = tarfile.LNKTYPE, "target.txt", 1700000000
+        t.addfile(link)
+    order_tgz = os.path.join(work, "order.tar.gz")
+    open(order_tgz, "wb").write(gzip.compress(buf.getvalue(), 6, mtime=0))
+    out = os.path.join(work, "order_out")
+    shutil.rmtree(out, ignore_errors=True)
+    r = subprocess.run([*GPUZIP, "x", order_tgz, "-o", out], capture_output=True, text=True)
+    want = {name: data for name, data in entries}  # the last copy of each
+    if os.name == "nt" or sys.platform == "darwin":
+        want.pop("Case.txt")
+        case_file = next((n for n in os.listdir(out) if n.lower() == "case.txt"), "case.txt")
+        want[case_file] = b"lower last\n"
+    want["hard.txt"] = want["target.txt"]
+    wrong = [n for n, d in want.items() if not os.path.isfile(os.path.join(out, n)) or open(os.path.join(out, n), "rb").read() != d]
+    ok = r.returncode == 0 and not wrong
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} x of a tar.gz whose paths repeat, with a hard link: {len(want) - len(wrong)} of {len(want)} files right, "
+          f"exit {r.returncode}" + (f"; WRONG: {wrong[:5]} {r.stderr.strip()[-200:]}" if wrong else ""))
+    shutil.rmtree(out, ignore_errors=True)
+
     # an extraction killed while it writes a large file leaves no part of it under its name:
     # every file there must be whole (measured before: 184 MB of 400 left as big.bin in the
     # tar.gz, 344 of 400 from the .gz, 296 of 600 of the ZIP's entry). The ZIP's is past the

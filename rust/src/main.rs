@@ -117,7 +117,7 @@ pub struct Opts {
     /// CPU decode threads (default: all)
     #[arg(long)]
     pub threads: Option<usize>,
-    /// Threads writing GPU results (default: all, at most 32)
+    /// Threads writing files: GPU results, a tar's small files (default: all, at most 32)
     #[arg(long)]
     pub io_threads: Option<usize>,
     /// Max uncompressed MB per GPU batch
