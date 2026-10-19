@@ -116,6 +116,12 @@ damage, not the output. The Python version is gone, and the crate is at the repo
   instead of counting it among the GPU results that failed the CRC check.
 
 ### Fixed
+- On Windows, gpuzip's libraries (gzrescue, gpuinflate, nvCOMP) are never loaded from the
+  current folder: one not next to gpuzip.exe was asked for by its bare name, and Windows looks
+  in the current folder before PATH, so a DLL left there (beside a downloaded archive) ran
+  inside gpuzip. They come from gpuzip's folder, the folder their GPUZIP_*_DIR names, or PATH's
+  folders; the NVIDIA driver from System32; and whatever they load in turn from their own
+  folder, gpuzip's and System32.
 - On Windows without an NVIDIA GPU, `gpuzip doctor` and every `x` or `t` of a .gz or .tar.gz of
   8 MB or more in auto mode (the default) crashed (access violation): gpuinflate.dll, in the
   Windows package since 0.1.0, was loaded, and its CUDA runtime died without the driver. It is

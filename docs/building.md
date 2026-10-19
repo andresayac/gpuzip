@@ -17,8 +17,10 @@ cargo build --release
 The program is `target/release/gpuzip` (`gpuzip.exe` on Windows). It loads three
 libraries at run time, each optional: without one, that work goes to the CPU (or, for gzrescue,
 `gpuzip rescue` is not available). Each is looked for in the folder its variable names, next to
-the program, then on the system's search path (PATH on Windows, LD_LIBRARY_PATH and the linker
-cache on Linux):
+the program, then on the system's search path (PATH's folders on Windows, LD_LIBRARY_PATH and
+the linker cache on Linux). On Windows never in the current folder, where Windows itself would
+look before PATH: a DLL left beside an archive must not run inside gpuzip. The NVIDIA driver
+(`nvcuda.dll`) is taken from System32 only.
 
 | Library | Windows | Linux | macOS | Variable | For |
 |---|---|---|---|---|---|

@@ -1361,6 +1361,35 @@ def main():
     failures += not ok
     print(f"{'ok  ' if ok else 'FAIL'} zip slip entry refused, safe entry extracted")
 
+    # Windows: gpuzip.exe without its libraries beside it, run in a folder that holds one (a
+    # download's, say), must not load it: Windows looks in the current folder for a bare name
+    # before PATH. The folder named by GPUZIP_RESCUE_DIR, and PATH's folders, still serve.
+    rescue_dll = os.path.join(os.path.dirname(GPUZIP[0]), "gzrescue.dll")
+    if os.name == "nt" and os.path.isfile(rescue_dll):
+        alone, here = os.path.join(work, "exe_alone"), os.path.join(work, "dll_here")
+        for d in (alone, here):
+            shutil.rmtree(d, ignore_errors=True)
+            os.makedirs(d)
+        shutil.copy(GPUZIP[0], alone)
+        shutil.copy(rescue_dll, here)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GPUZIP_")}
+        env["PATH"] = os.pathsep.join(d for d in env.get("PATH", "").split(os.pathsep) if d and not os.path.isfile(os.path.join(d, "gzrescue.dll")))
+
+        def rescue_from(extra, cwd):
+            r = subprocess.run([os.path.join(alone, os.path.basename(GPUZIP[0])), "doctor"], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", cwd=cwd, env={**env, **extra})
+            line = next((l for l in r.stdout.splitlines() if l.startswith("rescue:")), "")
+            return line.split("loaded from ", 1)[1] if "loaded from " in line else None
+        planted = rescue_from({}, here)
+        dotted = rescue_from({"PATH": "." + os.pathsep + env["PATH"]}, here)
+        named = rescue_from({"GPUZIP_RESCUE_DIR": here}, alone)
+        on_path = rescue_from({"PATH": here + os.pathsep + env["PATH"]}, alone)
+        want = os.path.join(here, "gzrescue.dll").lower()
+        ok = planted is None and dotted is None and (named or "").lower() == want and (on_path or "").lower() == want
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} a gzrescue.dll in the current folder is not loaded (from there: {planted}, '.' on PATH: {dotted}); "
+              f"GPUZIP_RESCUE_DIR and PATH still serve: {named is not None}, {on_path is not None}")
+
     shutil.rmtree(work, ignore_errors=True)
     print(f"\n{'All tests passed' if not failures else f'{failures} test(s) failed'}")
     return 1 if failures else 0

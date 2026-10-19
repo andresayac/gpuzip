@@ -974,6 +974,7 @@ fn doctor(opts: &Opts) -> i32 {
 }
 
 fn main() {
+    dylib::harden();
     let cli = Cli::parse();
     let opts = match &cli.command {
         Command::Doctor { opts } | Command::X { opts, .. } | Command::T { opts, .. } | Command::L { opts, .. } | Command::Rescue { opts, .. } => opts,

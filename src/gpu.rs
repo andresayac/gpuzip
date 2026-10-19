@@ -108,7 +108,7 @@ pub fn driver_sees_gpu() -> Result<(), String> {
     READY
         .get_or_init(|| unsafe {
             let driver = CUDA_DRIVER.ok_or("no CUDA on this system")?;
-            let cuda = Library::new(driver).map_err(|_| format!("NVIDIA driver not found ({driver})"))?;
+            let cuda = dylib::system_library(driver).map_err(|_| format!("NVIDIA driver not found ({driver})"))?;
             let cu_init: unsafe extern "C" fn(u32) -> CuResult = sym(&cuda, b"cuInit\0")?;
             let cu_count: unsafe extern "C" fn(*mut i32) -> CuResult = sym(&cuda, b"cuDeviceGetCount\0")?;
             let cu_attr: unsafe extern "C" fn(*mut i32, i32, CuDevice) -> CuResult = sym(&cuda, b"cuDeviceGetAttribute\0")?;
@@ -147,7 +147,7 @@ impl Api {
     pub fn load() -> Result<Api, String> {
         unsafe {
             let driver = CUDA_DRIVER.ok_or("no CUDA on this system")?;
-            let cuda = Library::new(driver).map_err(|_| format!("NVIDIA driver not found ({driver})"))?;
+            let cuda = dylib::system_library(driver).map_err(|_| format!("NVIDIA driver not found ({driver})"))?;
             let (nvcomp, nvcomp_path) = dylib::load_first(nvcomp_candidates()).ok_or_else(|| {
                 format!(
                     "nvCOMP not found ({}): put it next to {} or set GPUZIP_NVCOMP_DIR",
