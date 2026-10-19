@@ -875,6 +875,32 @@ def main():
                   + (f"; CALLED INTACT BUT WRONG: {silent}" if silent else ""))
     shutil.rmtree(os.path.join(work, "method_out"), ignore_errors=True)
 
+    # a bzip2 entry of several blocks with 4 KB zeroed: each block stands alone, with its own
+    # CRC, so only the block under the zeros is lost, the others in place (before: only what came
+    # before the damage, 35% of such a file)
+    rnd = random.Random(13)
+    long_text = " ".join(rnd.choice(words) for _ in range(500000)).encode()  # 4 blocks of 900 KB
+    bz = os.path.join(work, "bzip2_blocks.zip")
+    with zipfile.ZipFile(bz, "w", zipfile.ZIP_BZIP2) as z:
+        z.writestr("long.txt", long_text)
+    blob = open(bz, "rb").read()
+    at = blob.find(b"BZh") + int(zipfile.ZipFile(bz).getinfo("long.txt").compress_size * 0.4)
+    open(bz, "wb").write(blob[:at] + bytes(4096) + blob[at + 4096:])
+    out = os.path.join(work, "bzip2_out")
+    shutil.rmtree(out, ignore_errors=True)
+    r = subprocess.run([*GPUZIP, "rescue", bz, "-o", out, "--json"], capture_output=True, text=True, encoding="utf-8")
+    try:
+        entry = json.loads(r.stdout.strip().splitlines()[-1])["entries"][0]
+    except (json.JSONDecodeError, IndexError, KeyError):
+        entry = {}
+    got = open(os.path.join(out, "long.txt"), "rb").read() if os.path.isfile(os.path.join(out, "long.txt")) else b""
+    in_place = sum(1 for x, y in zip(got, long_text) if x == y) / len(long_text)
+    ok = entry.get("status") == "partial" and len(got) == len(long_text) and in_place > 0.65  # a full block of 4 lost: 72%
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} rescue of a bzip2 entry of {len(long_text) // 900000 + 1} blocks, 4 KB zeroed: "
+          f"{100 * in_place:.0f}% right in place, {entry.get('status')} ({entry.get('detail', '')[:60]})")
+    shutil.rmtree(out, ignore_errors=True)
+
     # a BGZF file (bgzip's: members of 64 KB, each one's size in its BC extra subfield, an empty
     # member at the end) comes out whole in every mode; --mode gpu sends its small members to the
     # CPU, saying so (each call to the GPU costs about 10 ms: 3,200 members took 28.5 s, now 0.3)

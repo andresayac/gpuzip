@@ -582,6 +582,18 @@ fn recover_other(data: &[u8], t: &Task, start: usize, limit: usize) -> (Status, 
     let (bytes, err) = decode_other(t.method, t.flags, src, t.size, cap);
     let name = zip::method_name(t.method);
     let cut = t.csize.is_some_and(|c| ((end - start) as u64) < c);
+    // bzip2's blocks stand alone: one that breaks costs only itself
+    let whole = err.is_none() && t.crc.is_some_and(|c| crc32fast::hash(&bytes) == c);
+    if t.method == 12 && !whole {
+        if let Some((out, lost, detail)) = bzip2_blocks(src, t.size, cap) {
+            if lost == 0 && t.crc.is_some_and(|c| crc32fast::hash(&out) == c) && t.size.is_none_or(|s| s == out.len() as u64) {
+                return (Status::Intact, out, String::new(), 0, end - start);
+            }
+            if lost > 0 || out.len() > bytes.len() {
+                return (Status::Partial, out, detail, 0, 0);
+            }
+        }
+    }
     match (err, t.crc) {
         (None, Some(c)) if crc32fast::hash(&bytes) == c && t.size.is_none_or(|s| s == bytes.len() as u64) => {
             (Status::Intact, bytes, String::new(), 0, end - start)
@@ -595,6 +607,156 @@ fn recover_other(data: &[u8], t: &Task, start: usize, limit: usize) -> (Status, 
             (if n > 0 { Status::Partial } else { Status::Lost }, bytes, detail, 0, 0)
         }
     }
+}
+
+/// bzip2's CRC-32: MSB first, polynomial 0x04C11DB7, as each block stores its own
+fn bzip2_crc(data: &[u8]) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let t = TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let mut c = (i as u32) << 24;
+            for _ in 0..8 {
+                c = if c & 0x8000_0000 != 0 { c << 1 ^ 0x04C1_1DB7 } else { c << 1 };
+            }
+            *v = c;
+        }
+        t
+    });
+    !data.iter().fold(!0u32, |c, &b| c << 8 ^ t[((c >> 24) as u8 ^ b) as usize])
+}
+
+/// A bzip2 stream rescued block by block, as bzip2recover does. Every block begins with a 48-bit
+/// mark at any bit (0x314159265359) and its own CRC, and is decoded on its own: each is wrapped
+/// in a stream of one block and kept when its output has its CRC. A broken block costs only its
+/// own bytes, written as zeros: where it lay comes from the entry's size when one block is lost
+/// (exact), else from the sizes of the blocks around (close). A block whose mark is destroyed
+/// lies in the bits of the one before, which then spans about twice as many; it is lost after
+/// that one. Returns the output, how many blocks were lost, and what to say; None when no block
+/// mark is found.
+fn bzip2_blocks(src: &[u8], size: Option<u64>, cap: usize) -> Option<(Vec<u8>, usize, String)> {
+    const BLOCK: u64 = 0x3141_5926_5359;
+    const END: u64 = 0x1772_4538_5090;
+    let bits = src.len() as u64 * 8;
+    // the 48 bits from bit b, MSB first
+    let take = |b: u64, n: u32| -> u64 {
+        let mut v = 0u64;
+        for i in 0..n as u64 {
+            let at = b + i;
+            let bit = if at < bits { (src[(at / 8) as usize] >> (7 - at % 8)) & 1 } else { 0 };
+            v = v << 1 | bit as u64;
+        }
+        v
+    };
+    // every mark, bit by bit: a 64-bit window slid along the data
+    let mut marks: Vec<(u64, bool)> = Vec::new(); // (bit, is the end mark)
+    let mut window = 0u64;
+    for (i, &byte) in src.iter().enumerate() {
+        for k in 0..8 {
+            window = window << 1 | ((byte >> (7 - k)) & 1) as u64;
+            let n = i as u64 * 8 + k as u64 + 1;
+            if n >= 48 {
+                let w = window & 0xFFFF_FFFF_FFFF;
+                if w == BLOCK || w == END {
+                    marks.push((n - 48, w == END));
+                }
+            }
+        }
+    }
+    let blocks: Vec<(u64, u64)> = marks
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, end))| !end)
+        .map(|(k, &(b, _))| (b, marks.get(k + 1).map_or(bits, |&(n, _)| n)))
+        .collect();
+    if blocks.is_empty() {
+        return None;
+    }
+    let level = if src.len() > 3 && &src[..3] == b"BZh" && (b'1'..=b'9').contains(&src[3]) { src[3] } else { b'9' };
+    // each block, wrapped as a stream of its own: header, the block's bits, the end mark and a
+    // stream CRC equal to the block's, padded to a byte
+    let decode = |(from, to): (u64, u64)| -> Option<Vec<u8>> {
+        let crc = take(from + 48, 32) as u32;
+        let mut out = vec![b'B', b'Z', b'h', level];
+        let (mut acc, mut n) = (0u64, 0u32);
+        let mut put = |v: u64, w: u32, out: &mut Vec<u8>| {
+            for i in (0..w).rev() {
+                acc = acc << 1 | (v >> i) & 1;
+                n += 1;
+                if n == 8 {
+                    out.push(acc as u8);
+                    (acc, n) = (0, 0);
+                }
+            }
+        };
+        let mut b = from;
+        while b < to {
+            let w = (to - b).min(32) as u32;
+            put(take(b, w), w, &mut out);
+            b += w as u64;
+        }
+        put(END, 48, &mut out);
+        put(crc as u64, 32, &mut out);
+        if n > 0 {
+            out.push((acc << (8 - n)) as u8);
+        }
+        let (got, _) = decode_other(12, 0, &out, None, cap.min(64 << 20));
+        (!got.is_empty() && bzip2_crc(&got) == crc).then_some(got)
+    };
+    let decoded: Vec<Option<Vec<u8>>> = blocks.iter().map(|&r| decode(r)).collect();
+    // a good block spanning about twice the bits of the others holds a lost block after its own
+    let mut spans: Vec<u64> = blocks.iter().zip(&decoded).filter(|(_, d)| d.is_some()).map(|(&(a, b), _)| b - a).collect();
+    spans.sort_unstable();
+    let median_span = spans.get(spans.len() / 2).copied().unwrap_or(0);
+    let mut pieces: Vec<Option<Vec<u8>>> = Vec::new(); // in order; None: a lost block
+    for (k, d) in decoded.into_iter().enumerate() {
+        let (a, b) = blocks[k];
+        let swallowed = d.is_some() && median_span > 0 && k + 1 < blocks.len() && (b - a) * 2 > median_span * 3;
+        pieces.push(d);
+        if swallowed {
+            pieces.push(None);
+        }
+    }
+    let good: u64 = pieces.iter().flatten().map(|p| p.len() as u64).sum();
+    let lost = pieces.iter().filter(|p| p.is_none()).count();
+    // a lost block's size: a full block's, as every block but the stream's last is (the median of
+    // the good ones but the last); the last lost one takes what the entry's size leaves
+    let mut lens: Vec<u64> = pieces[..pieces.len() - 1].iter().flatten().map(|p| p.len() as u64).collect();
+    lens.sort_unstable();
+    let typical = lens.get(lens.len() / 2).copied().unwrap_or_else(|| pieces.iter().flatten().map(|p| p.len() as u64).max().unwrap_or(0));
+    let missing = size.map(|s| s.saturating_sub(good));
+    let mut out = Vec::new();
+    let mut gaps = Vec::new();
+    let mut left = lost;
+    for p in &pieces {
+        match p {
+            Some(b) => out.extend_from_slice(b),
+            None => {
+                left -= 1;
+                let given: u64 = gaps.iter().map(|&g| g as u64).sum();
+                let n = match missing {
+                    Some(m) if left == 0 => m.saturating_sub(given), // exact when one block is lost
+                    Some(m) => typical.min(m.saturating_sub(given)),
+                    None => typical,
+                } as usize;
+                gaps.push(n);
+                out.resize(out.len() + n, 0);
+            }
+        }
+    }
+    if let (Some(s), Some(m)) = (size, missing) {
+        if lost > 0 {
+            out.resize((good + m).min(s) as usize, 0);
+        }
+    }
+    let total = pieces.len();
+    let place = if lost <= 1 && size.is_some() { "in place" } else { "where full blocks would put them: not exact, as a block's size varies" };
+    let detail = format!(
+        "{} of {total} bzip2 blocks rescued, each checked by its own CRC; {lost} lost ({} bytes written as zeros, {place})",
+        total - lost,
+        gaps.iter().sum::<usize>()
+    );
+    Some((out, lost, detail))
 }
 
 /// Decode `src`, an entry's data of method `method`, into at most `cap` bytes: what came out, and
