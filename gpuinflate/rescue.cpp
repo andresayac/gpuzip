@@ -627,13 +627,29 @@ struct Rescuer {
 
     // Inside a fixed-Huffman block the codes resynchronize: a symbol boundary after e that
     // decodes cleanly from there on. bit UINT64_MAX: none.
-    gi::Start fixed_restart(uint64_t e, uint64_t limit) {
+    gi::Start fixed_restart(uint64_t e, uint64_t limit, bool gzip) {
         limit = std::min(limit, std::min(nbits, e + FIXED_SEARCH));
         for (uint64_t from = e + 1; from + 4096 * 8 < limit; from += 2048 * 8) {
             gi::Start p = dec.probe(in, size, gi::IN_FIXED, UINT64_MAX, from, from + 2048 * 8);
-            if (p.bit != UINT64_MAX && p.bit < limit && verify(p)) return p;
+            if (p.bit != UINT64_MAX && p.bit < limit && fixed_believed(p, gzip)) return p;
         }
         return {UINT64_MAX, UINT64_MAX, gi::AT_BLOCK, -1};
+    }
+
+    // The fixed codes take almost any bits, and a decode from a wrong place in a block soon reads
+    // an end of block and a "final" fixed block after it: such a decode is believed when it goes
+    // on long enough to trust, or ends where the stream must, its trailer the file's last bytes
+    // or another member after it, and not merely where no block header is left, as a final
+    // block is after the decode of a header (measured: 512 zero bytes in a 60 KB block of code
+    // with CR LF line ends; a decode from 3,400 bytes past them ended in a final block after 188
+    // bytes, 5,474 bytes before the trailer, and the 22 literals it wrote were called exact, 21
+    // of them wrong)
+    bool fixed_believed(const gi::Start& p, bool gzip) {
+        gi::Result r = dec.run(in, size, p, nullptr, 0, scratch.data(), (uint32_t)VERIFY_OUT, false);
+        if (r.status == gi::ERR_OVERFLOW) return r.blocks >= VERIFY_BLOCKS || r.out_len >= VERIFY_OUT - gi::MAX_SYMBOL_OUT;
+        if (r.status != gi::OK) return false;
+        uint64_t t = (r.end_bit + 7) / 8, next = gzip ? t + 8 : t;
+        return next == size || (gzip && next < size && gzip_header(in, size, next));
     }
 
     // Decode from s until it lands on one of the targets, ends the member, or fails; resolves
@@ -1434,7 +1450,7 @@ struct Rescuer {
                 continue;
             }
             // no header left to restart at: perhaps a fixed-Huffman block
-            gi::Start fx = fixed_restart(r.end_bit, nbits);
+            gi::Start fx = fixed_restart(r.end_bit, nbits, gzip);
             if (fx.bit == UINT64_MAX) {
                 o.notes.push_back("no block header after byte " + std::to_string(r.end_bit / 8) + ": the rest is lost");
                 break;

@@ -518,12 +518,15 @@ def main():
     # the damaged list.
     rust_src = os.path.join(HERE, "..", "src")
     names = ["ziprescue.rs"] + sorted(n for n in os.listdir(rust_src) if n.endswith(".rs") and n != "ziprescue.rs")
-    code = b"".join(open(os.path.join(rust_src, n), "rb").read() for n in names)
+    # with both line ends, whatever this checkout's: a Windows checkout's CR LF once hid a case
+    # that failed only on CI (a decode resynchronized at a false fixed-Huffman block)
+    code = b"".join(open(os.path.join(rust_src, n), "rb").read() for n in names).replace(b"\r\n", b"\n")
     repeated = b"gpuzip release check " * 200000
     cases = []
-    for n in (20000, 60000):
-        for zeros in (512, 64):
-            cases.append((f"{n // 1000} KB of code, {zeros} zero bytes", code[:n], 6, zeros))
+    for eol, text in (("LF", code), ("CR LF", code.replace(b"\n", b"\r\n"))):
+        for n in (20000, 60000):
+            for zeros in (512, 64):
+                cases.append((f"{n // 1000} KB of code ({eol}), {zeros} zero bytes", text[:n], 6, zeros))
     for level in (6, 9):  # level 6: the decoder falls back in step; level 9: it runs to the end
         cases.append((f"repetitive 4.2 MB (level {level}), 4096 zero bytes", repeated, level, 4096))
     for label, plain, level, zeros in cases:

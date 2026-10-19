@@ -71,6 +71,13 @@ output. The Python version is gone, and the crate is at the repository's root.
   bytes. Of 3,318 such entries in nine real ZIPs damaged eleven ways, 4 come back better (one
   from 2,325 bytes right to 284,706 of 566,666, one from 0 to 8,654 of 8,659), none worse.
 
+- A decode that resynchronizes inside a fixed-Huffman block, tried when no block header is left
+  after the damage, is believed only when it goes on long enough to trust or ends where the
+  stream must (its trailer the file's last bytes, or another member after it). The fixed codes
+  take almost any bits: in a gzip of one block, 60 KB of code with 512 bytes zeroed, a decode
+  from a wrong place ended in a "final" block 188 bytes on, 5,474 bytes before the trailer, and
+  21 wrong bytes were called exact.
+
 ### Changed
 - The program's crate moved from `rust/` to the repository's root, as a Rust project's usually
   is: `cargo build --release` there, and the program is `target/release/gpuzip`. The folder
