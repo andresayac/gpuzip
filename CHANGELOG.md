@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-10-19)
+
+nvCOMP, for ZIP files on an NVIDIA GPU, in one command and only where it pays: `gpuzip doctor`
+says whether it would here, and `gpuzip doctor --get-nvcomp` fetches it from PyPI.
 
 ### Added
 - `gpuzip doctor --get-nvcomp` downloads NVIDIA's nvCOMP 6 from PyPI (the wheel pip would take,

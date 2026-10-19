@@ -89,8 +89,8 @@ one folder and put that folder on your PATH (gpuzip looks for its libraries next
 In PowerShell, from the folder you downloaded to (no administrator needed):
 
 ```powershell
-Expand-Archive .\gpuzip-0.2.0-windows-x64.zip "$env:LOCALAPPDATA\Programs"
-Rename-Item "$env:LOCALAPPDATA\Programs\gpuzip-0.2.0-windows-x64" gpuzip
+Expand-Archive .\gpuzip-0.2.1-windows-x64.zip "$env:LOCALAPPDATA\Programs"
+Rename-Item "$env:LOCALAPPDATA\Programs\gpuzip-0.2.1-windows-x64" gpuzip
 [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:LOCALAPPDATA\Programs\gpuzip", "User")
 ```
 
@@ -102,8 +102,8 @@ x86-64, any distribution with glibc 2.35 or newer (built on Ubuntu 22.04):
 
 ```sh
 mkdir -p ~/.local/opt
-tar -xzf gpuzip-0.2.0-linux-x64.tar.gz -C ~/.local/opt
-mv ~/.local/opt/gpuzip-0.2.0-linux-x64 ~/.local/opt/gpuzip
+tar -xzf gpuzip-0.2.1-linux-x64.tar.gz -C ~/.local/opt
+mv ~/.local/opt/gpuzip-0.2.1-linux-x64 ~/.local/opt/gpuzip
 echo 'export PATH="$HOME/.local/opt/gpuzip:$PATH"' >> ~/.bashrc
 ```
 
@@ -115,8 +115,8 @@ Apple silicon and Intel, one package (the GPU paths need NVIDIA's CUDA, which ma
 
 ```sh
 mkdir -p ~/.local/opt
-tar -xzf gpuzip-0.2.0-macos-universal.tar.gz -C ~/.local/opt
-mv ~/.local/opt/gpuzip-0.2.0-macos-universal ~/.local/opt/gpuzip
+tar -xzf gpuzip-0.2.1-macos-universal.tar.gz -C ~/.local/opt
+mv ~/.local/opt/gpuzip-0.2.1-macos-universal ~/.local/opt/gpuzip
 xattr -dr com.apple.quarantine ~/.local/opt/gpuzip
 echo 'export PATH="$HOME/.local/opt/gpuzip:$PATH"' >> ~/.zshrc
 ```
@@ -137,7 +137,7 @@ gpuinflate, which is in the package and needs only the NVIDIA driver. For ZIP fi
 use NVIDIA's nvCOMP, which is not in the package (it is NVIDIA's library). Most machines do not
 need it: gpuzip gives ZIP entries to the GPU only when that beats the CPU threads, which it does
 with 2 to 4 of them and not on an 8-core desktop CPU ([benchmarks](docs/benchmarks.md));
-`gpuzip doctor` says which this machine is. To add it, from gpuzip 0.2.1 on:
+`gpuzip doctor` says which this machine is. To add it:
 
 ```
 gpuzip doctor --get-nvcomp
@@ -146,8 +146,8 @@ gpuzip doctor --get-nvcomp
 It downloads NVIDIA's package of nvCOMP 6 from PyPI (20 to 30 MB), checks it against the SHA-256
 PyPI gives, and puts the library and NVIDIA's license in your own folder (`%LOCALAPPDATA%\gpuzip`
 on Windows, `~/.local/share/gpuzip` on Linux), where gpuzip looks for it: no administrator, and
-an update of gpuzip leaves it there. With gpuzip 0.2.0, take it from pip and copy its library
-next to gpuzip:
+an update of gpuzip leaves it there. Or by hand (gpuzip 0.2.0 has no such command): take it from
+pip and copy its library next to gpuzip:
 
 ```powershell
 python -m pip install "nvidia-libnvcomp-cu13<7"

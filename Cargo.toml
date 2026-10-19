@@ -1,6 +1,6 @@
 [package]
 name = "gpuzip"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.87"
 description = "Recover what damaged .gz, .tar.gz, .zip and Office files still hold, and extract archives fast on the CPU or an NVIDIA GPU"
